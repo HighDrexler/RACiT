@@ -1,17 +1,62 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="600" height="176" viewBox="0 0 600 176" role="img" aria-labelledby="title">
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="250" viewBox="0 0 860 250" role="img" aria-labelledby="title desc">
   <title id="title">RACiT</title>
+  <desc id="desc">Custom RACiT wordmark with angular copper and steel lettering and a small clock above the lowercase i.</desc>
   <defs>
-    <linearGradient id="gold" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#f5dfa1"/>
-      <stop offset="1" stop-color="#ba8b37"/>
+    <linearGradient id="copper" x1="0" y1="54" x2="0" y2="193" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fff3ca"/><stop offset="0.12" stop-color="#ffcd77"/>
+      <stop offset="0.43" stop-color="#c67429"/><stop offset="0.46" stop-color="#8e3f1c"/>
+      <stop offset="0.55" stop-color="#d48232"/><stop offset="0.88" stop-color="#f2b95d"/>
+      <stop offset="1" stop-color="#a75b27"/>
     </linearGradient>
+    <linearGradient id="steel" x1="0" y1="54" x2="0" y2="193" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff"/><stop offset="0.15" stop-color="#d3eef2"/>
+      <stop offset="0.43" stop-color="#7398ab"/><stop offset="0.46" stop-color="#344e66"/>
+      <stop offset="0.55" stop-color="#7ab2c6"/><stop offset="0.88" stop-color="#e6f8f6"/>
+      <stop offset="1" stop-color="#698fa7"/>
+    </linearGradient>
+    <linearGradient id="edge" x1="0" y1="40" x2="0" y2="216" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#e5f5e9"/><stop offset="0.36" stop-color="#7d949c"/>
+      <stop offset="0.65" stop-color="#2e4859"/><stop offset="1" stop-color="#90dcdf"/>
+    </linearGradient>
+    <linearGradient id="depth" x1="0" y1="54" x2="0" y2="210" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#263746"/><stop offset="0.65" stop-color="#17232d"/>
+      <stop offset="1" stop-color="#335d6b"/>
+    </linearGradient>
+    <radialGradient id="dial">
+      <stop offset="0" stop-color="#22576a"/><stop offset="0.72" stop-color="#142d3f"/>
+      <stop offset="1" stop-color="#091b29"/>
+    </radialGradient>
+    <g id="warm" fill-rule="evenodd">
+      <path d="M58 54H155L188 77V116L165 137L194 193H147L110 143H97V193H58ZM97 83V113H143L150 105V91L139 83Z"/>
+      <path d="M224 193L259 54H310L361 193H315L307 166H259L252 193ZM268 133H297L282 87Z"/>
+    </g>
+    <g id="cool" fill-rule="evenodd">
+      <path d="M405 54H508L532 78L507 108L491 91H430L420 102V145L431 156H488L509 138L532 166L508 193H405L379 166V82Z"/>
+      <path d="M564 115H604V181L592 193H564Z"/>
+      <path d="M642 54H790L784 91H735V193H691V91H636Z"/>
+    </g>
+    <g id="letters">
+      <use href="#warm"/><use href="#cool"/><circle cx="584" cy="76" r="29"/>
+    </g>
   </defs>
-  <rect x="5" y="5" width="590" height="166" rx="24" fill="#193c32" stroke="#b99851" stroke-width="2"/>
-  <g fill="url(#gold)" fill-rule="evenodd">
-    <path d="M38 30H98L124 50V82L106 98L134 146H99L72 102H68V146H38ZM68 56V78H93L95 76V59L92 56Z"/>
-    <path d="M152 146L190 30H227L266 146H233L227 124H189L183 146ZM197 97H219L208 57Z"/>
-    <path d="M294 30H372V59H323V117H372V146H294L286 138V38Z"/>
-    <path d="M396 30H426V57H396ZM396 73H426V146H396Z"/>
-    <path d="M450 30H562V60H521V146H491V60H450Z"/>
+  <g transform="matrix(1 0 -0.16 1 40 0)" stroke-linejoin="miter">
+    <use href="#letters" transform="translate(9 12)" fill="url(#depth)" stroke="#0d1b27" stroke-width="18"/>
+    <use href="#letters" transform="translate(6 8)" fill="url(#depth)" stroke="url(#edge)" stroke-width="9"/>
+    <use href="#letters" fill="#233340" stroke="#0d1b27" stroke-width="18"/>
+    <use href="#letters" fill="#233340" stroke="url(#edge)" stroke-width="12"/>
+    <use href="#warm" fill="url(#copper)" stroke="#563523" stroke-width="5"/>
+    <use href="#cool" fill="url(#steel)" stroke="#203c50" stroke-width="5"/>
+    <g fill="none" stroke-linecap="square">
+      <path d="M64 187V60H153L181 80M230 187L264 60H306M265 160H311" stroke="#ffefbc" stroke-width="3"/>
+      <path d="M403 187L385 164V84L408 60H506M570 187V121H598M643 85L647 60H783M697 187V86" stroke="#eaffff" stroke-width="3"/>
+      <path d="M98 118H145L156 106V89M112 138L151 187H183M302 137H264M432 161H490L508 146M730 96V187" stroke="#132b3b" stroke-width="3" opacity="0.62"/>
+      <path d="M70 171V181M344 176L348 188" stroke="#713b20" stroke-width="3"/>
+      <path d="M397 164L410 177M718 170V181" stroke="#31566a" stroke-width="3"/>
+    </g>
+    <circle cx="584" cy="76" r="29" fill="url(#copper)" stroke="#263e4d" stroke-width="4"/>
+    <circle cx="584" cy="76" r="22" fill="url(#dial)" stroke="#e4f4ed" stroke-width="2"/>
+    <path d="M584 57V61M603 76H599M584 95V91M565 76H569" stroke="#86dbe2" stroke-width="2"/>
+    <path d="M574 69L584 76L594 63" fill="none" stroke="#ddffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="584" cy="76" r="3" fill="#ffd38b"/>
   </g>
 </svg>
