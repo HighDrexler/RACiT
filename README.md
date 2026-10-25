@@ -16,21 +16,21 @@ The Android target is ARM64. There is also a Linux build for debugging.
 
 ## Features
 
-- Vulkan-based RSX renderer
-- DualSense (PS5 controller) speaker and trigger support
-- Windows launcher preview
+- Vulkan-based RSX renderer for cleaner performance over emulation
+- DualSense (PS5 controller) speaker and trigger mod integrated
+- Windows launcher with mod and save/export/import support
 
 ## What you'll need
 
 Game data isn't included. You'll need your own decrypted dump of the **North American disc version (`BCUS98124`)**, including:
+ !!A LEGALLY DUMPED VERSION OF RATCHET AND CLANK FUTURE: A CRACK IN TIME (NO ASSESTS ARE OR WILL EVER BE INCLUDED WITH THIS PROJECT)!!
 
 - `EBOOT.ELF`
 - `USRDIR`
 
-Detailed installation and launch instructions will be added once confirmed.
-
 ## Current status
 
-This is a work in progress. Known issues include a reported freeze at level 14.
+This is a work in progress.
 
 RACiT is an unofficial project and is not affiliated with Sony, Insomniac Games, or the game's rights holders.
+Saves are currently not transferable between windows and android. Feature will be added in the future to sync saves between devices
