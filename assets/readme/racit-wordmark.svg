@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="600" height="176" viewBox="0 0 600 176" role="img" aria-labelledby="title">
+  <title id="title">RACiT</title>
+  <defs>
+    <linearGradient id="gold" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f5dfa1"/>
+      <stop offset="1" stop-color="#ba8b37"/>
+    </linearGradient>
+  </defs>
+  <rect x="5" y="5" width="590" height="166" rx="24" fill="#193c32" stroke="#b99851" stroke-width="2"/>
+  <g fill="url(#gold)" fill-rule="evenodd">
+    <path d="M38 30H98L124 50V82L106 98L134 146H99L72 102H68V146H38ZM68 56V78H93L95 76V59L92 56Z"/>
+    <path d="M152 146L190 30H227L266 146H233L227 124H189L183 146ZM197 97H219L208 57Z"/>
+    <path d="M294 30H372V59H323V117H372V146H294L286 138V38Z"/>
+    <path d="M396 30H426V57H396ZM396 73H426V146H396Z"/>
+    <path d="M450 30H562V60H521V146H491V60H450Z"/>
+  </g>
+</svg>
