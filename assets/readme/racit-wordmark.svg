@@ -28,7 +28,7 @@
     </radialGradient>
     <g id="warm" fill-rule="evenodd">
       <path d="M58 54H155L188 77V116L165 137L194 193H147L110 143H97V193H58ZM97 83V113H143L150 105V91L139 83Z"/>
-      <path d="M224 193L259 54H310L361 193H315L307 166H259L252 193ZM268 133H297L282 87Z"/>
+      <path d="M224 193L259 54H310L361 193H315L307 166H259L252 193ZM268 133H297L282 87Z" stroke-miterlimit="2"/>
     </g>
     <g id="cool" fill-rule="evenodd">
       <path d="M405 54H508L532 78L507 108L491 91H430L420 102V145L431 156H488L509 138L532 166L508 193H405L379 166V82Z"/>
@@ -47,11 +47,9 @@
     <use href="#warm" fill="url(#copper)" stroke="#563523" stroke-width="5"/>
     <use href="#cool" fill="url(#steel)" stroke="#203c50" stroke-width="5"/>
     <g fill="none" stroke-linecap="square">
-      <path d="M64 187V60H153L181 80M230 187L264 60H306M265 160H311" stroke="#ffefbc" stroke-width="3"/>
-      <path d="M403 187L385 164V84L408 60H506M570 187V121H598M643 85L647 60H783M697 187V86" stroke="#eaffff" stroke-width="3"/>
-      <path d="M98 118H145L156 106V89M112 138L151 187H183M302 137H264M432 161H490L508 146M730 96V187" stroke="#132b3b" stroke-width="3" opacity="0.62"/>
-      <path d="M70 171V181M344 176L348 188" stroke="#713b20" stroke-width="3"/>
-      <path d="M397 164L410 177M718 170V181" stroke="#31566a" stroke-width="3"/>
+      <path d="M64 187V60H153L181 80M230 187L264 60H306M265 160H301" stroke="#ffefbc" stroke-width="3"/>
+      <path d="M403 187L385 164V84L408 60H506M570 187V121H598M643 85L647 60H783M697 187V97" stroke="#eaffff" stroke-width="3"/>
+      <path d="M98 118H145L156 106V89M112 138L151 187H183M296 137H269M432 161H490L508 146M730 96V187" stroke="#132b3b" stroke-width="3" opacity="0.62"/>
     </g>
     <circle cx="584" cy="76" r="29" fill="url(#copper)" stroke="#263e4d" stroke-width="4"/>
     <circle cx="584" cy="76" r="22" fill="url(#dial)" stroke="#e4f4ed" stroke-width="2"/>
