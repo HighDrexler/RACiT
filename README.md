@@ -8,31 +8,29 @@
   <img src="assets/readme/Racitim1.jpg" alt="Two armored characters inside a gold circular frame against a green and gold background." width="560">
 </p>
 
-## Ratchet's adventure. A new way back.
+## About
 
-A favorite adventure deserves another trip through the galaxy. **RACiT** is building a new way back to **Ratchet & Clank: A Crack in Time**, with a static recompilation of the PlayStation 3 game targeting **Windows and Android (ARM64)**.
+RACiT is a project to bring **Ratchet & Clank: A Crack in Time** to Windows and Android through static recompilation. It takes the original PS3 code and converts it to native C/C++, using ps3recomp.
 
-## Familiar adventure, fresh foundations
+The Android target is ARM64. There is also a Linux build for debugging.
 
-- **A new native foundation.** Built on ps3recomp, RACiT lifts the game's PS3 PPU and SPU code into native C/C++.
-- **DualSense joins the adventure.** Integration includes the PS5 controller's speaker and triggers.
-- **Vulkan at the heart of rendering.** A Vulkan-based RSX renderer forms the project's graphics path.
+## Features
 
-## Where we're headed
+- Vulkan-based RSX renderer
+- DualSense (PS5 controller) speaker and trigger support
+- Windows launcher preview
 
-**Windows and Android (ARM64)** are target platforms. A **Windows launcher preview** exists, and a **Linux build** is intended for debugging.
+## What you'll need
 
-## Bring your own copy
-
-RACiT is an unofficial, personal-use project and ships no game data. You must supply your own decrypted dump of the **North American disc release, title ID `BCUS98124`**, including:
+Game data isn't included. You'll need your own decrypted dump of the **North American disc version (`BCUS98124`)**, including:
 
 - `EBOOT.ELF`
 - `USRDIR`
 
 Detailed installation and launch instructions will be added once confirmed.
 
-## Work in progress
+## Current status
 
-Known issues remain, including a reported level-14 freeze.
+This is a work in progress. Known issues include a reported freeze at level 14.
 
-RACiT is not affiliated with Sony, Insomniac Games, or the game's rights holders.
+RACiT is an unofficial project and is not affiliated with Sony, Insomniac Games, or the game's rights holders.
