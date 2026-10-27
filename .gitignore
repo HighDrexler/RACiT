@@ -1,0 +1,20 @@
+# Game data -- never commit
+input/
+*.ELF
+*.elf
+*.BIN
+*.SELF
+*.self
+*.sprx
+*.prx
+*.iso
+*.dkey
+# Generated and local
+out/
+analysis/
+game/src/recomp/
+game/spu/
+game/build*/
+launcher/build/
+tools/
+__pycache__/

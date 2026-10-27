@@ -1,0 +1,8 @@
+{
+  "id": "dualsense_plus",
+  "name": "DualSense Plus",
+  "version": "1.0",
+  "author": "RACiT",
+  "description": "PS5 DualSense extras: game sounds on the controller speaker, haptic feedback, adaptive triggers, the light bar, motion, and Fire on R2 (Rift Apart layout) with prompts to match. Off: every controller, a DualSense too, plays as a plain pad with the game's own layout and prompts. Your choices in Settings > Controls are kept while it is off.",
+  "settings": { "RACACIT_DUALSENSE_PLUS": "1" }
+}
