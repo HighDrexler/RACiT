@@ -10,15 +10,19 @@
 
 ## About
 
-RACiT is a project to bring **Ratchet & Clank: A Crack in Time** to Windows and Android through static recompilation. It takes the original PS3 code and converts it to native C/C++, using ps3recomp.
+RACiT is Recomped A Crack in Time.
 
-The Android target is ARM64. There is also a Linux build for debugging.
+RACiT is a project to bring **Ratchet & Clank: A Crack in Time** (the greatest game ever made) to Windows and Android through static recompilation. It takes the original PS3 code and converts it to native C/C++, using ps3recomp.
+
+The Android target is ARM64. There is also a Linux build for debugging (Android and Linux builds not yet public)
 
 ## Features
 
-- Vulkan-based RSX renderer for cleaner performance over emulation
+- Vulkan-based RSX renderer
 - DualSense (PS5 controller) speaker and trigger mod integrated
-- Windows launcher with mod and save/export/import support
+- General controller support for most windows compatible controllers.
+- Mouse and keyboard controls (bindable in the launcher)
+- Added toggles for enhanced internal resolution and graphics settings
 
 ## What you'll need
 
@@ -27,6 +31,9 @@ Game data isn't included. You'll need your own decrypted dump of the **North Ame
 
 - `EBOOT.ELF`
 - `USRDIR`
+
+-  After downloading the launcher, extract and run the .exe, which will take you through the setup process, which is importing your .iso directly or directing the launcher to your PS3GAME folder.
+ The game will also check for a decrypted EBOOT.elf, if your dumps .elf is showing as encrypted, the easier way to fix is with RPSC3.
 
 ## Current status
 
