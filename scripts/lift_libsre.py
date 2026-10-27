@@ -1,0 +1,150 @@
+#!/usr/bin/env python3
+"""Lift Sony's real SPURS library (libsre.prx) for LLE, per docs/FIRMWARE_LLE.md.
+
+Input: a DECRYPTED libsre.prx from your own firmware (RPCS3: Utilities ->
+Decrypt PS3 Binaries on dev_flash/sys/external/libsre.sprx).
+
+Steps:
+  1. lift_prx.py      -> relocated image at BASE + function seeds + exports
+  2. find libsre's own import glue stubs (lis r12,hi / lwz r12,lo(r12) against
+     each import slot) so the lifter turns them into ps3_hle_call(nid)
+  3. ppu_lifter.py --raw --base --toc --symbol-prefix libsre_ --hle-stubs
+  4. emit game/prx/libsre_module.c: embedded image + export table, consumed by
+     ps3_load_prx_modules() in game/stubs.cpp
+
+Everything produced here is firmware-derived: it stays local (gitignored).
+Usage: scripts/lift_libsre.py path/to/libsre.prx
+"""
+import json, os, struct, subprocess, sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PS3R_TOOLS = os.path.join(ROOT, "tools", "ps3recomp", "tools")
+BASE = 0x0C000000          # clear of the EBOOT image, stacks, TLS and heaps
+OUT = os.path.join(ROOT, "out", "libsre")
+DST = os.path.join(ROOT, "game", "prx", "libsre")
+
+sys.path.insert(0, PS3R_TOOLS)
+from lift_prx import Prx, be32, be16, cstr  # noqa: E402
+
+
+def import_slots(prx, img, base):
+    """{slot_ea: (lib, nid)} -- slot = the u32 cell the glue stub loads from."""
+    d, mi = prx.data, prx.modinfo_off
+    imp_start, imp_end = be32(d, mi + 0x2C), be32(d, mi + 0x30)
+    out, o = {}, imp_start
+    while o < imp_end:
+        size = img[o]
+        nfunc = be16(img, o + 6)
+        lib = cstr(img, be32(img, o + 16) - base) if be32(img, o + 16) else "?"
+        nid_tbl, stub_tbl = be32(img, o + 20), be32(img, o + 24)
+        for i in range(nfunc):
+            nid = be32(img, nid_tbl - base + i * 4)
+            out[stub_tbl + i * 4] = (lib, nid)              # the cell itself
+            out.setdefault(be32(img, stub_tbl - base + i * 4), (lib, nid))  # its content
+        o += size if size else 0x2C
+    return out
+
+
+def find_glue_stubs(img, base, slots):
+    stubs = []
+    for off in range(0, len(img) - 8, 4):
+        a, b = be32(img, off), be32(img, off + 4)
+        if (a & 0xFFFF0000) != 0x3D800000:          # lis r12, hi
+            continue
+        if (b & 0xFFFF0000) != 0x818C0000:          # lwz r12, lo(r12)
+            continue
+        lo = b & 0xFFFF
+        ea = ((a & 0xFFFF) << 16) + (lo - 0x10000 if lo & 0x8000 else lo)
+        ea &= 0xFFFFFFFF
+        if ea in slots:
+            lib, nid = slots[ea]
+            stubs.append({"library": lib, "nid": f"0x{nid:08x}", "stub": f"0x{base + off:x}"})
+    return stubs
+
+
+def main():
+    prx_path = sys.argv[1]
+    os.makedirs(OUT, exist_ok=True)
+    os.makedirs(DST, exist_ok=True)
+    subprocess.run([sys.executable, "-I", os.path.join(PS3R_TOOLS, "lift_prx.py"), prx_path,
+                    "--base", hex(BASE), "--output", OUT], check=True)
+    stem = os.path.splitext(os.path.basename(prx_path))[0]
+    exp = json.load(open(os.path.join(OUT, f"{stem}_exports.json")))
+    toc = exp["toc"]
+
+    prx = Prx(prx_path)
+    img, _ = prx.build_image(BASE)
+    slots = import_slots(prx, img, BASE)
+    stubs = find_glue_stubs(img, BASE, slots)
+    if not stubs:
+        # PRX form: each import-table entry holds the address of its 0x20-byte
+        # glue stub (li r12,0 / oris r12,r12,hi / lwz r12,lo(r12) / ... / bctr).
+        d, mi = prx.data, prx.modinfo_off
+        o, end = be32(d, mi + 0x2C), be32(d, mi + 0x30)
+        while o < end:
+            size = img[o]; nfunc = be16(img, o + 6)
+            lib = cstr(img, be32(img, o + 16) - BASE) if be32(img, o + 16) else "?"
+            nid_tbl, stub_tbl = be32(img, o + 20), be32(img, o + 24)
+            for i in range(nfunc):
+                stubs.append({"library": lib, "nid": f"0x{be32(img, nid_tbl - BASE + i*4):08x}",
+                              "stub": f"0x{be32(img, stub_tbl - BASE + i*4):x}"})
+            o += size if size else 0x2C
+    nimp = len({v for v in slots.values()})
+    print(f"glue stubs found: {len(stubs)} (imports: {nimp})")
+    stub_json = os.path.join(OUT, "libsre_hle_stubs.json")
+    json.dump(stubs, open(stub_json, "w"), indent=1)
+
+    subprocess.run([sys.executable, "-I", os.path.join(PS3R_TOOLS, "ppu_lifter.py"),
+                    os.path.join(OUT, f"{stem}_image.bin"), "--raw", "--base", hex(BASE),
+                    "--toc", toc, "--functions", os.path.join(OUT, f"{stem}_functions.json"),
+                    "--symbol-prefix", "libsre_", "--hle-stubs", stub_json,
+                    "--output", DST], check=True)
+
+    # Embedded image + exports for the runtime prx_loader.
+    exports = []
+    for lib, entries in exp["exports"].items():
+        for nid, opd in entries.items():
+            exports.append((int(nid, 16), int(opd, 16) - BASE, lib))
+    with open(os.path.join(ROOT, "game", "prx", "libsre_module.c"), "w") as f:
+        f.write("/* Generated by scripts/lift_libsre.py -- FIRMWARE-DERIVED, keep local. */\n"
+                "#include <stdint.h>\n#include \"prx_loader.h\"\n\n")
+        f.write(f"const uint32_t libsre_base = 0x{BASE:08X}u;\n")
+        f.write(f"const uint32_t libsre_toc  = {toc}u;\n")
+        f.write(f"const uint32_t libsre_image_size = {len(img)}u;\n")
+        f.write("const uint8_t libsre_image[] = {\n")
+        for i in range(0, len(img), 16):
+            f.write("  " + ",".join(f"0x{x:02X}" for x in img[i:i + 16]) + ",\n")
+        f.write("};\n\nconst prx_export libsre_exports[] = {\n")
+        for nid, va, lib in exports:
+            f.write(f"  {{0x{nid:08X}u, 0x{va:08X}u}},  /* {lib} */\n")
+        f.write(f"}};\nconst uint32_t libsre_export_count = {len(exports)}u;\n")
+    print(f"exports: {len(exports)}; image {len(img)} bytes; base 0x{BASE:08X} toc {toc}")
+
+    # libsre also embeds SPU programs (SPURS kernel, taskset policy module):
+    # lift them like the game's own SPU images, under their own registry.
+    spu_imgs = os.path.join(OUT, "spu_images")
+    subprocess.run([sys.executable, "-I", os.path.join(PS3R_TOOLS, "extract_spu_images.py"),
+                    prx_path, "--output", spu_imgs], check=False)
+    if os.path.isdir(spu_imgs) and os.listdir(spu_imgs):
+        # One registry for game + libsre SPU images: build_spu_workloads numbers
+        # image ids from 1 per run, so two runs would collide.
+        import shutil
+        allimg = os.path.join(ROOT, "out", "spu_images_all")
+        shutil.rmtree(allimg, ignore_errors=True)
+        os.makedirs(allimg)
+        for fn in os.listdir(os.path.join(ROOT, "out", "spu_images")):
+            shutil.copy(os.path.join(ROOT, "out", "spu_images", fn), allimg)
+        for fn in os.listdir(spu_imgs):
+            if fn.endswith(".elf"):
+                shutil.copy(os.path.join(spu_imgs, fn), os.path.join(allimg, "sre_" + fn))
+        spu_dst = os.path.join(ROOT, "game", "spu")
+        subprocess.run([sys.executable, "-I", os.path.join(PS3R_TOOLS, "build_spu_workloads.py"),
+                        "--images", allimg, "--lifted", spu_dst,
+                        "--out", os.path.join(spu_dst, "spu_workloads.c"),
+                        "--register-fn", "racacit_spu_register_all", "--constructor",
+                        "--title", "racacit"], check=True)
+        print("game + libsre SPU images lifted -> game/spu/ (one registry)")
+
+
+if __name__ == "__main__":
+    main()
