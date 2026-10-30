@@ -201,6 +201,48 @@ __attribute__((constructor)) static void racacit_register_npdrm(void)
     ps3_hle_register_ctx(0xF042B14Fu, "sceNpDrmIsAvailable2", racacit_npdrm_is_available);
 }
 
+/* ---------------------------------------------------------------------------
+ * Language (RACACIT_LANGUAGE: en, fr, es -- the launcher's Settings > Game).
+ * The title has no language menu of its own: it reads the PS3's system
+ * language (cellSysutilGetSystemParamInt, CELL_SYSUTIL_SYSTEMPARAM_ID_LANG)
+ * and loads that translation from the disc. The runtime's answer is always
+ * 1, English (US). This handler gives the chosen one instead and answers
+ * every other id exactly as the runtime's table does (v91: LANG and
+ * ENTER_BUTTON_ASSIGN 1 = Cross, 0x141 and 0x152 1, the rest of its known
+ * ids 0, unknown ids logged and 0). It is registered only for a language
+ * other than English, so an English game runs the runtime's own handler.
+ * -----------------------------------------------------------------------*/
+extern "C" void vm_write32(uint64_t a, uint32_t v);
+static uint32_t s_sys_lang = 1;   /* CELL_SYSUTIL_LANG_ENGLISH_US */
+static void racacit_get_system_param_int(ppu_context* ctx)
+{
+    const uint32_t id = (uint32_t)ctx->gpr[3], ea = (uint32_t)ctx->gpr[4];
+    if (!ea) { ctx->gpr[3] = (uint64_t)(int64_t)(int32_t)0x8002B002; return; }   /* CELL_SYSUTIL_ERROR_VALUE */
+    uint32_t v = 0;
+    switch (id) {
+    case 0x0111: v = s_sys_lang; break;                         /* LANG */
+    case 0x0112: case 0x0141: case 0x0152: v = 1; break;        /* ENTER_BUTTON_ASSIGN (Cross), 0x141, 0x152 */
+    case 0x0114: case 0x0115: case 0x0116: case 0x0117:
+    case 0x0121: case 0x0123: case 0x0151: case 0x0153: case 0x0156: v = 0; break;
+    default: fprintf(stderr, "[cellSysutil] GetSystemParamInt: unknown id 0x%04X\n", id); break;
+    }
+    vm_write32(ea, v);
+    ctx->gpr[3] = 0;
+}
+extern "C" void racacit_register_language(void)   /* main.cpp, after ppu_hle_init */
+{
+    const char* e = getenv("RACACIT_LANGUAGE");
+    if (!e || !*e) return;
+    char l[16] = {0};
+    for (int i = 0; e[i] && i < 15; i++) l[i] = (char)((e[i] >= 'A' && e[i] <= 'Z') ? e[i] + 32 : e[i]);
+    /* CELL_SYSUTIL_LANG_*: 1 English (US), 2 French, 3 Spanish. */
+    if (!strcmp(l, "fr") || !strcmp(l, "french") || !strcmp(l, "2")) s_sys_lang = 2;
+    else if (!strcmp(l, "es") || !strcmp(l, "spanish") || !strcmp(l, "3")) s_sys_lang = 3;
+    else return;   /* English, or not one the disc has */
+    ps3_hle_register_ctx(0x40E895D3u, "cellSysutilGetSystemParamInt", racacit_get_system_param_int);
+    fprintf(stderr, "[racacit] language: %s (system language %u)\n", s_sys_lang == 2 ? "French" : "Spanish", s_sys_lang);
+}
+
 extern "C" const char* racacit_lua_last_exec(void);
 /* racacit: luaD_throw (0x50A83C) hook -- print the error object (Lua 5.1
  * layout: L->top at +8, 16-byte TValue with tt at +8, TString body at +16). */
@@ -235,7 +277,9 @@ extern "C" void racacit_lua_exec_hook(ppu_context* ctx)
     int k = 0;
     if (p) for (; k < 599 && vm_base[p + k]; k++) t_last_exec[k] = (char)vm_base[p + k];
     t_last_exec[k] = 0;
-    if (getenv("RACACIT_LUA_EXEC_TRACE")) fprintf(stderr, "[lua] execute(\"%s\")\n", t_last_exec);
+    static int trace = -1;   /* the environment once, not a getenv per script call */
+    if (trace < 0) trace = getenv("RACACIT_LUA_EXEC_TRACE") ? 1 : 0;
+    if (trace) fprintf(stderr, "[lua] execute(\"%s\")\n", t_last_exec);
 }
 extern "C" const char* racacit_lua_last_exec(void) { return t_last_exec; }
 
@@ -374,8 +418,9 @@ extern "C" void racacit_luac_trace(ppu_context* ctx, const char* name)
  * Its world-space bounding sphere (moby+0x70, x y z r -- kept current by the
  * same job) says where the box must be: when the stored box's centre is more
  * than a radius from the sphere's centre in today's camera space, the box is
- * rebuilt around that point. A current box -- every moving moby's -- is left
- * exactly as computed. patch_lift.py calls this before the box is read.
+ * rebuilt around that point, and from then on follows the sphere every frame
+ * for as long as the game leaves it untouched. A box the game keeps current
+ * is left exactly as computed. patch_lift.py calls this before the box is read.
  * RACACIT_KEEP_STALE_BOXES=1 turns it off.
  * -----------------------------------------------------------------------*/
 extern "C" void vm_write32(uint64_t a, uint32_t v);
@@ -402,9 +447,26 @@ extern "C" void racacit_caster_box(uint32_t moby)
     const float by = 0.5f * (racacit_rdf(moby + 0xA4) + racacit_rdf(moby + 0xB4));
     const float bz = 0.5f * (racacit_rdf(moby + 0xA8) + racacit_rdf(moby + 0xB8));
     const float dx = bx - cx, dy = by - cy, dz = bz - cz;
-    if (dx * dx + dy * dy + dz * dz <= r * r) return;            /* current */
+    /* A box this function wrote and the game has not rewritten since is
+     * stale by definition: follow the sphere every frame. Waiting for a
+     * radius of drift (the old rule) let a moving caster leave its box
+     * behind -- the map is fitted to the box, so the part outside was cut
+     * off in a straight line and the shadow jumped back each rebuild: the
+     * owner's boxy shadows (worst on the moons' large static casters). */
+    enum { OWN = 256 };
+    static struct { uint32_t moby; float lo_x, hi_z; } own[OWN];
+    const uint32_t k = (moby >> 4) & (OWN - 1);
+    const int ours = own[k].moby == moby && own[k].lo_x == racacit_rdf(moby + 0xA0) && own[k].hi_z == racacit_rdf(moby + 0xB8);
+    if (!ours && dx * dx + dy * dy + dz * dz <= r * r) return;   /* the game's current box */
+    /* RACACIT_CASTER_LOG=1: each rebuild, with the box the game had (size) and the cube it gets. */
+    { static int lg = -1; if (lg < 0) { const char* e = getenv("RACACIT_CASTER_LOG"); lg = (e && *e == '1') ? 1 : 0; }
+      static unsigned n; if (lg && !ours && n < 400) { n++;
+        fprintf(stderr, "[caster-box] moby 0x%08X r=%.1f old %.1fx%.1fx%.1f at (%.1f %.1f %.1f) -> cube %.1f at (%.1f %.1f %.1f)%c",
+                moby, r, racacit_rdf(moby + 0xB0) - racacit_rdf(moby + 0xA0), racacit_rdf(moby + 0xB4) - racacit_rdf(moby + 0xA4),
+                racacit_rdf(moby + 0xB8) - racacit_rdf(moby + 0xA8), bx, by, bz, 2 * r, cx, cy, cz, 10); } }
     racacit_wrf(moby + 0xA0, cx - r); racacit_wrf(moby + 0xA4, cy - r); racacit_wrf(moby + 0xA8, cz - r);
     racacit_wrf(moby + 0xB0, cx + r); racacit_wrf(moby + 0xB4, cy + r); racacit_wrf(moby + 0xB8, cz + r);
+    own[k].moby = moby; own[k].lo_x = racacit_rdf(moby + 0xA0); own[k].hi_z = racacit_rdf(moby + 0xB8);
 }
 
 /* ---------------------------------------------------------------------------
@@ -612,6 +674,208 @@ extern "C" uint32_t racacit_level_change(uint32_t level)
 }
 
 /* ---------------------------------------------------------------------------
+ * Collision command record: a late "done" write-back must not land on the
+ * next command (the Great Clock D freeze, v91 and v93; docs/dev/HANDOFF.md
+ * "RE-DIAGNOSIS").
+ *
+ * The PPU writes a 160-byte collision command record (0x00F3CE00 in the
+ * owner's logs) and the broad-phase job (B9B580) posts work items for it. The
+ * narrow-phase job CollNarrow (B8A980) runs on several SPU lanes at once: each
+ * claims an item, fetches the record, and ends the item by writing the
+ * record's +0x10 quad back from that fetched copy with bit 15 ("done") set in
+ * the type halfword at +0x18 (its F5E8; the broad phase does the same at
+ * 0x1790 when it posted nothing). On a PS3 that write lands long before the
+ * PPU writes the next command. Here a lane thread the OS deschedules for a few
+ * ms can write it AFTER: the new command then reads "old type 4, done"
+ * (0x8004), the lane that claims its item indexes the finish-callback table at
+ * LS 0x14F2C with 0x8004, branches into data and dies, and the main thread
+ * waits on the record forever.
+ *
+ * The record's line is marked in the coherence bitmap, so every PPU store into
+ * it takes the lock-line lock and reaches spu_coh_notify_write; a store into
+ * the +0x10 quad bumps the record's generation. A lane's fetch of the record
+ * (copied under the same lock) remembers the generation, and its write-back is
+ * dropped if the PPU has written the quad since -- the state a PS3 ends in
+ * (its write lands first and the PPU's overwrites it). Logged as "[collrec]
+ * stale done-mark dropped"; RACACIT_COLLREC_KEEP=1 logs it but lets the write
+ * through (the old behaviour). A narrow-phase fetch of a record already marked
+ * done is logged as well, with which phase marked it and in which command.
+ * ------------------------------------------------------------------------- */
+extern "C" void spu_lockline_lock(void);
+extern "C" void spu_lockline_unlock(void);
+extern "C" void spu_coh_reserve(void* ctx, uint32_t ea);
+extern "C" void (*g_coh_write_hook)(uint32_t ea);
+extern "C" int  (*g_spu_get_copy_hook)(void*, const uint8_t*, uint32_t, uint32_t, uint32_t, uint8_t*, const uint8_t*);
+extern "C" int  (*g_spu_put_skip_hook)(void*, const uint8_t*, uint32_t, uint32_t, uint32_t);
+static const uint32_t kCollGuid[2] = { 0x43593402u, 0x4248D602u };   /* job GUID at LS 0x100: narrow, broad */
+static const uint32_t kCollCopy[2] = { 0x14F60u, 0xCA00u };          /* where each keeps its copy of the record */
+static const char* const kCollWho[2] = { "narrow-phase", "broad-phase" };
+extern "C" int  spu_coh_is_reserved(uint32_t addr);
+extern "C" void spu_coh_unreserve_line(uint32_t ea);
+struct CollRec  { uint32_t ea, gen, done_gen, inc; int done_by, owned, marked; unsigned long long last_prod; };
+struct CollSnap { const void* spu; uint32_t ea, gen, inc; };
+struct CollLog  { int kind, k, done_by; uint32_t ea, type, gen_was, gen_now, done_gen; };
+/* Besides a few fixed records (0x00F3CE00, the one in both owner freezes, is
+ * rewritten every frame) the game cycles through rings of them (0x205DF780,
+ * +0xA0, ...): ~4100 distinct ones in Great Clock D, each reused about every
+ * 2 s -- far longer than any lane is held up, so they cannot race. Only a
+ * record the broad phase fetches again within 500 ms (a new command) gets its
+ * line marked and its write-backs checked. v94 marked every one: ~3,000 lines,
+ * and 160-180k PPU stores a second into records took the locked path ([mem],
+ * 2026-10-30). The rest stay in the table for that timing only. Kept at most
+ * half full; when new pools fill it, it starts over and the lines it marked
+ * go back to the lock-free path. `inc` tells a lane's copy from before a
+ * restart from the record's new entry: that one write goes unchecked. */
+enum { kCollSlots = 16384, kCollMax = kCollSlots / 2 };
+static CollRec s_crec[kCollSlots];      /* this block's state: written under the lock-line lock; ea 0 = free */
+static int s_crec_n;
+static uint32_t s_crec_inc;
+static long s_crec_resets, s_crec_drops, s_crec_fetched_done;
+static thread_local CollSnap t_csnap[2];
+static thread_local CollLog t_clog;     /* filled under the lock, printed after it */
+static int collrec_keep(void) { static int v = -1; if (v < 0) { const char* e = getenv("RACACIT_COLLREC_KEEP"); v = (e && *e == '1') ? 1 : 0; } return v; }
+static inline uint32_t collrec_be32(const uint8_t* p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
+static int collrec_find(uint32_t ea, bool add)
+{
+    if (!ea) return -1;
+    for (uint32_t h = ((ea >> 4) * 0x9E3779B1u) >> 18, p = 0; p < kCollSlots; p++) {
+        const int i = (int)((h + p) & (kCollSlots - 1));
+        if (s_crec[i].ea == ea) return i;
+        if (s_crec[i].ea) continue;
+        if (!add) return -1;
+        s_crec[i] = CollRec{ ea, 0u, 0u, ++s_crec_inc, -1, 0, 0, 0ull };
+        s_crec_n++;
+        return i;
+    }
+    return -1;
+}
+/* From here on the PPU's stores into the record come through the lock. */
+static void collrec_mark(CollRec& r)
+{
+    r.owned = !spu_coh_is_reserved(r.ea + 0x10u);
+    spu_coh_reserve(nullptr, r.ea + 0x10u);
+    r.marked = 1;
+}
+static void collrec_reset(void)
+{
+    for (int i = 0; i < kCollSlots; i++)
+        if (s_crec[i].ea && s_crec[i].marked && s_crec[i].owned) spu_coh_unreserve_line(s_crec[i].ea + 0x10u);
+    memset(s_crec, 0, sizeof s_crec);
+    s_crec_n = 0;
+    s_crec_resets++;
+}
+
+static void racacit_collrec_print(void)
+{
+    const CollLog l = t_clog;
+    t_clog.kind = 0;
+    if (l.kind == 1) {
+        if (s_crec_drops <= 16 || (s_crec_drops & 63) == 0)
+            fprintf(stderr, "[collrec] stale done-mark %s (#%ld): a %s lane wrote back record 0x%08X (type 0x%04X) "
+                            "after the PPU had written the next command (gen %u -> %u)\n",
+                    collrec_keep() ? "KEPT (RACACIT_COLLREC_KEEP)" : "dropped", s_crec_drops, kCollWho[l.k],
+                    l.ea, l.type, l.gen_was, l.gen_now);
+    } else if (l.kind == 3) {
+        fprintf(stderr, "[collrec] protecting collision record 0x%08X (a new command %u us after the last)\n",
+                l.ea, l.gen_now);
+    } else if (l.kind == 4) {
+        fprintf(stderr, "[collrec] record table full (%d records): restarted (#%ld) at record 0x%08X\n",
+                (int)kCollMax, s_crec_resets, l.ea);
+    } else if (l.kind == 2) {
+        if (s_crec_fetched_done <= 16 || (s_crec_fetched_done & 255) == 0)
+            fprintf(stderr, "[collrec] narrow-phase lane fetched record 0x%08X already marked done (type 0x%04X, #%ld); "
+                            "last done-mark: %s, %s\n", l.ea, l.type, s_crec_fetched_done,
+                    l.done_by >= 0 ? kCollWho[l.done_by] : "none seen",
+                    l.done_by < 0 ? "-" : l.done_gen == l.gen_now ? "this command" : "an EARLIER command");
+    }
+}
+
+/* Every DMA GET. A protected record's fetch is copied here, under the lock. */
+extern "C" unsigned long long ps3_qpc_us(void);
+static int racacit_collrec_get(void* spu, const uint8_t* ls, uint32_t lsa, uint32_t ea, uint32_t size,
+                               uint8_t* dst, const uint8_t* src)
+{
+    if (size != 0xA0u) return 0;
+    if (t_clog.kind) racacit_collrec_print();
+    const int k = lsa == kCollCopy[0] ? 0 : lsa == kCollCopy[1] ? 1 : -1;
+    if (k < 0 || collrec_be32(ls + 0x100) != kCollGuid[k]) return 0;
+    spu_lockline_lock();
+    int i = collrec_find(ea, false);
+    if (i < 0) {
+        if (s_crec_n >= kCollMax) { collrec_reset(); t_clog = CollLog{ 4, k, -1, ea, 0u, 0u, 0u, 0u }; }
+        i = collrec_find(ea, true);
+        if (i < 0) { spu_lockline_unlock(); return 0; }
+    }
+    CollRec& r = s_crec[i];
+    if (k == 1) {                                   /* the broad phase: once per command */
+        const unsigned long long now = ps3_qpc_us();
+        if (!r.marked && r.last_prod && now - r.last_prod < 500000ull) {
+            collrec_mark(r);
+            static int s_told;
+            if (s_told++ < 8) t_clog = CollLog{ 3, k, -1, ea, 0u, 0u, (uint32_t)(now - r.last_prod), 0u };
+        }
+        r.last_prod = now;
+    }
+    if (!r.marked) {                                /* reused too rarely to race: the plain copy */
+        t_csnap[k].spu = nullptr;
+        spu_lockline_unlock();
+        if (k == 0 && (src[0x18] & 0x80u)) {
+            s_crec_fetched_done++;
+            t_clog = CollLog{ 2, k, r.done_by, ea, (uint32_t)src[0x18] << 8 | src[0x19], 0u, r.gen, r.done_gen };
+            racacit_collrec_print();
+        }
+        return 0;
+    }
+    memcpy(dst, src, size);
+    t_csnap[k] = CollSnap{ spu, ea, r.gen, r.inc };
+    if (k == 0 && (dst[0x18] & 0x80u)) {
+        s_crec_fetched_done++;
+        t_clog = CollLog{ 2, k, s_crec[i].done_by, ea, (uint32_t)dst[0x18] << 8 | dst[0x19], 0u, s_crec[i].gen, s_crec[i].done_gen };
+    }
+    spu_lockline_unlock();
+    if (t_clog.kind) racacit_collrec_print();
+    return 1;
+}
+
+/* A DMA PUT into a reserved line, lock-line lock held: 1 drops the copy. */
+static int racacit_collrec_put(void* spu, const uint8_t* ls, uint32_t lsa, uint32_t ea, uint32_t size)
+{
+    if (size != 16u) return 0;
+    const int k = lsa == kCollCopy[0] + 0x10u ? 0 : lsa == kCollCopy[1] + 0x10u ? 1 : -1;
+    if (k < 0) return 0;
+    const CollSnap s = t_csnap[k];
+    if (s.spu != spu || ea != s.ea + 0x10u || collrec_be32(ls + 0x100) != kCollGuid[k]) return 0;
+    const int i = collrec_find(s.ea, false);
+    if (i < 0 || s_crec[i].inc != s.inc) return 0;     /* table restarted since this copy: unchecked, as before */
+    CollRec& r = s_crec[i];
+    const uint8_t* q = ls + lsa;
+    if (r.gen == s.gen || collrec_keep()) {
+        if (q[8] & 0x80u) { r.done_gen = s.gen; r.done_by = k; }
+        if (r.gen == s.gen) return 0;
+    }
+    s_crec_drops++;
+    t_clog = CollLog{ 1, k, -1, s.ea, (uint32_t)q[8] << 8 | q[9], s.gen, r.gen, 0u };
+    return collrec_keep() ? 0 : 1;
+}
+
+/* A PPU (or SPU atomic) write into a reserved line, lock-line lock held. The
+ * +0x10 quad is 16-aligned, so a store into it names its record by address
+ * (the PPU writes it in halfwords and words, none straddling the quad). */
+static void racacit_collrec_write(uint32_t ea)
+{
+    if (!s_crec_n) return;
+    const int i = collrec_find((ea & ~15u) - 0x10u, false);
+    if (i >= 0) s_crec[i].gen++;
+}
+
+__attribute__((constructor)) static void racacit_collrec_install(void)
+{
+    g_coh_write_hook    = racacit_collrec_write;
+    g_spu_get_copy_hook = racacit_collrec_get;
+    g_spu_put_skip_hook = racacit_collrec_put;
+}
+
+/* ---------------------------------------------------------------------------
  * Frame-wait hooks (scripts/patch_lift.py step 10): the entry and the exit
  * of the game's SPU waits -- job_wait func_00696614 and batch_wait
  * func_00660924. render_build_views (func_004DFDF0) makes ~9 submit/wait
@@ -668,8 +932,15 @@ static std::mutex s_ws_lock;
 void func_005004BC(ppu_context* ctx);
 extern "C" PPU_THREAD_LOCAL void (*g_trampoline_fn)(void*);
 static volatile uint32_t s_lua_main;
+static const char* racacit_lua_file_path(void)
+{
+    static const char* path = (const char*)1;
+    if (path == (const char*)1) path = getenv("RACACIT_LUA_FILE");
+    return path;
+}
 static void racacit_lua_note_state(uint32_t L)
 {
+    if (!racacit_lua_file_path()) return;   /* only the test hook needs it: no guest reads per script call otherwise */
     if (!L || L >= 0x40000000u) return;
     const uint32_t G = vm_read32(L + 16u);
     if (!G || G >= 0x40000000u) return;
@@ -679,8 +950,7 @@ static void racacit_lua_note_state(uint32_t L)
 }
 static void racacit_lua_file(ppu_context* ctx, uint32_t L)
 {
-    static const char* path = (const char*)1;
-    if (path == (const char*)1) path = getenv("RACACIT_LUA_FILE");
+    const char* path = racacit_lua_file_path();
     if (!path || !L) return;
     static unsigned long long next;
     const unsigned long long now = ps3_qpc_us();

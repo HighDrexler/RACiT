@@ -70,10 +70,15 @@ private:
     ID2D1HwndRenderTarget* hrt_ = nullptr;
     ID2D1SolidColorBrush* br_ = nullptr;
     IDWriteTextFormat* fmt_[F_COUNT] = {};
+    IDWriteInlineObject* ell_[F_COUNT] = {};    // each font's "..." for cut-off text, made once
     HWND hwnd_ = nullptr;
     float w_ = 0, h_ = 0, dpi_ = 96;
     struct Img { fs::path path; ID2D1Bitmap* bmp = nullptr; float w = 0, h = 0; };
     Img imgs_[4];
+    // Images that are not there (no game art yet) or would not decode: not looked for
+    // again every frame, only once a second.
+    struct Miss { fs::path path; ULONGLONG retry = 0; };
+    Miss miss_[4];
     bool make_target();
     void drop_target();
     ID2D1SolidColorBrush* brush(uint32_t c);

@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <ctime>
 #include <functional>
 #include <thread>
 #include <vector>
@@ -16,8 +17,8 @@
 #include "gfx.h"
 #include "store.h"
 
-static const char* kLauncherVersion = "0.8";
-enum { WM_APP_TASK = WM_APP + 1, WM_APP_GAME_EXIT, TIMER_TICK = 1 };
+static const char* kLauncherVersion = "0.9";
+enum { WM_APP_TASK = WM_APP + 1, WM_APP_GAME_EXIT, WM_APP_UPDATE, TIMER_TICK = 1 };
 
 // ---- screen model ------------------------------------------------------------------------
 enum Kind { K_BUTTON, K_OPTION, K_HEADER, K_FIELD };
@@ -223,6 +224,9 @@ static const std::vector<Opt>& opts()
         { "Keyboard and mouse", "RACACIT_KBM", "Play with keyboard and mouse", "1", { { "1", "On" }, { "0", "Off" } } },
         { "Keyboard and mouse", "RACACIT_MOUSE_SENS", "Mouse sensitivity", "1", { { "0.25", "25%" }, { "0.5", "50%" }, { "0.75", "75%" }, { "1", "100%" }, { "1.25", "125%" }, { "1.5", "150%" }, { "2", "200%" }, { "3", "300%" }, { "4", "400%" } } },
         { "Keyboard and mouse", "RACACIT_MOUSE_INVERT_Y", "Invert mouse Y", "0", { { "0", "Off" }, { "1", "On" } } },
+        // The disc's own translations: the game picks its language from the PS3's system
+        // language, which the build answers from this (game/stubs.cpp). Unset = English.
+        { "Game", "RACACIT_LANGUAGE", "Language", "", { { "", "English" }, { "fr", "Français (French)" }, { "es", "Español (Spanish)" } } },
         { "Game", "RACACIT_START_SKIPS_MOVIES", "START skips movies", "1", { { "1", "Yes" }, { "0", "No" } } },
         { "Game", "RACACIT_ALL_CUTSCENES_SKIPPABLE", "Every cutscene skippable", "1", { { "1", "Yes" }, { "0", "No (as the game)" } } },
         { "Game", "RACACIT_SPACE_FREE_LANDING", "Land anywhere in space", "1", { { "1", "Yes" }, { "0", "No (as the game)" } } },
@@ -299,6 +303,30 @@ static void add_elf_picked(const fs::path& p)
                  "from (BCUS98124, version 1.00 -- not an update's). The game may not start with it.", "Use it anyway", put);
 }
 
+// An earlier launcher's folder (Store::migrate_from_launcher).
+static void bring_over_launcher(const fs::path& old)
+{
+    const std::string name = u8(old.filename());
+    confirm("Bring over 0.8", "From " + name + ". Copies its saves, settings, shader caches and save backups into this launcher, and plays its game from "
+            "where it is. Save slots with the same name are replaced; the saves here are backed up first. " + name + " itself is not changed.",
+            "Bring it over", [old] {
+        std::string* sum = new std::string();
+        run_task("Bringing over " + u8(old.filename()), [old, sum](Progress* pr) { return S->migrate_from_launcher(old, pr, sum); },
+                 [sum](const std::string& r) { done_or_error("Done", *sum, r); delete sum; if (r.empty()) set_screen(home); });
+    });
+}
+static void pick_old_launcher()
+{
+    const fs::path p = pick_folder(g_hwnd, L"Pick your 0.8 launcher's folder (it holds RaCACiT Launcher.exe and data)");
+    if (p.empty()) return;
+    std::error_code ec;
+    if (!fs::exists(p / L"data" / L"settings.txt", ec)) {
+        message("Bring over a 0.8 launcher", "No data\\settings.txt in " + u8(p) + ". Pick the folder that holds RaCACiT Launcher.exe.");
+        return;
+    }
+    bring_over_launcher(p);
+}
+
 static void import_screen()
 {
     const GameInfo gi = S->game();
@@ -364,20 +392,17 @@ static void import_screen()
         scr.items.push_back(button("Show EBOOT.BIN", "Its folder, to decrypt it in RPCS3", [usrdir] { shell_open(usrdir); }));
     }
     if (gi.ok) { Item pl = button("Play", "", [] { set_screen(home); play(); }); pl.accent = true; scr.items.push_back(pl); }
-    const auto olds = S->find_old_installs();
-    if (!olds.empty()) {   // the newest release: game, settings and saves in one step
-        scr.items.push_back(header("Other ways"));
-        fs::path old = olds.front();
-        for (const auto& o : olds) if (u8(o.filename()) > u8(old.filename()) && u8(o.filename()).size() >= u8(old.filename()).size()) old = o;
-        const std::string name = u8(old.filename());
-        scr.items.push_back(button("Bring over " + name, "An older RACiT release: its game, settings and saves", [old, name] {
-            confirm("Bring over " + name, "Copies its settings, saves and shader caches into the launcher. " + name +
-                    " itself is not changed.", "Bring it over", [old] {
-                std::string* sum = new std::string();
-                run_task("Bringing over " + u8(old.filename()), [old, sum](Progress* pr) { return S->migrate_from(old, pr, sum); },
-                         [sum](const std::string& r) { done_or_error("Done", *sum, r); delete sum; if (r.empty()) set_screen(home); });
-            });
-        }));
+    // The way most players arrive: from their 0.8 launcher, its saves, settings and game in one step.
+    scr.items.push_back(header("Other ways"));
+    // The label stays "0.8" whatever the folder is called; another copy of this version is no source.
+    fs::path old;
+    for (const auto& o : S->find_old_launchers())
+        if (u8(o.filename()).find(kLauncherVersion) == std::string::npos) { old = o; break; }
+    if (!old.empty()) {
+        scr.items.push_back(button("Bring over 0.8", "From " + u8(old.filename()) + ": saves, settings, game and shader caches",
+                                   [old] { bring_over_launcher(old); }));
+    } else {
+        scr.items.push_back(button("Bring over a 0.8 launcher", "Your saves, settings, game and shader caches: pick its folder", [] { pick_old_launcher(); }));
     }
     scr.items.push_back(button("Back", "", [] { set_screen(home); }));
 }
@@ -716,7 +741,8 @@ static void backups_screen()
     for (auto it = bk.rbegin(); it != bk.rend(); ++it) {
         const fs::path z = *it;
         std::error_code ec;
-        scr.items.push_back(button(u8(z.stem()), file_date(z) + "  --  " + format_size(fs::file_size(z, ec)), [z] {
+        scr.items.push_back(button(u8(z.stem()), file_date(z) + "  --  " +
+                                   (fs::is_directory(z, ec) ? std::string("folder") : format_size(fs::file_size(z, ec))), [z] {
             confirm("Restore this backup?", u8(z.filename()) + "\n\nYour current saves are backed up first.", "Restore", [z] {
                 run_task("Restoring", [z](Progress*) { return S->restore_backup(z); },
                          [](const std::string& r) { done_or_error("Saves", "The backup was restored.", r); });
@@ -757,6 +783,7 @@ static void saves_screen()
     }, !slots.empty()));
     scr.items.push_back(button("Restore a backup", bk.empty() ? "None yet" : std::to_string(bk.size()) + " to choose from",
                                [] { set_screen(backups_screen); }, !bk.empty()));
+    scr.items.push_back(button("Bring over a 0.8 launcher", "Its saves, settings, game and shader caches", [] { pick_old_launcher(); }));
     scr.items.push_back(button("Bring over an older release", "Its settings and saves", [] {
         const fs::path p = pick_folder(g_hwnd, L"Pick a release folder (it holds RaCACiT.exe and settings.txt)");
         if (p.empty()) return;
@@ -768,93 +795,123 @@ static void saves_screen()
     scr.items.push_back(button("Back", "", [] { set_screen(home); }));
 }
 
-static void builds_screen();
-static void build_detail(int v)
+// ---- updates -------------------------------------------------------------------------------
+// The newest release on GitHub: what is installed against what is there, its notes, the
+// download, then a confirmation, then the install. A quiet check when the launcher opens only
+// adds a button on the home screen; it never asks anything.
+static ReleaseInfo g_rel;                       // what GitHub named last
+static bool g_rel_known = false;                // ... in this session
+static bool g_update_ready = false;             // a newer release than this one is out there
+static std::string g_update_status;
+static bool g_update_bad = false;
+static bool g_restart = false;                  // a new launcher is in place: start it on the way out
+static void updates_screen();
+
+static bool release_newer(const std::string& tag) { return Store::compare_versions(tag, S->installed_release(kLauncherVersion)) > 0; }
+
+static void remember_release(const ReleaseInfo& rel)
 {
-    BuildInfo b; for (auto& x : S->builds()) if (x.version == v) b = x;
-    if (!b.version) { set_screen(builds_screen); return; }
-    const bool cur = S->current_build().version == v;
-    scr = Screen(); scr.title = "Build v" + std::to_string(v); scr.subtitle = cur ? "Play starts this one" : "Installed"; scr.back = [] { set_screen(builds_screen); };
-    if (!b.notes_first_line.empty()) scr.info.push_back({ "README", b.notes_first_line });
-    scr.info.push_back({ "Folder", u8(b.dir), col::TEXT_DIM });
-    scr.items.push_back(button("Play this build", "Use it from now on", [v] { S->set_current(v); set_screen(builds_screen); }, !cur));
-    scr.items.push_back(button("Read its README", "", [b] { shell_open(b.dir / L"README.txt"); }));
-    scr.items.push_back(button("Open its folder", "", [b] { shell_open(b.dir); }));
-    scr.items.push_back(button("Remove it", "", [v] {
-        confirm("Remove build v" + std::to_string(v) + "?", "Deletes its folder. Settings, saves and mods are not touched.", "Remove", [v] {
-            const std::string r = S->remove_build(v);
-            if (!r.empty()) message("Builds", r);
-            set_screen(builds_screen);
-        });
-    }, !cur));
-    scr.items.push_back(button("Back", "", [] { set_screen(builds_screen); }));
+    g_rel = rel; g_rel_known = true;
+    g_update_ready = release_newer(rel.tag);
+    g_update_bad = false;
+    g_update_status = g_update_ready ? rel.name + " is available." :
+                      Store::compare_versions(rel.tag, "0") < 0 ? "The newest release (" + rel.tag + ") has no version number in its tag, so it cannot be compared." :
+                      "You have the newest release.";
+    S->ini.put("update_last_check", std::to_string((long long)time(nullptr)));
+    S->ini.put("update_seen", rel.tag);
+    S->ini.save();
 }
 
-static std::string g_update_status;
-static void builds_screen()
+static void check_for_updates()
 {
-    const auto bs = S->builds();
-    const BuildInfo cur = S->current_build();
-    const std::string url = S->update_url();
-    scr = Screen(); scr.title = "Builds & Updates"; scr.subtitle = "Which RaCACiT.exe Play starts"; scr.back = [] { set_screen(home); };
-    scr.info.push_back({ "Playing", cur.version ? "Build v" + std::to_string(cur.version) : "No build installed", cur.version ? col::TEXT_GOOD : col::TEXT_BAD });
-    scr.info.push_back({ "Installed", bs.empty() ? "None" : [&] { std::string s; for (auto& b : bs) s += (s.empty() ? "v" : ", v") + std::to_string(b.version); return s; }() });
-    scr.info.push_back({ "Updates", url.empty() ? "Off. Set an update address below (or update_url= in launcher.ini) when there is one." : url,
-                         url.empty() ? col::TEXT_DIM : col::TEXT });
-    if (!g_update_status.empty()) scr.info.push_back({ "Last check", g_update_status });
-    scr.info.push_back({ "A build", "RaCACiT.exe with its README.txt and version.txt, as a .zip or a folder (a release folder like RaCACiT_v66). "
-                                    "Your settings, saves, caches and mods stay where they are.", col::TEXT_DIM });
-    scr.items.push_back(header("Installed builds"));
-    for (auto& b : bs) {
-        const int v = b.version;
-        scr.items.push_back(button("Build v" + std::to_string(v) + (v == cur.version ? "   (playing)" : ""), b.notes_first_line,
-                                   [v] { set_screen([v] { build_detail(v); }); }));
+    ReleaseInfo* res = new ReleaseInfo();
+    run_task("Checking for updates", [res](Progress*) { return Store::fetch_latest_release(res); }, [res](const std::string& r) {
+        if (r.empty()) remember_release(*res);
+        else { g_update_status = r; g_update_bad = true; }
+        delete res;
+        refresh();
+    });
+}
+
+static void restart_launcher() { g_restart = true; PostMessageW(g_hwnd, WM_CLOSE, 0, 0); }
+
+static void install_update(const ReleaseInfo rel)
+{
+    std::string* sum = new std::string(); bool* again = new bool(false);
+    run_task("Installing " + rel.tag, [rel, sum, again](Progress* p) { return S->install_release(rel, p, sum, again); }, [sum, again](const std::string& r) {
+        if (r == "cancelled") { refresh(); }
+        else if (!r.empty()) message("Could not finish", r);
+        else {
+            g_update_ready = false; g_update_bad = false; g_update_status = "You have the newest release.";
+            message("Updated", *sum + (*again ? "\n\nThe launcher starts again with its new version." : ""));
+            if (*again) ov.on_yes = restart_launcher;
+        }
+        delete sum; delete again;
+        refresh();
+    });
+}
+
+static void download_update(const ReleaseInfo rel)
+{
+    if (game_proc) { message("Updates", "Close the game first."); return; }
+    run_task("Downloading " + rel.tag, [rel](Progress* p) { return S->download_release(rel, p); }, [rel](const std::string& r) {
+        if (r == "cancelled") { refresh(); return; }
+        if (!r.empty()) { message("Could not finish", r); refresh(); return; }
+        confirm("Install " + rel.tag + "?", "The download is complete and checked. Installing backs up your saves, then puts in the new game build"
+                " and launcher. Your saves, settings, shader caches, mods you added and your game stay as they are.", "Install", [rel] { install_update(rel); });
+    });
+}
+
+static void updates_screen()
+{
+    const BuildInfo b = S->current_build();
+    scr = Screen(); scr.title = "Updates"; scr.subtitle = "New releases on GitHub"; scr.back = [] { set_screen(home); };
+    std::string inst = S->installed_release(kLauncherVersion);
+    if (!inst.empty() && (inst[0] == 'v' || inst[0] == 'V')) inst.erase(0, 1);
+    scr.info.push_back({ "Installed", "RACiT " + inst + (b.version ? ", game build v" + std::to_string(b.version) : std::string()) });
+    if (!g_update_status.empty()) scr.info.push_back({ "Last check", g_update_status, g_update_bad ? col::TEXT_BAD : col::TEXT });
+    const bool can = g_rel_known && g_update_ready;
+    if (can) {
+        scr.info.push_back({ "Available", g_rel.name + (g_rel.size ? ", a " + format_size(g_rel.size) + " download" : std::string()), col::TEXT_GOOD });
+        if (g_rel.url.empty())
+            scr.info.push_back({ "Cannot install from here", "This release has no launcher .zip" + (g_rel.other_assets.empty() ? std::string() : " (it has " + g_rel.other_assets + ")") +
+                                 ". Download it from its page and bring your saves over in Set up.", col::TEXT_BAD });
+        if (game_proc) scr.info.push_back({ "The game is running", "Close it to install the update.", col::TEXT_BAD });
+        if (!g_rel.notes.empty()) scr.info.push_back({ "What's new", g_rel.notes });
     }
-    scr.items.push_back(header("Install"));
-    scr.items.push_back(button("Install a build from a .zip", "", [] {
-        const fs::path z = pick_open_file(g_hwnd, L"Pick a build (.zip)", L"Build (.zip)", L"*.zip");
-        if (z.empty()) return;
-        int* v = new int(0);
-        run_task("Installing the build", [z, v](Progress*) { return S->install_build_zip(z, v, true); },
-                 [v](const std::string& r) { done_or_error("Builds", "Build v" + std::to_string(*v) + " installed; Play starts it.", r); delete v; });
-    }));
-    scr.items.push_back(button("Install a build from a folder", "A release folder (RaCACiT_vNN)", [] {
-        const fs::path d = pick_folder(g_hwnd, L"Pick a release folder (it holds RaCACiT.exe)");
-        if (d.empty()) return;
-        int* v = new int(0);
-        run_task("Installing the build", [d, v](Progress*) { return S->install_build_folder(d, v, true); },
-                 [v](const std::string& r) { done_or_error("Builds", "Build v" + std::to_string(*v) + " installed; Play starts it.", r); delete v; });
-    }));
-    scr.items.push_back(header("Updates"));
-    scr.items.push_back(button("Check for updates", url.empty() ? "Off until an update address is set" : "", [] {
-        struct R { int latest = 0; std::string notes, url, sha; uint64_t size = 0; };
-        R* res = new R();
-        run_task("Checking for updates", [res](Progress*) { return S->check_update(&res->latest, &res->notes, &res->url, &res->sha, &res->size); },
-                 [res](const std::string& r) {
-            const int cur = S->current_build().version;
-            if (!r.empty()) { g_update_status = r; message("Updates", r); }
-            else if (res->latest <= cur) { g_update_status = "Up to date (v" + std::to_string(cur) + ")"; message("Updates", "You have the newest build (v" + std::to_string(cur) + ")."); }
-            else {
-                g_update_status = "Build v" + std::to_string(res->latest) + " is available";
-                const R copy = *res;
-                confirm("Build v" + std::to_string(res->latest), (res->notes.empty() ? std::string("A newer build is available.") : res->notes) +
-                        (res->size ? "\n\nDownload: " + format_size(res->size) : std::string()), "Download and install", [copy] {
-                    run_task("Updating to v" + std::to_string(copy.latest), [copy](Progress* p) { return S->download_update(copy.url, copy.sha, copy.latest, p); },
-                             [copy](const std::string& r) {
-                                 if (r.empty()) g_update_status = "Installed v" + std::to_string(copy.latest);
-                                 done_or_error("Updates", "Build v" + std::to_string(copy.latest) + " is installed; Play starts it.", r);
-                             });
-                });
-            }
-            delete res;
-            refresh();
-        });
-    }, !url.empty()));
-    Item f; f.kind = K_FIELD; f.label = "Update address"; f.sub = url;
-    f.commit = [](const std::string& t) { S->ini.put("update_url", trim(t)); S->ini.save(); refresh(); };
-    scr.items.push_back(f);
-    scr.items.push_back(button("Open launcher.ini", "The launcher's own options", [] { shell_open(S->ini.path); }));
+    if (can && !g_rel.url.empty()) {
+        Item d = button("Download " + g_rel.tag, "You confirm before anything is installed", [] { download_update(g_rel); }, !game_proc);
+        d.accent = true; scr.items.push_back(d);
+    }
+    scr.items.push_back(button(g_rel_known ? "Check again" : "Check for updates", "", check_for_updates));
+    if (g_rel_known && !g_rel.page.empty()) scr.items.push_back(button("Open the release's page", "The full notes, on GitHub", [] { shell_open(upath(g_rel.page)); }));
+    const bool on = S->ini.get("check_updates", "1") != "0";
+    Item it; it.kind = K_OPTION; it.label = "Look when the launcher opens"; it.sub = on ? "On" : "Off";
+    auto flip = [on](int) { S->ini.put("check_updates", on ? "0" : "1"); S->ini.save(); refresh(); };
+    it.change = flip; it.act = [flip] { flip(+1); };
+    scr.items.push_back(it);
     scr.items.push_back(button("Back", "", [] { set_screen(home); }));
+}
+
+static void open_updates()
+{
+    set_screen(updates_screen);
+    if (!g_rel_known) check_for_updates();
+}
+
+// When the launcher opens: at most one question to GitHub every 6 hours (a newer release it
+// already heard of shows at once). Off line or refused: nothing happens, nothing is shown.
+static void quiet_update_check()
+{
+    if (S->ini.get("check_updates", "1") == "0") return;
+    const std::string seen = trim(S->ini.get("update_seen"));
+    if (!seen.empty() && release_newer(seen)) g_update_ready = true;
+    const long long last = atoll(S->ini.get("update_last_check", "0").c_str()), now = (long long)time(nullptr);
+    if (now >= last && now - last < 6 * 3600) return;
+    std::thread([] {
+        ReleaseInfo* rel = new ReleaseInfo();
+        if (!Store::fetch_latest_release(rel).empty() || !PostMessageW(g_hwnd, WM_APP_UPDATE, 0, (LPARAM)rel)) delete rel;
+    }).detach();
 }
 
 static void logs_screen()
@@ -885,10 +942,10 @@ static void help_screen()
 {
     scr = Screen(); scr.title = "Help"; scr.subtitle = "Folders and controls"; scr.back = [] { set_screen(home); };
     scr.info.push_back({ "Launcher folder", u8(S->root) });
-    scr.info.push_back({ "builds\\", "Installed builds (RaCACiT.exe per version); builds\\current.txt says which one Play starts." });
+    scr.info.push_back({ "builds\\", "Installed builds (RaCACiT.exe per version); Play starts the newest." });
     scr.info.push_back({ "data\\", "settings.txt, dev_hdd0 (the PS3 hard drive with your saves), cache (shaders), log.txt and logs." });
     scr.info.push_back({ "game\\  mods\\  backups\\", "Your game (imported from the .iso); mods; save backups (one per Play, the newest kept)." });
-    scr.info.push_back({ "launcher.ini", "The launcher's options: update address, what the window does while you play, backups and logs kept." });
+    scr.info.push_back({ "launcher.ini", "The launcher's options: looking for updates, what the window does while you play, backups and logs kept." });
     scr.info.push_back({ "Controls", "Mouse; arrows, Enter, Esc; or a controller: Cross (A) select, Circle (B) back, START plays." });
     scr.info.push_back({ "In the game", "Any controller, any time (bottom button = Cross). Keyboard: WASD, mouse camera "
                          "(click the game), Space jump, left click fire, Esc pause, F1 settings." });
@@ -918,6 +975,7 @@ static void home()
     }
     if (!en.empty()) scr.info.push_back({ "Mods", std::to_string(en.size()) + " on" });
     if (!last_session.empty()) scr.info.push_back({ "Last session", last_session, col::TEXT_DIM });
+    const bool show_update = g_update_ready && !game_proc;
     if (game_proc) {
         scr.items.push_back(button("Playing", "Started " + format_duration((GetTickCount64() - game_start) / 1000) + " ago", [] {}, false));
         scr.items.push_back(button("Stop the game", "Unsaved progress is lost", stop_game));
@@ -928,6 +986,7 @@ static void home()
         Item p = button("Play", "", play, b.version != 0);
         p.accent = true; scr.items.push_back(p);
     }
+    if (show_update) scr.items.push_back(button("Update available", "See what is new, then download and install it", open_updates));
     scr.items.push_back(button("Settings", "Display, graphics, controller", [] { set_screen(settings_screen); }));
     scr.items.push_back(button("Saves", "Back up, export, restore", [] { set_screen(saves_screen); }));
     scr.items.push_back(button("More", "Your game, mods, logs", [] { set_screen(more_screen); }));
@@ -941,6 +1000,7 @@ static void more_screen()
     scr.items.push_back(button("Your game", "Import it again, or use another copy", [] { set_screen(import_screen); }));
     scr.items.push_back(button("Mods", "", [] { set_screen(mods_screen); }));
     scr.items.push_back(button("Logs", "For bug reports", [] { set_screen(logs_screen); }));
+    scr.items.push_back(button("Check for updates", g_update_ready ? "An update is available" : "", open_updates));
     scr.items.push_back(button("Help", "", [] { set_screen(help_screen); }));
     scr.items.push_back(button("Back", "", [] { set_screen(home); }));
 }
@@ -976,8 +1036,12 @@ static void game_exited(DWORD code)
     const uint64_t secs = (GetTickCount64() - game_start) / 1000;
     CloseHandle(game_proc); game_proc = nullptr;
     char hx[32]; snprintf(hx, sizeof hx, "0x%08lX", (unsigned long)code);
+    // 0xC000001D, an illegal instruction: a CPU without AVX2 (the game's own check now says so
+    // before it starts; builds before v96 died at start instead -- an i7-3770, v95).
     last_session = format_duration(secs) + ", " + (code == 0 ? std::string("ended normally") :
-                   code == 1 ? std::string("stopped") : std::string("ended with code ") + hx + " (send the log)");
+                   code == 1 ? std::string("stopped") :
+                   code == 0xC000001Du ? std::string("this processor lacks AVX2, which the game needs (Intel 2013+ / AMD Ryzen)") :
+                   std::string("ended with code ") + hx + " (send the log)");
     ShowWindow(g_hwnd, SW_RESTORE);
     SetForegroundWindow(g_hwnd);
     pad_open();
@@ -1057,7 +1121,11 @@ static void overlay_key(int key)   // VK_LEFT/RIGHT/RETURN/ESCAPE
         }
         return;
     }
-    if (ov.type == Overlay::MESSAGE && (key == VK_RETURN || key == VK_ESCAPE)) { ov.type = Overlay::NONE; redraw(); }
+    if (ov.type == Overlay::MESSAGE && (key == VK_RETURN || key == VK_ESCAPE)) {
+        auto fn = ov.on_yes;
+        ov.type = Overlay::NONE; redraw();
+        if (fn) fn();
+    }
 }
 
 static void key(int vk)
@@ -1456,8 +1524,23 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
         if (ov.type == Overlay::CAPTURE && GetTickCount64() > ov.deadline) { ov.type = Overlay::NONE; redraw(); }
         pad_poll();
         script_poll();
-        if (game_proc && scr.build && ov.type == Overlay::NONE && IsWindowVisible(h) && !IsIconic(h)) { static ULONGLONG last; if (GetTickCount64() - last > 1000) { last = GetTickCount64(); refresh(); } }
-        if (!IsIconic(h)) redraw();
+        if (!IsIconic(h) && IsWindowVisible(h)) {
+            // 30 Hz only while the launcher is in front and the game is not running (the
+            // focus glow, scrolling, typing); otherwise once a second for the clock, so a
+            // launcher left open beside the game takes no GPU time from it.
+            static ULONGLONG last;
+            const ULONGLONG now = GetTickCount64();
+            const bool lively = (!game_proc && GetForegroundWindow() == h) || ov.type == Overlay::PROGRESS || scroll != scroll_to;
+            if (lively || now - last >= 1000) {
+                last = now;
+                // "Playing: started ... ago" in place; rebuilding the screen read the game
+                // folder, the saves and the builds from disk every second.
+                if (game_proc)
+                    for (auto& it : scr.items)
+                        if (it.label == "Playing" && !it.enabled) it.sub = "Started " + format_duration((now - game_start) / 1000) + " ago";
+                redraw();
+            }
+        }
         return 0;
     case WM_KEYDOWN: case WM_SYSKEYDOWN:
         if (ov.type == Overlay::CAPTURE) { if (!(l & (1 << 30))) capture_done(key_name_from_scan(l)); return 0; }   // not a held key's repeat
@@ -1495,7 +1578,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
         if (s_swallow_up) { s_swallow_up = false; return 0; }   // the press was a binding
         const float x = to_dip(GET_X_LPARAM(l)), y = to_dip(GET_Y_LPARAM(l));
         if (ov.type == Overlay::PROGRESS) { if (ov.btn[0].in(x, y)) prog->cancel = true; return 0; }
-        if (ov.type == Overlay::MESSAGE) { if (ov.btn[0].in(x, y)) { ov.type = Overlay::NONE; redraw(); } return 0; }
+        if (ov.type == Overlay::MESSAGE) { if (ov.btn[0].in(x, y)) overlay_key(VK_RETURN); return 0; }
         if (ov.type == Overlay::CONFIRM) {
             for (int k = 0; k < 2; k++) if (ov.btn[k].in(x, y)) { ov.focus = k; overlay_key(VK_RETURN); }
             return 0;
@@ -1524,6 +1607,12 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
         redraw();
         return 0; }
     case WM_APP_GAME_EXIT: game_exited((DWORD)w); return 0;
+    case WM_APP_UPDATE: {
+        ReleaseInfo* rel = (ReleaseInfo*)l;
+        remember_release(*rel);
+        delete rel;
+        if (!prog && (scr.title == "A Crack in Time" || scr.title == "Updates" || scr.title == "More")) refresh();
+        return 0; }
     case WM_CLOSE:
         if (prog) { prog->cancel = true; return 0; }   // let the job stop first
         DestroyWindow(h);
@@ -1535,6 +1624,8 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
 
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show)
 {
+    // An update tries a new launcher this way before it replaces the running one.
+    if (wcsstr(GetCommandLineW(), L" --self-test")) return 0;
     // One launcher at a time.
     HANDLE mtx = getenv("RACACIT_LAUNCHER_SCRIPT") ? nullptr : CreateMutexW(nullptr, TRUE, L"RaCACiT-Launcher-single");   /* scripted test runs: any number */
     if (mtx && GetLastError() == ERROR_ALREADY_EXISTS) {
@@ -1547,6 +1638,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show)
 
     Store store(exe_dir());
     S = &store;
+    store.clean_update_leftovers();
 
     WNDCLASSEXW wc{}; wc.cbSize = sizeof wc; wc.lpfnWndProc = wndproc; wc.hInstance = inst;
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW); wc.lpszClassName = L"RaCACiTLauncher";
@@ -1570,6 +1662,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show)
     if (!S->game().ok) set_screen(import_screen);   // first run: where the game comes from
     ShowWindow(g_hwnd, show == SW_HIDE ? SW_SHOWNORMAL : show);
     SetTimer(g_hwnd, TIMER_TICK, 33, nullptr);
+    quiet_update_check();
 
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) { TranslateMessage(&msg); DispatchMessageW(&msg); }
@@ -1579,6 +1672,13 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show)
     if (sdl_ok) SDL_Quit();
     g.shutdown();
     CoUninitialize();
-    if (mtx) CloseHandle(mtx);
+    if (mtx) CloseHandle(mtx);   // first: the new launcher takes it
+    if (g_restart) {
+        STARTUPINFOW si{}; si.cb = sizeof si; PROCESS_INFORMATION pi{};
+        const fs::path self = exe_path();
+        std::wstring cl = L"\"" + self.wstring() + L"\"";
+        if (CreateProcessW(self.c_str(), cl.data(), nullptr, nullptr, FALSE, 0, nullptr, self.parent_path().c_str(), &si, &pi)) { CloseHandle(pi.hThread); CloseHandle(pi.hProcess); }
+        else MessageBoxW(nullptr, L"The launcher was updated. Please open it again.", L"RACiT Launcher", MB_ICONINFORMATION);
+    }
     return 0;
 }

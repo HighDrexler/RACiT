@@ -46,6 +46,7 @@ bool Gfx::init(HWND hwnd)
     for (int i = 0; i < F_COUNT; i++)
         if (FAILED(dw_->CreateTextFormat(fam, nullptr, d[i].w, DWRITE_FONT_STYLE_NORMAL, d[i].s, d[i].size, L"en-us", &fmt_[i])))
             return false;
+    for (int i = 0; i < F_COUNT; i++) dw_->CreateEllipsisTrimmingSign(fmt_[i], &ell_[i]);
     dpi_ = (float)GetDpiForWindow(hwnd);
     return make_target();
 }
@@ -53,6 +54,7 @@ bool Gfx::init(HWND hwnd)
 void Gfx::shutdown()
 {
     drop_target();
+    for (auto& e : ell_) rel(e);
     for (auto& f : fmt_) rel(f);
     rel(wic_); rel(dw_); rel(f_);
 }
@@ -199,12 +201,12 @@ void Gfx::text(const std::string& s, const Rect& r, Font f, uint32_t c, Align a,
     fm->SetTextAlignment(a == A_CENTER ? DWRITE_TEXT_ALIGNMENT_CENTER : a == A_RIGHT ? DWRITE_TEXT_ALIGNMENT_TRAILING : DWRITE_TEXT_ALIGNMENT_LEADING);
     fm->SetParagraphAlignment(vcenter ? DWRITE_PARAGRAPH_ALIGNMENT_CENTER : DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
     fm->SetWordWrapping(wrap ? DWRITE_WORD_WRAPPING_WRAP : DWRITE_WORD_WRAPPING_NO_WRAP);
-    IDWriteInlineObject* ell = nullptr;
+    IDWriteInlineObject* ell = wrap ? nullptr : ell_[f];
     DWRITE_TRIMMING tr = { DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0 };
-    if (!wrap && SUCCEEDED(dw_->CreateEllipsisTrimmingSign(fm, &ell))) fm->SetTrimming(&tr, ell);
+    if (ell) fm->SetTrimming(&tr, ell);
     const std::wstring w = widen(s);
     rt_->DrawText(w.c_str(), (UINT32)w.size(), fm, D2D1::RectF(r.l, r.t, r.r, r.b), brush(c), D2D1_DRAW_TEXT_OPTIONS_CLIP);
-    if (ell) { DWRITE_TRIMMING none = { DWRITE_TRIMMING_GRANULARITY_NONE, 0, 0 }; fm->SetTrimming(&none, nullptr); ell->Release(); }
+    if (ell) { DWRITE_TRIMMING none = { DWRITE_TRIMMING_GRANULARITY_NONE, 0, 0 }; fm->SetTrimming(&none, nullptr); }
 }
 
 float Gfx::text_width(const std::string& s, Font f)
@@ -235,8 +237,16 @@ Gfx::Img* Gfx::load(const fs::path& p)
 {
     if (p.empty() || !wic_ || !rt_) return nullptr;
     for (auto& i : imgs_) if (i.bmp && i.path == p) return &i;
+    const ULONGLONG now = GetTickCount64();
+    for (auto& m : miss_) if (m.path == p && now < m.retry) return nullptr;
+    auto missing = [&]() -> Img* {
+        Miss* slot = &miss_[0];
+        for (auto& m : miss_) { if (m.path == p) { slot = &m; break; } if (m.retry < slot->retry) slot = &m; }
+        slot->path = p; slot->retry = now + 1000;
+        return nullptr;
+    };
     std::error_code ec;
-    if (!fs::exists(p, ec)) return nullptr;
+    if (!fs::exists(p, ec)) return missing();
     IWICBitmapDecoder* dec = nullptr; IWICBitmapFrameDecode* fr = nullptr; IWICFormatConverter* cv = nullptr;
     ID2D1Bitmap* bmp = nullptr;
     if (SUCCEEDED(wic_->CreateDecoderFromFilename(p.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnLoad, &dec)) &&
@@ -244,7 +254,7 @@ Gfx::Img* Gfx::load(const fs::path& p)
         SUCCEEDED(cv->Initialize(fr, GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, nullptr, 0, WICBitmapPaletteTypeMedianCut)))
         rt_->CreateBitmapFromWicBitmap(cv, nullptr, &bmp);
     rel(cv); rel(fr); rel(dec);
-    if (!bmp) return nullptr;
+    if (!bmp) return missing();
     Img* slot = &imgs_[0];
     for (auto& i : imgs_) if (!i.bmp) { slot = &i; break; }
     rel(slot->bmp);

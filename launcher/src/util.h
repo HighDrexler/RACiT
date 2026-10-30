@@ -49,10 +49,25 @@ int run_hidden(const std::wstring& cmdline, const fs::path& cwd, std::atomic<boo
 std::string zip_create(const fs::path& from_dir, const fs::path& zip);   // "" = ok
 std::string zip_extract(const fs::path& zip, const fs::path& to_dir);
 
+// A zip read by the launcher itself, with no tar.exe (stored and Deflate entries; GitHub #5
+// was tar.exe failing on a player's PC). Names use '/'; one that could leave the folder
+// (.., C:, a leading /) refuses the whole zip. Each entry's size and CRC-32 are checked.
+struct ZipEntry {
+    std::string name;
+    uint64_t size = 0, packed = 0, offset = 0;
+    uint32_t crc = 0;
+    int method = 0;
+    bool is_dir = false;
+};
+std::string zip_list(const fs::path& zip, std::vector<ZipEntry>* out);
+std::string zip_unpack_entry(const fs::path& zip, const ZipEntry& e, const fs::path& to, Progress* p);
+
 std::string sha256_file(const fs::path& p, Progress* prog = nullptr);    // lowercase hex, "" on error
 
 // HTTPS (or HTTP) GET. to_file: streamed with progress. Returns "" on success.
-std::string http_get(const std::string& url, std::string* body, const fs::path* to_file, Progress* p);
+// status: the server's answer (0 = none: no connection). headers: extra request headers.
+std::string http_get(const std::string& url, std::string* body, const fs::path* to_file, Progress* p,
+                     int* status = nullptr, const wchar_t* headers = nullptr);
 
 // JSON (objects, arrays, strings, numbers, true/false/null), enough for mod.json and update manifests.
 struct Json {
@@ -73,4 +88,8 @@ fs::path pick_open_file(void* hwnd, const wchar_t* title, const wchar_t* filter_
 fs::path pick_save_file(void* hwnd, const wchar_t* title, const wchar_t* default_name,
                         const wchar_t* filter_name, const wchar_t* filter_spec);
 void shell_open(const fs::path& p);              // a folder in Explorer, a file in its app
+fs::path exe_path();
 fs::path exe_dir();
+// A running process whose exe is somewhere under dir.
+bool process_running_under(const fs::path& dir);
+uint64_t free_space(const fs::path& dir);        // bytes, 0 if unknown

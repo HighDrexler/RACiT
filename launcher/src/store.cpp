@@ -4,8 +4,13 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <cctype>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <set>
+#include <thread>
+#include <unordered_set>
 
 // ---- settings files ------------------------------------------------------------
 static bool line_key(const std::string& line, std::string* key, std::string* val, bool* commented)
@@ -99,8 +104,8 @@ static const char* kSettingsTemplate =
 
 static const char* kIniTemplate =
     "# RACiT Launcher options (NAME=value)\r\n"
-    "# Update address: a JSON manifest of builds (README). Empty = updates off.\r\n"
-    "update_url=\r\n"
+    "# Look for a new release on GitHub when the launcher opens (at most every 6 hours): 1 = yes\r\n"
+    "check_updates=1\r\n"
     "# The launcher window while the game runs: minimize, hide or stay\r\n"
     "while_playing=minimize\r\n"
     "# Back up the saves each time Play is pressed: 1 = yes\r\n"
@@ -395,6 +400,130 @@ std::string Store::migrate_from(const fs::path& old, Progress* p, std::string* s
     return {};
 }
 
+// ---- an earlier launcher ---------------------------------------------------------------
+// Beside this one, one folder further in, or in a folder next to the one this is in: a zip
+// unpacked with Windows' "Extract all" nests the launcher in a folder named like itself.
+// One named 0.8 first (what players come from; test copies may sit beside it), then played
+// ones (a launcher only opened has nothing to bring), then the newest.
+std::vector<fs::path> Store::find_old_launchers() const
+{
+    struct Found { bool named; bool played; fs::file_time_type when; fs::path dir; };
+    std::vector<Found> v;
+    std::error_code ec;
+    auto consider = [&](const fs::path& d) {
+        if (!fs::exists(d / L"RaCACiT Launcher.exe", ec) || !fs::exists(d / L"data" / L"settings.txt", ec)) return;
+        if (fs::equivalent(d, root, ec)) return;
+        for (const auto& f : v) if (fs::equivalent(f.dir, d, ec)) return;
+        v.push_back({ u8(d.filename()).find("0.8") != std::string::npos,
+                      fs::is_directory(d / L"data" / L"dev_hdd0" / L"home" / L"00000001" / L"savedata", ec),
+                      fs::last_write_time(d / L"data" / L"settings.txt", ec), d });
+    };
+    auto scan = [&](const fs::path& parent) {
+        std::error_code e1;
+        for (fs::directory_iterator a(parent, fs::directory_options::skip_permission_denied, e1), e; !e1 && a != e; a.increment(e1)) {
+            std::error_code e2;
+            if (!a->is_directory(e2)) continue;
+            consider(a->path());
+            for (fs::directory_iterator b(a->path(), fs::directory_options::skip_permission_denied, e2); !e2 && b != e; b.increment(e2)) {
+                std::error_code e3;
+                if (b->is_directory(e3)) consider(b->path());
+            }
+        }
+    };
+    const fs::path parent = root.parent_path();
+    scan(parent);
+    if (parent.parent_path() != parent) scan(parent.parent_path());
+    std::sort(v.begin(), v.end(), [](const Found& a, const Found& b) {
+        if (a.named != b.named) return a.named;
+        return a.played != b.played ? a.played : a.when > b.when; });
+    std::vector<fs::path> out;
+    for (auto& f : v) out.push_back(f.dir);
+    return out;
+}
+
+std::string Store::migrate_from_launcher(const fs::path& old, Progress* p, std::string* summary)
+{
+    std::error_code ec;
+    if (fs::equivalent(old, root, ec)) return "That is this launcher's own folder.";
+    SettingsFile os; os.path = old / L"data" / L"settings.txt";
+    if (!os.load()) return "No data\\settings.txt in " + u8(old) + " (pick the folder that holds RaCACiT Launcher.exe).";
+    std::string s;
+
+    // Saves and the rest of the PS3 hard drive. This launcher's saves are backed up first, and
+    // nothing is overwritten if that fails. Settings come last: a failed copy leaves them as they were.
+    const fs::path src = old / L"data" / L"dev_hdd0";
+    if (fs::is_directory(src, ec) && !fs::equivalent(src, hdd(), ec)) {
+        const std::string b = backup_saves("before-migrate", nullptr);
+        if (!b.empty()) return "Could not back up this launcher's saves first: " + b;
+        p->set_line("Measuring " + u8(src));
+        p->done = 0; p->total = tree_size(src);
+        const std::string r = copy_tree(src, hdd(), p);
+        if (!r.empty()) return r;
+        s += "Saves and HDD data copied (" + format_size(p->total) + ").";
+    } else s += "No saves to copy.";
+
+    int nc = 0;
+    fs::create_directories(cache(), ec);
+    for (const wchar_t* cf : { L"shadercache.bin", L"pipelinecache.bin", L"pipelinelist.bin" })
+        if (fs::exists(old / L"data" / L"cache" / cf, ec)) {
+            fs::copy_file(old / L"data" / L"cache" / cf, cache() / cf, fs::copy_options::overwrite_existing, ec);
+            nc += !ec;
+        }
+    if (nc) s += " Shader caches copied.";
+
+    // Its save backups: zips, and the folders made when tar.exe failed (Store::backup_saves).
+    int nb = 0;
+    fs::create_directories(backups(), ec);
+    { std::error_code e1;
+      for (fs::directory_iterator f(old / L"backups", e1), e; !e1 && f != e; f.increment(e1)) {
+          std::error_code e2;
+          const fs::path to = backups() / f->path().filename();
+          if (u8(f->path().filename()).rfind("saves-", 0) != 0 || fs::exists(to, e2)) continue;
+          if (f->is_directory(e2)) { Progress bp; nb += copy_tree(f->path(), to, &bp).empty(); }
+          else if (f->path().extension() == L".zip") { fs::copy_file(f->path(), to, e2); nb += !e2; }
+      } }
+    if (nb) s += " " + std::to_string(nb) + " save backups copied.";
+
+    // The options in launcher.ini.
+    std::string k, v; bool c;
+    SettingsFile oi; oi.path = old / L"launcher.ini";
+    if (oi.load()) {
+        for (const auto& l : oi.lines) if (line_key(l, &k, &v, &c) && !c) ini.put(k, v);
+        ini.save();
+    }
+
+    // Settings: its lines, what the launcher sets itself left as a comment. The game: this
+    // launcher's if it works already; else the old one's GAME; else the old one's own copy, used
+    // where it is (about 25 GB, and the old folder stays as it is).
+    const GameInfo here = game();
+    const std::string here_game = settings.get("GAME");
+    SettingsFile ns = settings;
+    ns.lines.clear();
+    for (const auto& l : os.lines) {
+        if (line_key(l, &k, &v, &c) && !c && launcher_owned_key(k)) ns.lines.push_back("# (the launcher sets this) " + l);
+        else ns.lines.push_back(l);
+    }
+    const std::string old_game = os.get("GAME");
+    const fs::path old_copy = old / L"game";
+    if (here.ok) {
+        if (here_game.empty()) ns.remove("GAME"); else ns.put("GAME", here_game);
+        s += " Game: this launcher's own, kept.";
+    } else if (!old_game.empty() && fs::is_directory(upath(old_game) / L"PS3_GAME", ec)) {
+        s += " Game: " + old_game + ", as before.";
+    } else if (fs::is_directory(old_copy / L"PS3_GAME", ec)) {
+        ns.put("GAME", u8(old_copy));
+        s += " Game: played from " + u8(old_copy) + ", not copied. Keep that folder, or import the .iso again here.";
+    } else {
+        if (!old_game.empty()) ns.remove("GAME");
+        s += " No game there: import it in Set up.";
+    }
+    settings = ns;
+    if (!settings.save()) return "Could not write " + u8(settings.path);
+    refresh_art();
+    if (summary) *summary = "From " + u8(old.filename()) + ": " + s;
+    return {};
+}
+
 // ---- builds ------------------------------------------------------------------------
 std::vector<BuildInfo> Store::builds() const
 {
@@ -452,76 +581,335 @@ std::string Store::install_build_folder(const fs::path& from, int* version, bool
     return {};
 }
 
-std::string Store::install_build_zip(const fs::path& zip, int* version, bool make_current)
-{
-    const fs::path tmp = builds_dir() / L".incoming";
-    delete_tree(tmp);
-    std::string r = zip_extract(zip, tmp);
-    if (!r.empty()) { delete_tree(tmp); return r; }
-    std::error_code ec;
-    fs::path src = tmp;
-    if (!fs::exists(src / L"RaCACiT.exe", ec))
-        for (auto& d : fs::directory_iterator(tmp, ec)) if (d.is_directory(ec) && fs::exists(d.path() / L"RaCACiT.exe", ec)) { src = d.path(); break; }
-    if (!fs::exists(src / L"RaCACiT.exe", ec)) { delete_tree(tmp); return "The zip has no RaCACiT.exe."; }
-    // The zip's own name says the version when the folder inside does not.
-    if (!fs::exists(src / L"version.txt", ec)) {
-        int v = version_of_name(u8(src == tmp ? zip.stem() : src.filename()));
-        if (!v) v = version_of_name(u8(zip.stem()));
-        if (v) write_text_atomic(src / L"version.txt", std::to_string(v) + "\r\n");
-    }
-    r = install_build_folder(src, version, make_current);
-    delete_tree(tmp);
-    return r;
-}
-
-std::string Store::remove_build(int version)
-{
-    if (current_build().version == version) return "That is the build Play starts; pick another first.";
-    return delete_tree(builds_dir() / (L"v" + std::to_wstring(version))) ? std::string() : "Could not delete it (is it running?).";
-}
-
 // ---- updates ---------------------------------------------------------------------------
-// The manifest: {"builds": [{"version": 66, "url": "https://.../RaCACiT_v66.zip",
-//                            "sha256": "...", "size": 12345, "notes": "..."}, ...]}
-// or one {"version": ...} object as "latest". The zip holds RaCACiT.exe (+ README.txt, version.txt).
-std::string Store::check_update(int* latest, std::string* notes, std::string* url, std::string* sha256, uint64_t* size)
+// GET https://api.github.com/repos/HighDrexler/RACiT/releases/latest (no sign-in; GitHub allows
+// 60 asks an hour per connection). Only an address on this repository's own releases is ever
+// downloaded. RACACIT_UPDATE_TEST_API, for the launcher's tests, stands in for GitHub, and only
+// on this PC: http://127.0.0.1:port/...
+static const char* kReleasesApi = "https://api.github.com/repos/HighDrexler/RACiT/releases/latest";
+static const char* kReleasePages = "https://github.com/HighDrexler/RACiT/releases/";
+static const char* kReleaseDownloads = "https://github.com/HighDrexler/RACiT/releases/download/";
+
+static std::string test_api()
 {
-    const std::string u = update_url();
-    if (u.empty()) return "Updates are off: no update_url in launcher.ini.";
-    std::string body;
-    std::string r = http_get(u, &body, nullptr, nullptr);
-    if (!r.empty()) return r;
+    const char* e = getenv("RACACIT_UPDATE_TEST_API");
+    return e && !strncmp(e, "http://127.0.0.1:", 17) ? e : "";
+}
+static bool under(const std::string& url, const std::string& base)
+{
+    return url.rfind(base, 0) == 0 && url.find("..") == std::string::npos && url.find('\\') == std::string::npos && url.find('@') == std::string::npos;
+}
+static bool release_download_ok(const std::string& url)
+{
+    const std::string t = test_api();
+    if (!t.empty()) return under(url, t.substr(0, t.find('/', 7) + 1));
+    return under(url, kReleaseDownloads);
+}
+
+// The release's text as plain text: no Markdown marks, not too long for the screen (the rest
+// is on the release's page).
+static std::string plain_notes(const std::string& md)
+{
+    std::string out;
+    size_t i = 0;
+    while (i < md.size() && out.size() < 900) {
+        size_t j = md.find('\n', i);
+        if (j == std::string::npos) j = md.size();
+        std::string l = md.substr(i, j - i);
+        i = j + 1;
+        if (!l.empty() && l.back() == '\r') l.pop_back();
+        size_t at = 0;
+        while (at < l.size() && l[at] == '#') at++;
+        if (at) l = trim(l.substr(at));
+        for (const char* mark : { "**", "__", "`" })
+            for (size_t k; (k = l.find(mark)) != std::string::npos;) l.erase(k, strlen(mark));
+        if (!(l.empty() && (out.empty() || (out.size() >= 2 && out.compare(out.size() - 2, 2, "\n\n") == 0)))) out += l + "\n";
+    }
+    bool cut = i < md.size();
+    if (out.size() > 900) {
+        size_t k = out.rfind(' ', 900);
+        out.resize(k == std::string::npos ? 900 : k);
+        cut = true;
+    }
+    out = trim(out);
+    return cut ? out + " ..." : out;
+}
+
+std::string Store::fetch_latest_release(ReleaseInfo* out)
+{
+    *out = ReleaseInfo();
+    const std::string test = test_api();
+    std::string body; int status = 0;
+    const std::string r = http_get(test.empty() ? kReleasesApi : test, &body, nullptr, nullptr, &status,
+                                   L"Accept: application/vnd.github+json\r\nX-GitHub-Api-Version: 2022-11-28\r\n");
+    if (!r.empty()) {
+        if (status == 0) return "Could not reach GitHub. Check your internet connection and try again.";
+        if (status == 403 || status == 429) return "GitHub is limiting how often this connection can ask (60 times an hour). Try again later.";
+        if (status == 404) return "There is no release on GitHub yet.";
+        return "GitHub answered " + std::to_string(status) + ". Try again later.";
+    }
     Json j; std::string err;
-    if (!json_parse(body, &j, &err)) return "The update list is not valid JSON (" + err + ").";
-    const Json* best = nullptr;
-    auto consider = [&](const Json& e) { if (e.type == Json::Obj && (!best || e.num("version") > best->num("version"))) best = &e; };
-    for (const auto& e : j["builds"].a) consider(e);
-    consider(j["latest"]);
-    if (!best) return "The update list has no builds.";
-    *latest = (int)best->num("version");
-    *notes = best->str("notes");
-    *url = best->str("url");
-    *sha256 = lower(best->str("sha256"));
-    *size = (uint64_t)best->num("size");
+    if (!json_parse(body, &j, &err) || j.type != Json::Obj) return "GitHub's answer could not be read. Try again later.";
+    out->tag = trim(j.str("tag_name"));
+    if (out->tag.empty()) return "GitHub's answer has no release in it. Try again later.";
+    out->name = trim(j.str("name", out->tag));
+    if (out->name.empty()) out->name = out->tag;
+    out->notes = plain_notes(j.str("body"));
+    const std::string page = j.str("html_url");
+    if (under(page, kReleasePages) || !test.empty()) out->page = page;
+    // The asset: a .zip with "launcher" in its name. A .7z is listed for the message only.
+    for (const Json& a : j["assets"].a) {
+        const std::string n = a.str("name"), low = lower(n), url = a.str("browser_download_url");
+        const bool zip = low.size() > 4 && low.compare(low.size() - 4, 4, ".zip") == 0;
+        if (out->asset.empty() && zip && low.find("launcher") != std::string::npos && release_download_ok(url)) {
+            out->asset = n; out->url = url; out->size = (uint64_t)a.num("size");
+            const std::string d = lower(a.str("digest"));
+            if (d.rfind("sha256:", 0) == 0) out->sha256 = d.substr(7);
+        } else if (!n.empty()) out->other_assets += (out->other_assets.empty() ? "" : ", ") + n;
+    }
     return {};
 }
 
-std::string Store::download_update(const std::string& url, const std::string& sha256, int version, Progress* p)
+static std::vector<long> version_parts(const std::string& s)
 {
-    if (sha256.size() != 64) return "The update list gives no SHA-256 for this build: not installing it.";
-    const fs::path f = builds_dir() / L".download" / (L"RaCACiT_v" + std::to_wstring(version) + L".zip");
-    p->set_line("Downloading build v" + std::to_string(version));
-    std::string r = http_get(url, nullptr, &f, p);
-    if (!r.empty()) return r;
-    p->set_line("Checking the download");
-    p->done = 0;
-    std::error_code ec; p->total = fs::file_size(f, ec);
-    if (sha256_file(f, p) != sha256) { fs::remove(f, ec); return "The download does not match its SHA-256: not installed."; }
+    std::vector<long> v;
+    size_t i = !s.empty() && (s[0] == 'v' || s[0] == 'V') ? 1 : 0;
+    while (i < s.size() && isdigit((unsigned char)s[i])) {
+        long n = 0;
+        while (i < s.size() && isdigit((unsigned char)s[i]) && n < 100000000) n = n * 10 + (s[i++] - '0');
+        v.push_back(n);
+        if (i + 1 < s.size() && s[i] == '.' && isdigit((unsigned char)s[i + 1])) i++;
+        else break;
+    }
+    return v;
+}
+
+int Store::compare_versions(const std::string& a, const std::string& b)
+{
+    const auto x = version_parts(a), y = version_parts(b);
+    if (x.empty() || y.empty()) return x.empty() ? (y.empty() ? 0 : -1) : 1;   // a tag that is no version is never newer
+    for (size_t i = 0; i < std::max(x.size(), y.size()); i++) {
+        const long p = i < x.size() ? x[i] : 0, q = i < y.size() ? y[i] : 0;
+        if (p != q) return p < q ? -1 : 1;
+    }
+    return 0;
+}
+
+std::string Store::installed_release(const std::string& launcher_version) const
+{
+    const std::string done = trim(read_text(builds_dir() / L"release.txt", 64));
+    return compare_versions(done, launcher_version) > 0 ? done : launcher_version;
+}
+
+void Store::clean_update_leftovers()
+{
+    delete_tree(root / L".update");
+    // The launcher this one replaced: it may still be on its way out.
+    fs::path old = exe_path(); old += L".old";
+    std::error_code ec;
+    if (!fs::exists(old, ec)) return;
+    std::thread([old] {
+        for (int i = 0; i < 40; i++) {
+            if (DeleteFileW(old.c_str()) || GetLastError() == ERROR_FILE_NOT_FOUND) return;
+            Sleep(250);
+        }
+    }).detach();
+}
+
+std::string Store::download_release(const ReleaseInfo& rel, Progress* p)
+{
+    if (rel.url.empty() || !release_download_ok(rel.url)) return "This release has no launcher .zip to install.";
+    const fs::path dir = root / L".update";
+    delete_tree(dir);
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    if (ec) return "Could not write to this folder (" + u8(root) + "): " + ec.message();
+    const uint64_t room = free_space(root);
+    if (rel.size && room && room < rel.size * 4) {
+        delete_tree(dir);
+        return "Not enough free space: the update needs about " + format_size(rel.size * 4) + " on this drive, and " + format_size(room) + " is free.";
+    }
+    const fs::path part = dir / L"release.zip.part", zip = dir / L"release.zip";
+    p->set_line("Downloading " + rel.asset);
+    p->done = 0; p->total = rel.size;
+    int status = 0;
+    std::string r = http_get(rel.url, nullptr, &part, p, &status);
+    if (!r.empty()) {
+        delete_tree(dir);
+        if (r == "cancelled") return r;
+        return status == 0 || r == "the download broke off" ? "The download did not finish. Check your internet connection and try again. Nothing was changed." :
+               "The download failed: " + r + ". Nothing was changed.";
+    }
+    const uint64_t got = fs::file_size(part, ec);
+    if (rel.size && got != rel.size) {
+        delete_tree(dir);
+        return "The download did not finish or is the wrong size (" + format_size(got) + ", should be " + format_size(rel.size) + "). Try again. Nothing was changed.";
+    }
+    if (rel.sha256.size() == 64) {
+        p->set_line("Checking the download");
+        p->done = 0; p->total = got;
+        const std::string have = sha256_file(part, p);
+        if (p->cancel) { delete_tree(dir); return "cancelled"; }
+        if (have != rel.sha256) { delete_tree(dir); return "The download does not match GitHub's checksum. Nothing was changed."; }
+    }
+    fs::rename(part, zip, ec);
+    if (ec) { delete_tree(dir); return "Could not keep the download: " + ec.message(); }
+    return {};
+}
+
+// Which part of a release a zip entry is, under the folder it is packed in (or none): the
+// launcher exe, README.txt, mods\<id>\... and builds\vNN\.... Everything else -- a data\, game\,
+// backups\ or launcher.ini by mistake among it -- is never even unpacked.
+static bool release_part(const std::string& rel_name)
+{
+    const std::string n = lower(rel_name);
+    if (n == "readme.txt") return true;
+    if (n.find('/') == std::string::npos) return n.size() > 4 && n.compare(n.size() - 4, 4, ".exe") == 0 && n.find("launcher") != std::string::npos;
+    if (n.rfind("mods/", 0) == 0) return n.size() > 5 && n.find('/', 5) != std::string::npos;
+    if (n.rfind("builds/v", 0) == 0) {
+        const size_t e = n.find('/', 8);
+        return e != std::string::npos && e > 8 && n.find_first_not_of("0123456789", 8) == e;
+    }
+    return false;
+}
+
+static bool looks_like_program(const fs::path& p)
+{
+    const std::string h = read_text(p, 2);
+    return h.size() >= 2 && h[0] == 'M' && h[1] == 'Z';
+}
+
+std::string Store::install_release(const ReleaseInfo& rel, Progress* p, std::string* summary, bool* restart)
+{
+    *restart = false;
+    std::error_code ec;
+    const fs::path dir = root / L".update", zip = dir / L"release.zip", fresh = dir / L"new", aside = dir / L"old";
+    auto stop = [&](const std::string& why) { delete_tree(dir); return why; };
+    if (process_running_under(builds_dir())) return stop("The game is running. Close it, then install the update.");
+
+    // 1. Unpack beside everything.
+    p->set_line("Reading the release");
+    std::vector<ZipEntry> all;
+    std::string r = zip_list(zip, &all);
+    if (!r.empty()) return stop("The release could not be read: " + r + ". Nothing was changed.");
+    std::string base;   // the folder everything is packed in, if any
+    auto is_main = [](const std::string& s) { return lower(s).rfind("builds/", 0) == 0 || (s.find('/') == std::string::npos && release_part(s) && lower(s) != "readme.txt"); };
+    for (const auto& e : all) {
+        if (is_main(e.name)) { base.clear(); break; }
+        const size_t s = e.name.find('/');
+        if (s != std::string::npos && is_main(e.name.substr(s + 1))) { base = e.name.substr(0, s + 1); break; }
+    }
+    uint64_t need = 0;
+    std::vector<std::pair<ZipEntry, std::string>> take;
+    for (const auto& e : all) {
+        if (e.is_dir || e.name.rfind(base, 0) != 0) continue;
+        const std::string n = e.name.substr(base.size());
+        if (release_part(n)) { take.push_back({ e, n }); need += e.size; }
+    }
+    const uint64_t room = free_space(root);
+    if (room && room < need + (64u << 20)) return stop("Not enough free space: unpacking needs " + format_size(need) + " on this drive, and " + format_size(room) + " is free.");
+    p->done = 0; p->total = need;
+    for (const auto& t : take) {
+        p->set_line("Unpacking " + t.second);
+        r = zip_unpack_entry(zip, t.first, fresh / widen(t.second), p);
+        if (r == "cancelled") return stop(r);
+        if (!r.empty()) return stop("The release could not be unpacked: " + r + ". Nothing was changed.");
+    }
+
+    // 2. What came out: a build, a launcher, or it is not a release.
+    p->total = 0; p->set_line("Checking the release");
+    std::vector<fs::path> new_builds;
+    int top_build = 0;
+    for (auto& d : fs::directory_iterator(fresh / L"builds", ec)) {
+        const int v = atoi(u8(d.path().filename()).c_str() + 1);
+        if (!d.is_directory(ec) || v <= 0) continue;
+        new_builds.push_back(d.path());
+        top_build = std::max(top_build, v);
+    }
+    for (const auto& b : new_builds)
+        if (!looks_like_program(b / L"RaCACiT.exe")) return stop("The release's build " + u8(b.filename()) + " has no game program. Nothing was changed.");
+    fs::path new_launcher;
+    for (auto& f : fs::directory_iterator(fresh, ec))
+        if (f.is_regular_file(ec) && lower(u8(f.path().extension())) == ".exe") new_launcher = f.path();
+    if (new_builds.empty() && new_launcher.empty()) return stop("That release holds no game build and no launcher. Nothing was changed.");
+    // The launcher in the zip must at least start on this PC before it replaces this one.
+    const fs::path self = exe_path().parent_path() == root ? exe_path() : root / L"RaCACiT Launcher.exe";
+    if (!new_launcher.empty() && sha256_file(new_launcher) == sha256_file(self)) new_launcher.clear();   // the same one
+    if (!new_launcher.empty()) {
+        if (!looks_like_program(new_launcher)) return stop("The release's launcher is not a program. Nothing was changed.");
+        const int code = run_hidden(L"\"" + new_launcher.wstring() + L"\" --self-test", fresh, &p->cancel);
+        if (p->cancel) return stop("cancelled");
+        if (code != 0) return stop("The release's new launcher did not start on this PC (" + std::to_string(code) + "). Nothing was changed.");
+    }
+
+    // 3. The saves, first. No backup, no update.
+    if (p->cancel) return stop("cancelled");
+    if (process_running_under(builds_dir())) return stop("The game is running. Close it, then install the update.");
+    p->set_line("Backing up your saves");
+    fs::path made;
+    r = backup_saves("before-update", &made);
+    if (!r.empty()) return stop("Backing up your saves failed, so nothing was installed: " + r);
+
+    // 4. The swap: each piece renamed in, its old copy kept until all are in. Past here Cancel does nothing.
     p->set_line("Installing");
-    int v = 0;
-    r = install_build_zip(f, &v, true);
-    fs::remove(f, ec);
-    return r;
+    fs::create_directories(aside, ec);
+    struct Moved { fs::path dst, old; };
+    std::vector<Moved> moved;
+    int nth = 0;
+    auto undo = [&] {
+        for (auto it = moved.rbegin(); it != moved.rend(); ++it) {
+            std::error_code e2;
+            delete_tree(it->dst);
+            if (!it->old.empty()) fs::rename(it->old, it->dst, e2);
+        }
+    };
+    auto put = [&](const fs::path& from, const fs::path& dst, fs::path old = {}) -> bool {
+        std::error_code e2;
+        const bool had = fs::exists(dst, e2);
+        if (had) {
+            if (old.empty()) old = aside / std::to_wstring(nth++);
+            fs::rename(dst, old, e2);
+            if (e2) return false;
+        }
+        fs::create_directories(dst.parent_path(), e2);
+        e2.clear();
+        fs::rename(from, dst, e2);
+        if (e2) { std::error_code e3; if (had) fs::rename(old, dst, e3); return false; }
+        moved.push_back({ dst, had ? old : fs::path() });
+        return true;
+    };
+    bool ok = true;
+    for (const auto& b : new_builds) ok = ok && put(b, builds_dir() / b.filename());
+    for (auto& m : fs::directory_iterator(fresh / L"mods", ec)) ok = ok && put(m.path(), mods_dir() / m.path().filename());
+    if (fs::exists(fresh / L"README.txt", ec)) ok = ok && put(fresh / L"README.txt", root / L"README.txt");
+    fs::path self_old = self; self_old += L".old";
+    if (ok && !new_launcher.empty()) {
+        // A running exe can be renamed but not deleted: this one goes aside beside itself, and the next
+        // start deletes it. The new launcher takes its name, whatever the player calls it.
+        DeleteFileW(self_old.c_str());
+        ok = put(new_launcher, self, self_old);
+    }
+    if (!ok) {
+        undo();
+        return stop("A file could not be replaced (is something using this folder?), so your install was put back as it was.");
+    }
+
+    // 5. In. Only the new build and the one before it stay (Play always starts the newest here).
+    if (top_build) {
+        set_current(top_build);
+        int before = 0;
+        for (const auto& b : builds()) if (b.version < top_build) before = std::max(before, b.version);
+        for (const auto& b : builds()) if (b.version != top_build && b.version != before) delete_tree(b.dir);
+    }
+    write_text_atomic(builds_dir() / L"release.txt", rel.tag + "\r\n");
+    *restart = !new_launcher.empty();
+    std::string s = rel.name + " is installed.";
+    if (top_build) s += " Play starts build v" + std::to_string(top_build) + ".";
+    s += " Your saves, settings, shader caches and game were left as they were";
+    s += made.empty() ? "." : "; a save backup was made first (" + u8(made.filename()) + ").";
+    if (summary) *summary = s;
+    delete_tree(dir);
+    return {};
 }
 
 // ---- mods ------------------------------------------------------------------------------
@@ -678,7 +1066,8 @@ std::vector<fs::path> Store::backup_list() const
     std::error_code ec;
     for (auto& f : fs::directory_iterator(backups(), ec)) {
         const std::string n = u8(f.path().filename());
-        if (f.is_regular_file(ec) && n.rfind("saves-", 0) == 0 && f.path().extension() == L".zip") out.push_back(f.path());
+        if (n.rfind("saves-", 0) != 0) continue;
+        if ((f.is_regular_file(ec) && f.path().extension() == L".zip") || f.is_directory(ec)) out.push_back(f.path());
     }
     std::sort(out.begin(), out.end());
     return out;
@@ -688,14 +1077,24 @@ std::string Store::backup_saves(const std::string& why, fs::path* made)
 {
     if (made) made->clear();
     if (save_slots().empty()) return {};
-    const fs::path z = backups() / widen("saves-" + stamp_now() + "-" + why + ".zip");
-    std::string r = zip_create(saves(), z);
-    if (!r.empty()) return r;
-    if (made) *made = z;
+    const std::string stem = "saves-" + stamp_now() + "-" + why;
+    fs::path got = backups() / widen(stem + ".zip");
+    std::string r = zip_create(saves(), got);
+    if (!r.empty()) {
+        /* tar.exe missing (older or trimmed Windows), or failing on the path:
+         * the save folders copied as they are instead. On Play this failure
+         * used to stop the game from starting at all (GitHub #5). Listed,
+         * restored and pruned like a zip. */
+        std::error_code ec; fs::remove(got, ec);
+        got = backups() / widen(stem);
+        Progress p;
+        const std::string r2 = copy_tree(saves(), got, &p);
+        if (!r2.empty()) { delete_tree(got); return r + "; a plain copy failed too: " + r2; }
+    }
+    if (made) *made = got;
     const int keep = std::max(1, atoi(ini.get("keep_backups", "8").c_str()));
     auto all = backup_list();
-    std::error_code ec;
-    for (size_t i = 0; i + keep < all.size(); i++) fs::remove(all[i], ec);
+    for (size_t i = 0; i + keep < all.size(); i++) delete_tree(all[i]);
     return {};
 }
 
@@ -718,6 +1117,22 @@ static std::vector<fs::path> find_slots(const fs::path& dir)
 
 std::string Store::import_saves(const fs::path& zip)
 {
+    std::error_code dec;
+    if (fs::is_directory(zip, dec)) {               /* a folder backup (tar.exe failed when it was made) */
+        const auto slots = find_slots(zip);
+        if (slots.empty()) return "No A Crack in Time saves (BCUS98124...) in that backup.";
+        std::string r = backup_saves("before-import", nullptr);
+        if (!r.empty()) return "Backing up the current saves failed: " + r;
+        fs::create_directories(saves(), dec);
+        for (auto& s : slots) {
+            const fs::path dst = saves() / s.filename();
+            delete_tree(dst);
+            Progress p;
+            r = copy_tree(s, dst, &p);
+            if (!r.empty()) return r;
+        }
+        return {};
+    }
     const fs::path tmp = data() / L".save-import";
     delete_tree(tmp);
     std::string r = zip_extract(zip, tmp);
@@ -762,6 +1177,112 @@ std::vector<fs::path> Store::old_logs() const
     return out;
 }
 
+// ---- shader caches ------------------------------------------------------------------------
+// Each build ships the caches it was played with, in the formats the game writes:
+// shadercache.bin (translated shaders: "RSXSPV01", then records { u64 k1, u64 k2, u32 words,
+// u32 words ^ 0x5350565A, u32 spirv[words] }) and pipelinelist.bin (the pipeline variants
+// seen: "RSXPLS01", u32 record size, u32 0, then records of that size). They were copied into
+// data\cache only when it had none, so a player who started on an older build never got a
+// newer build's caches: every area compiled its shaders again during play, build after build.
+// Now a build's entries are merged in once (cache\seeded.txt: the last build merged); the
+// game itself drops the oldest when a file outgrows its cap. pipelinecache.bin is the
+// graphics driver's own: copied only when there is none.
+namespace {
+const char kSpvMagic[8] = { 'R', 'S', 'X', 'S', 'P', 'V', '0', '1' };
+const char kPlistMagic[8] = { 'R', 'S', 'X', 'P', 'L', 'S', '0', '1' };
+
+struct SpvRec { uint64_t a, b, off; uint32_t n; };   // words at off + 24
+
+// The whole records of a shader cache, as the game reads it (it stops at the first bad one);
+// *end = where the last one ends. false: not a shader cache.
+bool spv_records(const fs::path& p, std::vector<SpvRec>* out, uint64_t* end)
+{
+    std::error_code ec;
+    const uint64_t size = fs::file_size(p, ec);
+    std::ifstream f(p, std::ios::binary);
+    char m[8];
+    if (ec || !f.read(m, 8) || memcmp(m, kSpvMagic, 8)) return false;
+    uint64_t off = 8;
+    unsigned char h[24];
+    while (off + 24 <= size && f.read((char*)h, 24)) {
+        SpvRec r; uint32_t check;
+        memcpy(&r.a, h, 8); memcpy(&r.b, h + 8, 8); memcpy(&r.n, h + 16, 4); memcpy(&check, h + 20, 4);
+        if (check != (r.n ^ 0x5350565Au) || r.n == 0 || r.n > (64u << 20) / 4u || off + 24 + (uint64_t)r.n * 4 > size) break;
+        r.off = off;
+        out->push_back(r);
+        off += 24 + (uint64_t)r.n * 4;
+        if (!f.seekg((std::streamoff)off)) break;
+    }
+    *end = off;
+    return true;
+}
+
+// The records of `from` that `to` lacks, appended to it. false: nothing could be merged.
+bool merge_shader_cache(const fs::path& from, const fs::path& to)
+{
+    std::vector<SpvRec> src, dst;
+    uint64_t src_end = 0, dst_end = 0;
+    if (!spv_records(from, &src, &src_end)) return false;
+    std::error_code ec;
+    if (!spv_records(to, &dst, &dst_end)) return fs::copy_file(from, to, fs::copy_options::overwrite_existing, ec);
+    // A torn tail (the game killed mid-write) would hide everything after it: cut it first.
+    if (fs::file_size(to, ec) != dst_end) { fs::resize_file(to, dst_end, ec); if (ec) return false; }
+    std::set<std::pair<uint64_t, uint64_t>> have;
+    for (const SpvRec& r : dst) have.insert({ r.a, r.b });
+    std::ifstream in(from, std::ios::binary);
+    std::ofstream out(to, std::ios::binary | std::ios::app);
+    std::vector<char> buf;
+    for (const SpvRec& r : src) {
+        if (!have.insert({ r.a, r.b }).second) continue;
+        buf.resize(24 + (size_t)r.n * 4);
+        if (!in.seekg((std::streamoff)r.off) || !in.read(buf.data(), (std::streamsize)buf.size())) break;
+        out.write(buf.data(), (std::streamsize)buf.size());
+    }
+    return (bool)out;
+}
+
+bool merge_pipeline_list(const fs::path& from, const fs::path& to)
+{
+    const std::string s = read_text(from, 1u << 28), d = read_text(to, 1u << 28);
+    auto rec_size = [](const std::string& t) -> uint32_t {
+        if (t.size() < 16 || memcmp(t.data(), kPlistMagic, 8)) return 0;
+        uint32_t n; memcpy(&n, t.data() + 8, 4); return n;
+    };
+    const uint32_t rs = rec_size(s);
+    if (!rs) return false;
+    std::error_code ec;
+    // Another record layout: the game would start a new list over this one anyway.
+    if (rec_size(d) != rs) return fs::copy_file(from, to, fs::copy_options::overwrite_existing, ec);
+    const size_t whole = (d.size() - 16) / rs;
+    if (16 + whole * rs != d.size()) { fs::resize_file(to, 16 + whole * rs, ec); if (ec) return false; }   // a torn tail
+    std::unordered_set<std::string> have;
+    for (size_t i = 0; i < whole; i++) have.insert(d.substr(16 + i * rs, rs));
+    std::ofstream out(to, std::ios::binary | std::ios::app);
+    for (size_t i = 0; 16 + (i + 1) * rs <= s.size(); i++) {
+        std::string r = s.substr(16 + i * rs, rs);
+        if (have.insert(r).second) out.write(r.data(), (std::streamsize)rs);
+    }
+    return (bool)out;
+}
+}  // namespace
+
+void Store::seed_caches(const BuildInfo& b)
+{
+    std::error_code ec;
+    const fs::path mark = cache() / L"seeded.txt";
+    const bool merged = atoi(trim(read_text(mark, 64)).c_str()) == b.version;
+    bool ok = true;
+    for (const wchar_t* cf : { L"shadercache.bin", L"pipelinecache.bin", L"pipelinelist.bin" }) {
+        const fs::path from = b.dir / cf, to = cache() / cf;
+        if (!fs::exists(from, ec)) continue;
+        if (!fs::exists(to, ec)) { fs::copy_file(from, to, ec); continue; }   // a fresh install starts from the build's
+        if (merged) continue;
+        if (!wcscmp(cf, L"shadercache.bin")) ok = merge_shader_cache(from, to) && ok;
+        else if (!wcscmp(cf, L"pipelinelist.bin")) ok = merge_pipeline_list(from, to) && ok;
+    }
+    if (!merged && ok) write_text_atomic(mark, std::to_string(b.version) + "\r\n");   // else tried again next Play
+}
+
 // ---- launch -----------------------------------------------------------------------------
 static std::wstring fwd(const fs::path& p) { std::wstring s = p.wstring(); for (auto& c : s) if (c == L'\\') c = L'/'; return s; }
 
@@ -772,17 +1293,21 @@ std::string Store::launch(void** process)
     const GameInfo g = game();
     if (!g.ok) return "The game is not ready: " + g.status;
     const BuildInfo b = current_build();
-    if (!b.version) return "No build installed (Builds & Updates).";
+    if (!b.version) return "No build installed: reinstall the launcher.";
     std::error_code ec;
     fs::create_directories(hdd(), ec); fs::create_directories(cache(), ec);
-    // The build ships its shader caches; a fresh install starts from them
-    // instead of compiling every shader during play.
-    for (const wchar_t* cf : { L"shadercache.bin", L"pipelinecache.bin", L"pipelinelist.bin" })
-        if (!fs::exists(cache() / cf, ec) && fs::exists(b.dir / cf, ec))
-            fs::copy_file(b.dir / cf, cache() / cf, ec);
+    seed_caches(b);
     if (ini.get("backup_on_play", "1") != "0") {
+        /* A backup that cannot be made must not keep the game from starting
+         * (GitHub #5: "backup save failed, game won't open"); the reason goes
+         * to logs\backup_failed.txt. */
         const std::string r = backup_saves("play", nullptr);
-        if (!r.empty()) return "Backing up the saves failed: " + r + " (backup_on_play=0 in launcher.ini skips it).";
+        if (!r.empty()) {
+            if (FILE* f = _wfopen((logs() / L"backup_failed.txt").c_str(), L"ab")) {
+                fprintf(f, "%s  backup on Play failed: %s\r\n", stamp_now().c_str(), r.c_str());
+                fclose(f);
+            }
+        }
     }
     rotate_log();
 

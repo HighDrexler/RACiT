@@ -3,9 +3,11 @@
 //
 // <launcher folder>
 //   RaCACiT Launcher.exe
-//   launcher.ini            the launcher's own options (update address, ...)
+//   launcher.ini            the launcher's own options
 //   builds\v65\             RaCACiT.exe (+ README.txt, version.txt) per installed build
 //   builds\current.txt      which one Play starts
+//   builds\release.txt      the release last installed through the launcher (v0.9)
+//   .update\                a release being downloaded and unpacked; removed after
 //   data\settings.txt       game settings: NAME=value, the same names as a release's
 //                           settings.txt; the in-game menu and the launcher both edit it
 //   data\dev_hdd0\          the PS3 hard drive; saves in home\00000001\savedata
@@ -52,6 +54,13 @@ struct BuildInfo {
     std::string notes_first_line;
 };
 
+struct ReleaseInfo {
+    std::string tag, name, notes, page;   // v0.9, its title, its text, its page on GitHub
+    std::string asset, url, sha256;       // the launcher .zip; empty = the release has none
+    std::string other_assets;             // what it has instead, for the message
+    uint64_t size = 0;
+};
+
 class Store {
 public:
     explicit Store(fs::path root);
@@ -93,19 +102,28 @@ public:
     // An existing release folder (RaCACiT_vNN): its settings, saves and caches.
     std::vector<fs::path> find_old_installs() const;
     std::string migrate_from(const fs::path& old, Progress* p, std::string* summary);
+    // An earlier launcher (RACiT Launcher 0.8): its settings, saves, caches and save backups;
+    // its game is played where it is. The old folder is not changed.
+    std::vector<fs::path> find_old_launchers() const;
+    std::string migrate_from_launcher(const fs::path& old, Progress* p, std::string* summary);
 
     // Builds: installed under builds\vNN, one is current.
     std::vector<BuildInfo> builds() const;
     BuildInfo current_build() const;
     bool set_current(int version);
     std::string install_build_folder(const fs::path& from, int* version, bool make_current);
-    std::string install_build_zip(const fs::path& zip, int* version, bool make_current);
-    std::string remove_build(int version);
 
-    // Updates (off until launcher.ini has update_url=): a JSON manifest.
-    std::string update_url() const { return trim(ini.get("update_url")); }
-    std::string check_update(int* latest, std::string* notes, std::string* url, std::string* sha256, uint64_t* size);
-    std::string download_update(const std::string& url, const std::string& sha256, int version, Progress* p);
+    // Updates: the newest release on GitHub. Its tag (v0.9) against the installed release
+    // says whether it is newer; the launcher .zip it carries is downloaded beside everything
+    // (.update\), checked, unpacked, and only then swapped in. data\, game\, backups\ and
+    // launcher.ini are never touched; the saves are backed up first.
+    static std::string fetch_latest_release(ReleaseInfo* out);   // touches nothing here: fine off the UI thread
+    static int compare_versions(const std::string& a, const std::string& b);   // v0.10 > 0.9.1 > v0.9 = 0.9.0; <0, 0, >0
+    std::string installed_release(const std::string& launcher_version) const;  // the higher of it and the last release installed
+    std::string download_release(const ReleaseInfo& rel, Progress* p);
+    // *restart: a new launcher is in place; start it and leave.
+    std::string install_release(const ReleaseInfo& rel, Progress* p, std::string* summary, bool* restart);
+    void clean_update_leftovers();
 
     // Mods.
     std::vector<ModInfo> mods() const;
@@ -134,6 +152,9 @@ public:
     // EBOOT on the command line, so builds that only read the settings.txt
     // beside their exe (v65 and older) get them too.
     std::string launch(void** process);
+    // The build's shader and pipeline caches into data\cache: copied when there are none,
+    // else merged in once per build (launch does this).
+    void seed_caches(const BuildInfo& b);
     // After the game ends: a build that wrote log.txt beside its exe (v65 and
     // older) -- moved to data\log.txt.
     void collect_log();

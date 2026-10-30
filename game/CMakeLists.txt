@@ -306,8 +306,9 @@ if(WIN32)
     if(MINGW OR CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
         target_link_options(${PROJECT_NAME} PRIVATE "-Wl,--stack,268435456")
         # A windowed app: no console window behind the game (RACACIT_CONSOLE=1
-        # opens one on demand). Keep the ordinary main() entry.
-        target_link_options(${PROJECT_NAME} PRIVATE "-Wl,--subsystem,windows" "-Wl,-e,mainCRTStartup")
+        # opens one on demand). Keep the ordinary main() entry, reached through
+        # racacit_entry (main.cpp): the CPU check, before any global constructor.
+        target_link_options(${PROJECT_NAME} PRIVATE "-Wl,--subsystem,windows" "-Wl,-e,racacit_entry")
         # zig writes RaCACiT.pdb beside the exe: crash offsets in log.txt
         # resolve with llvm-symbolizer --obj=RaCACiT.exe 0x140000000+off.
     endif()

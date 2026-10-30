@@ -7,7 +7,8 @@ Z="$ROOT/tools/venv/Lib/site-packages/ziglang/zig.exe"
 PY="$ROOT/tools/venv/Scripts/python"
 OUT="$HERE/build"
 mkdir -p "$OUT"
-[ -f "$OUT/icon.ico" ] || "$PY" -I "$HERE/make_icon.py" "$OUT/icon.ico"
+[ "$OUT/icon.ico" -nt "$HERE/make_icon.py" ] && [ "$OUT/icon.ico" -nt "$HERE/assets/emblem_256.png" ] ||
+    "$PY" -I "$HERE/make_icon.py" "$OUT/icon.ico"
 cd "$HERE/src"
 "$Z" c++ -target x86_64-windows-gnu -std=c++17 -O2 -municode \
     -DUNICODE -D_UNICODE \

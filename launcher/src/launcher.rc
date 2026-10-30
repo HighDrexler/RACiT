@@ -4,8 +4,8 @@
 1 ICON "../build/icon.ico"
 
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION 0,8,0,0
-PRODUCTVERSION 0,8,0,0
+FILEVERSION 0,9,0,0
+PRODUCTVERSION 0,9,0,0
 FILEOS VOS_NT_WINDOWS32
 FILETYPE VFT_APP
 BEGIN
@@ -15,8 +15,8 @@ BEGIN
     BEGIN
       VALUE "FileDescription", "RACiT Launcher"
       VALUE "ProductName", "Ratchet & Clank: A Crack in Time (PC recompilation) launcher"
-      VALUE "FileVersion", "0.8"
-      VALUE "ProductVersion", "0.8"
+      VALUE "FileVersion", "0.9"
+      VALUE "ProductVersion", "0.9"
     END
   END
   BLOCK "VarFileInfo"

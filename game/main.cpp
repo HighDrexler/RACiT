@@ -91,6 +91,7 @@ int      ppu_run(uint32_t entry_opd, uint32_t stack_top);
  * into guest RAM and register their exports. stubs.cpp has the empty version
  * a game with no lifted PRX wants. */
 void     ps3_load_prx_modules(void);
+void     racacit_register_language(void);     /* stubs.cpp: RACACIT_LANGUAGE */
 
 extern const char* ppu_vfs_root;              /* host dir the PS3 mount points map into */
 
@@ -105,6 +106,58 @@ uint8_t* vm_base = nullptr;
 extern "C" void racacit_ring_dump(void);   /* spu_channels.c: RACACIT_LINE_RING */
 extern "C" uint32_t ppu_hle_inject_base;   /* libs/video/cellGcmSys.c */
 extern uint32_t ppu_vm_size;                  /* ppu_loader.cpp: the OOB guard */
+
+/* At a stall: the state of the game's SPU job queues, always (owner logs have
+ * no RACACIT_STALL_PEEK). The open "job posted, never taken" freeze (v40 level
+ * 14, v91 Vorselon: main thread in job_wait func_00696614, every lane idle)
+ * needs which queue the wait is on and what each side thinks it holds.
+ *   igPm block B = [[0xD2FAA4] - 0x8000] (0x00FBE680): per queue q (0-4),
+ *   done count B+0x9480+0x80q, posted count B+0x9700+0x80q (job_submit
+ *   func_00695E84), kick-line pointer B+0x9994+4q, B+0x99A8+4q.
+ *   Handle (func_00696614): bits 0-9 target count, 10-12 queue, 13 = the
+ *   other path, 14+ frame; moby_prerender waits on [[0xD2F988] - 0x7FD8] + 0x3B0.
+ *   Job manager lines 0x00F3CE00/E80/F00 (the v40 freeze's record and queue). */
+static uint32_t stall_be32(uint32_t ea)
+{
+    if (!vm_base || ea < 0x10000u || ea + 4 > ppu_vm_size) return 0;
+    const uint8_t* p = vm_base + ea;
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
+}
+
+static void stall_line(const char* what, uint32_t ea)
+{
+    ea &= ~127u;
+    if (!vm_base || ea < 0x10000u || ea + 128 > ppu_vm_size) return;
+    fprintf(stderr, "[stall-jobs] %s %08X:", what, ea);
+    for (uint32_t o = 0; o < 128; o += 4) fprintf(stderr, " %08X", stall_be32(ea + o));
+    fprintf(stderr, "%c", 10);
+}
+
+static void racacit_stall_jobs_dump(void)
+{
+    const uint32_t b = stall_be32(stall_be32(0xD2FAA4u) - 0x8000u);
+    if (b) {
+        fprintf(stderr, "[stall-jobs] igPm block 0x%08X, frame word %08X%c", b, stall_be32(b + 4), 10);
+        for (uint32_t q = 0; q < 5; q++)
+            fprintf(stderr, "[stall-jobs]   queue %u: done %08X posted %08X  99A8 %08X  kick line 0x%08X%c", q,
+                    stall_be32(b + 0x9480 + 0x80 * q), stall_be32(b + 0x9700 + 0x80 * q),
+                    stall_be32(b + 0x99A8 + 4 * q), stall_be32(b + 0x9994 + 4 * q), 10);
+        for (uint32_t q = 0; q < 5; q++) {
+            const uint32_t k = stall_be32(b + 0x9994 + 4 * q);
+            if (k) stall_line("kick", k);
+        }
+    }
+    const uint32_t m = stall_be32(stall_be32(0xD2F988u) - 0x7FD8u);
+    if (m) {
+        /* A doubleword, zeroed by job_wait once the job is done: non-zero = still waited on. */
+        const uint32_t hi = stall_be32(m + 0x3B0), h = stall_be32(m + 0x3B4);
+        fprintf(stderr, "[stall-jobs] moby_prerender handle %08X%08X: queue %u target %u%s frame %u%c",
+                hi, h, (h >> 10) & 7, h & 0x3FF, (h & 0x2000) ? " (other path)" : "", h >> 14, 10);
+    }
+    stall_line("jobmgr", 0x00F3CE00u);
+    stall_line("jobmgr", 0x00F3CE80u);
+    stall_line("jobmgr", 0x00F3CF00u);
+}
 
 /* Guest-callback dispatch. g_ps3_guest_caller is the hook the HLE runtime
  * calls back into recompiled code through -- cellSysutil events and the GCM
@@ -469,6 +522,41 @@ static DWORD WINAPI peek_thread(LPVOID)
 static DWORD WINAPI peek_thread(LPVOID) { return 0; }
 #endif
 
+#if defined(_WIN32) && !defined(__ANDROID__)
+/* [mem], once a minute: what a long session holds -- the process's private
+ * bytes, working set and OS handles (a host leak shows as a climb), the lines
+ * SPU reservations have marked for the PPU's locked store path (spu_coherency.c
+ * never unmarks them) with the rate of writes into them, and the Vulkan image
+ * pool's live bytes against its blocks (fragmentation). The owner's next log
+ * says whether any of these grow with play time, without a soak. */
+#ifndef PSAPI_VERSION
+#define PSAPI_VERSION 2
+#endif
+#include <psapi.h>
+extern "C" unsigned long g_spu_coh_lines, g_spu_coh_writes, g_ppu_coh_stores;
+extern "C" void rsx_vk_pool_stats(unsigned long long* live, unsigned long long* cap, unsigned* blocks);
+static void racacit_memlog(unsigned long long now_us)
+{
+    static unsigned long long t0, last; static unsigned long w_last, p_last;
+    if (!t0) { t0 = last = now_us; w_last = g_spu_coh_writes; p_last = g_ppu_coh_stores; return; }
+    if (now_us - last < 60000000ull) return;
+    const double secs = (double)(now_us - last) / 1e6;
+    last = now_us;
+    PROCESS_MEMORY_COUNTERS_EX pm; memset(&pm, 0, sizeof pm); pm.cb = sizeof pm;
+    K32GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS*)&pm, sizeof pm);
+    DWORD handles = 0; GetProcessHandleCount(GetCurrentProcess(), &handles);
+    unsigned long long live = 0, cap = 0; unsigned blocks = 0;
+    rsx_vk_pool_stats(&live, &cap, &blocks);
+    const unsigned long w = g_spu_coh_writes, pw = g_ppu_coh_stores;
+    fprintf(stderr, "[mem] %llu min: private %llu MB, working set %llu MB, %lu handles; SPU-reserved lines %lu "
+                    "(PPU stores into them %.0f/s, SPU atomic commits %.0f/s); image pool %llu of %llu MB live in %u blocks\n",
+            (now_us - t0) / 60000000ull, (unsigned long long)pm.PrivateUsage >> 20,
+            (unsigned long long)pm.WorkingSetSize >> 20, (unsigned long)handles, g_spu_coh_lines,
+            (double)(pw - p_last) / secs, (double)((w - w_last) - (pw - p_last)) / secs, live >> 20, cap >> 20, blocks);
+    w_last = w; p_last = pw;
+}
+#endif
+
 extern "C" int cellGcm_fifo_pending(void);
 static DWORD WINAPI frame_clock(LPVOID)
 {
@@ -507,6 +595,9 @@ static DWORD WINAPI frame_clock(LPVOID)
     static DWORD s_poll_ms = 0;
     if (!s_poll_ms) { const char* e = getenv("RSX_WALKER_POLL_MS"); s_poll_ms = e ? (DWORD)atoi(e) : 1; if (!s_poll_ms) s_poll_ms = 1; }
     for (;;) {
+#if defined(_WIN32) && !defined(__ANDROID__)
+        racacit_memlog(rt_now_us());
+#endif
 #if defined(_WIN32) || defined(__ANDROID__)
         /* Spin (yielding) up to ~1 ms for new FIFO work before sleeping: the
          * guest waits on RSX labels every frame, so every ms between its kick
@@ -559,6 +650,7 @@ static DWORD WINAPI frame_clock(LPVOID)
                         }
                         pk = (*end == ',') ? end + 1 : end;
                     } }
+                  racacit_stall_jobs_dump();
                   racacit_ring_dump();   /* RACACIT_LINE_RING: the line's recent history */
                   fflush(stderr);
               }
@@ -651,8 +743,16 @@ static DWORD WINAPI frame_clock(LPVOID)
             /* Present on a guest flip. A present on a fixed clock can catch the
              * drain mid-frame and flash a partial one. Before the first flip
              * present freely, so the window is not blank during boot. */
+            /* One present per flip. The drain that reached the flip set both
+             * the pending flag and the count; presenting here without taking
+             * the flag presented the frame again on the next pass -- or, when
+             * the drain had meanwhile reached the NEXT flip (a heavy scene:
+             * ship landings), presented that one early. The pacing then took
+             * the repeat for a frame and held the real one a slot: the
+             * landing animation hitched on every landing. */
             unsigned fc = cellGcm_flip_request_count();
             if (fc != last_flip) {
+                (void)cellGcm_take_flip_pending();
                 present_guest_frame();
                 last_flip = fc;
             } else if (rsx_host_ui_modal()) {
@@ -1330,15 +1430,13 @@ int main(int argc, char** argv)        /* SDL.h renames this to SDL_main */
 #define main racacit_main
 #endif
 
-int main(int argc, char** argv)
-{
-#ifdef __ANDROID__
-    android_setup(&argc, &argv);
-#endif
 #if defined(_WIN32) && (defined(__x86_64__) || defined(_M_X64))
-    /* The lifted PPU and SPU code is built for AVX2 + FMA (game/CMakeLists.txt:
-     * hardware fused multiply-add for PPC fmadd, wider SPU vector ops). Say so
-     * plainly on an older CPU rather than dying on an illegal instruction. */
+/* The lifted PPU and SPU code is built for AVX2 + FMA + BMI2 (game/CMakeLists.txt:
+ * hardware fused multiply-add for PPC fmadd, wider SPU vector ops), and so is
+ * the runtime. Say so plainly on an older CPU rather than dying on an illegal
+ * instruction. This file is built for plain x86-64. */
+static int racacit_cpu_ok(void)
+{
     unsigned c_a, c_b, c_c, c_d;
     int c_ok = __get_cpuid(1, &c_a, &c_b, &c_c, &c_d) && (c_c & (1u << 12)) && (c_c & (1u << 27)) &&
                (c_c & (1u << 28));                                   /* FMA, OSXSAVE, AVX */
@@ -1347,12 +1445,42 @@ int main(int argc, char** argv)
         __asm__ volatile("xgetbv" : "=a"(x_lo), "=d"(x_hi) : "c"(0));
         c_ok = (x_lo & 6u) == 6u;                                    /* the OS saves YMM state */
     }
-    if (c_ok) c_ok = __get_cpuid_count(7, 0, &c_a, &c_b, &c_c, &c_d) && (c_b & (1u << 5));   /* AVX2 */
-    if (!c_ok) {
-        MessageBoxA(NULL, "This build needs a CPU with AVX2 and FMA (Intel Haswell / AMD Ryzen or newer).",
-                    "Ratchet & Clank: A Crack in Time", MB_OK | MB_ICONERROR);
-        return 1;
-    }
+    if (c_ok) c_ok = __get_cpuid_count(7, 0, &c_a, &c_b, &c_c, &c_d) &&
+                     (c_b & (1u << 5)) && (c_b & (1u << 8));         /* AVX2, BMI2 */
+    /* RACACIT_TEST_NO_AVX2 (in the environment, not settings.txt): take the
+     * refusal path on any CPU, to test it. */
+    if (GetEnvironmentVariableA("RACACIT_TEST_NO_AVX2", NULL, 0)) c_ok = 0;
+    return c_ok;
+}
+static void racacit_cpu_refuse(void)
+{
+    MessageBoxA(NULL, "This build needs a CPU with AVX2, FMA and BMI2 (Intel Haswell from 2013 or newer, "
+                      "AMD Ryzen or newer). This computer's processor does not have them, so the game "
+                      "cannot run on it.",
+                "Ratchet & Clank: A Crack in Time", MB_OK | MB_ICONERROR);
+}
+#if !defined(_MSC_VER)
+/* The process entry (game/CMakeLists.txt: -e racacit_entry), ahead of the C
+ * runtime's start-up: the runtime library's and the lifted code's global
+ * constructors are AVX2/BMI2 code too, and they run before main(). With the
+ * check only in main(), an i7-3770 (Ivy Bridge: AVX, no AVX2) died at start
+ * with 0xC000001D and never saw the message (user report, v95). */
+extern "C" int mainCRTStartup(void);
+extern "C" int racacit_entry(void)
+{
+    if (!racacit_cpu_ok()) { racacit_cpu_refuse(); ExitProcess(1); }
+    return mainCRTStartup();
+}
+#endif
+#endif
+
+int main(int argc, char** argv)
+{
+#ifdef __ANDROID__
+    android_setup(&argc, &argv);
+#endif
+#if defined(_WIN32) && (defined(__x86_64__) || defined(_M_X64))
+    if (!racacit_cpu_ok()) { racacit_cpu_refuse(); return 1; }
 #endif
 #if defined(_WIN32)
     windows_setup(&argc, &argv);
@@ -1368,6 +1496,15 @@ int main(int argc, char** argv)
      * inflates every shorter wait the title makes and throttles the whole
      * thing. POSIX timers are already fine-grained. */
     timeBeginPeriod(1);
+    /* Windows may slow a process it decides is in the background, park it on a
+     * hybrid CPU's efficiency cores, and (Windows 11) ignore its timer resolution
+     * when the window is covered: all of it stutter here, where every thread paces
+     * another. Opt out of both. Older Windows refuses the call, which is fine. */
+    { typedef BOOL (WINAPI* spi_t)(HANDLE, int, void*, DWORD);
+      struct { ULONG Version, ControlMask, StateMask; } pt = { 1u, 0x1u | 0x4u, 0u };
+      HMODULE k32 = GetModuleHandleA("kernel32.dll");
+      spi_t spi = k32 ? (spi_t)(void*)GetProcAddress(k32, "SetProcessInformation") : NULL;
+      if (spi) spi(GetCurrentProcess(), 4 /* ProcessPowerThrottling */, &pt, (DWORD)sizeof pt); }
     setvbuf(stdout, NULL, _IONBF, 0);   /* unbuffered: do not lose prints on a kill */
 #endif
 
@@ -1422,6 +1559,7 @@ int main(int argc, char** argv)
 #endif
     ps3_load_prx_modules();  /* this game's lifted system PRX, if it has any */
     ppu_hle_init();          /* firmware import NID -> HLE handlers */
+    racacit_register_language();   /* RACACIT_LANGUAGE: over the runtime's system-language answer */
     ppu_sysprx_register();   /* boot-critical CRT */
     ppu_fs_register();       /* cellFs over the game directory */
     lv2_init_syscalls();     /* the lv2 syscall table */

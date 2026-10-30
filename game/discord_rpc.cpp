@@ -34,7 +34,7 @@
 #ifdef RACACIT_DISCORD_APP_ID
 static const char kAppId[] = RACACIT_STR(RACACIT_DISCORD_APP_ID);
 #else
-static const char kAppId[] = "";
+static const char kAppId[] = "1564760311637213254";   /* the RACiT app (A Crack in Time) */
 #endif
 
 extern "C" uint8_t* vm_base;
