@@ -71,6 +71,10 @@ MANUAL = {
     0x64F31C: "moby_particle_submit",    0x67D7E4: "guppy_prerender_submit",
     0x61E1BC: "loose_att_wait",          0x662CE8: "render_mats_wait",
     0x54FB18: "anim_vert_wait",
+    # Moby jobs (descriptor table at 0xCA38CC: code EA + name; SPU image job_<EA>).
+    0x644FC0: "moby_consts_submit",      0x644F74: "moby_consts_wait",        # job_B63680, handle +0x388
+    0x647F60: "moby_bsphere_submit",     0x645C18: "moby_bsphere_wait",       # job_B89800, handle +0x900
+    0x623580: "moby_bsphere_visible",    # PPU pre-pass sphere test on moby+0x70 before MobyPreRender
 }
 # Generated package open functions (reference "tolua: embedded Lua code").
 TOLUA_OPEN = [0x51CE4, 0x25BA20, 0x2957C4, 0x51AFBC]
