@@ -299,6 +299,33 @@ def patch_file(path):
             src = src[:i] + 'extern "C" uint32_t racacit_level_change(uint32_t level);\n' + src[i:]
         changed = True
 
+    # 13. The game's GPU watchdog (func_005C50AC, its wait for a kick's end label): past
+    #     2.5 s it prints "GPU sit and spin timeout", then, while the get pointer "is still
+    #     moving", a line every 50 ms for 5 s, sleeping, on the main thread. A retail PS3's RSX
+    #     never gets there; one 2.9 s hitch here cost a 12 s freeze and the boss music (owner,
+    #     0.9.4). 20 s, as a real hang still has to get out: 0x5F2EDC00 ticks at 79.8 MHz.
+    sp = func_span(src, 'func_005C50AC')
+    if sp and '0xBE4 << 16' in src[sp[0]:sp[2]]:
+        a_, body_, end_ = sp
+        fn = src[a_:end_]
+        fn = fn.replace('(uint32_t)0xBE4 << 16', '(uint32_t)0x5F2E << 16', 1).replace('ctx->gpr[8] | 0x20E0', 'ctx->gpr[8] | 0xDC00', 1)
+        src = src[:a_] + fn + src[end_:]
+        changed = True
+
+    # 14. SCREAM's stream pause callback (game/stubs.cpp racacit_stream_pause_hook): the
+    #     controller's dialogue lines hold with the game's streams.
+    sp = func_span(src, 'func_0099B4E0')
+    if sp and 'racacit_stream_pause_hook' not in src[sp[0]:sp[2]]:
+        a_, body_, end_ = sp
+        fn = src[a_:end_]
+        head = 'void func_0099B4E0(ppu_context* ctx) {\n'
+        fn = fn.replace(head, head + '        racacit_stream_pause_hook(ctx);   /* racacit */\n', 1)
+        src = src[:a_] + fn + src[end_:]
+        if 'void racacit_stream_pause_hook' not in src:
+            i = src.index('\n', src.index('#include')) + 1
+            src = src[:i] + 'extern "C" void racacit_stream_pause_hook(ppu_context* ctx);\n' + src[i:]
+        changed = True
+
     # 8. Diagnostic RACACIT_LUA_CTRACE (game/stubs.cpp racacit_luac_trace): the
     #    entry of the script functions that drive scenes, speech and control.
     for fname, lname in LUA_CTRACE:

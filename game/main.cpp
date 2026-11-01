@@ -73,6 +73,8 @@ extern "C" void ppu_threads_dump_stacks(ppu_context* main_ctx);
  * around is a Windows problem. */
 #include <timeapi.h>
 #include <io.h>      /* _dup2 / _fileno */
+#include <fcntl.h>   /* _O_TEXT */
+static void racacit_log_flush(void);
 #endif
 
 /* ---------------------------------------------------------------------------
@@ -218,6 +220,7 @@ static int rsx_null_backend_init(uint32_t, uint32_t, const char*)
                 "Details are in log.txt next to RaCACiT.exe.",
                 "Ratchet & Clank: A Crack in Time", MB_OK | MB_ICONERROR);
     fflush(stdout); fflush(stderr);
+    racacit_log_flush();
     TerminateProcess(GetCurrentProcess(), 3);
     return -1;
 }
@@ -743,6 +746,7 @@ static DWORD WINAPI frame_clock(LPVOID)
                 fprintf(stderr, "[rsx] window closed -- exiting\n");
                 fflush(stdout); fflush(stderr);
 #ifdef _WIN32
+                racacit_log_flush();
                 TerminateProcess(GetCurrentProcess(), 0);
 #else
                 _exit(0);
@@ -1198,6 +1202,39 @@ static int win_file_exists(const char* p)
  * addresses found on the stack -- to log.txt, then lets the fault continue
  * as before. Offsets resolve against RaCACiT.map from the build. Static
  * buffers and a raw WriteFile: it must work on an overflowed stack too. */
+/* log.txt is written by its own thread: every print goes down a pipe. Printing was a
+ * disk write on the printing thread, and one that blocked for 2.9 s (the owner's 0.9.4
+ * boss fight, frame 68400, the render thread's once-a-minute memory line; C: was 98% full)
+ * held up the frame long enough for the game's GPU watchdog to fire. RACACIT_LOG_SYNC=1:
+ * as before. Whatever must reach the file before the process ends calls racacit_log_flush. */
+static HANDLE s_log_file, s_log_pipe_r, s_log_pipe_w;
+static DWORD s_log_tid;
+static DWORD WINAPI log_writer_thread(LPVOID)
+{
+    s_log_tid = GetCurrentThreadId();
+    static char buf[1 << 16];
+    DWORD n, w;
+    while (ReadFile(s_log_pipe_r, buf, sizeof buf, &n, NULL) && n) WriteFile(s_log_file, buf, n, &w, NULL);
+    return 0;
+}
+static void racacit_log_async(void)
+{
+    if (getenv("RACACIT_LOG_SYNC")) return;
+    const HANDLE me = GetCurrentProcess();
+    if (!DuplicateHandle(me, (HANDLE)_get_osfhandle(_fileno(stdout)), me, &s_log_file, 0, FALSE, DUPLICATE_SAME_ACCESS)) return;
+    if (!CreatePipe(&s_log_pipe_r, &s_log_pipe_w, NULL, 8u << 20)) { CloseHandle(s_log_file); return; }
+    const int fd = _open_osfhandle((intptr_t)s_log_pipe_w, _O_TEXT);
+    HANDLE th = fd >= 0 ? CreateThread(NULL, 0, log_writer_thread, NULL, 0, NULL) : NULL;
+    if (!th) return;   /* prints stay on the file */
+    CloseHandle(th);
+    _dup2(fd, _fileno(stdout));
+    _dup2(fd, 2);
+}
+static void racacit_log_flush(void)
+{
+    /* Until the writer has read it all. Not on the writer: it would wait for itself. */
+    if (s_log_pipe_w && GetCurrentThreadId() != s_log_tid) FlushFileBuffers(s_log_pipe_w);
+}
 static char s_crash_buf[4096];
 static volatile LONG s_crash_n = 0;
 static void crash_write(const char* s)
@@ -1268,13 +1305,14 @@ static LONG WINAPI crash_veh(EXCEPTION_POINTERS* ep)
         code == EXCEPTION_STACK_OVERFLOW || code == EXCEPTION_INT_DIVIDE_BY_ZERO ||
         code == EXCEPTION_PRIV_INSTRUCTION || code == EXCEPTION_IN_PAGE_ERROR ||
         code == 0xC0000409 /* fast-fail / stack buffer overrun */) {
-        if (InterlockedIncrement(&s_crash_n) <= 6) crash_describe("first-chance", ep);
+        if (InterlockedIncrement(&s_crash_n) <= 6) { crash_describe("first-chance", ep); racacit_log_flush(); }
     }
     return EXCEPTION_CONTINUE_SEARCH;
 }
 static LONG WINAPI crash_unhandled(EXCEPTION_POINTERS* ep)
 {
     crash_describe("UNHANDLED (process ending)", ep);
+    racacit_log_flush();
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
@@ -1333,6 +1371,8 @@ static void windows_setup(int* argc, char*** argv)
             _dup2(_fileno(stdout), _fileno(stderr) >= 0 ? _fileno(stderr) : 2);
             _dup2(_fileno(stdout), 2);
             setvbuf(stderr, NULL, _IONBF, 0);
+            racacit_log_async();
+            atexit(racacit_log_flush);
         }
     }
 

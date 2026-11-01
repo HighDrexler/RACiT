@@ -1,4 +1,4 @@
-RACiT Launcher 0.9.3 -- Ratchet & Clank Future: A Crack in Time (PC), Windows
+RACiT Launcher 0.9.5 -- Ratchet & Clank Future: A Crack in Time (PC), Windows
 ================================================================================
 
 Everything the game needs comes in this folder: the launcher, the game build

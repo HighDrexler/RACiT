@@ -350,8 +350,27 @@ static void racacit_lua_alltrace_init(void)   /* first script execute(): setting
 extern "C" void vm_write32(uint64_t a, uint32_t v);
 static void racacit_lua_note_state(uint32_t L);
 static void racacit_lua_file(ppu_context* ctx, uint32_t L);
+extern "C" void ds_player_stop_lines(int all);
+extern "C" void ds_player_stream_pause(uint32_t stream, int on);
+extern "C" unsigned long long ps3_qpc_us(void);
+/* func_0099B4E0, SCREAM's stream pause callback (r3 the stream, r4 paused), patched in by
+ * patch_lift.py. It fires for every stream at every start too, paused then resumed: only a
+ * stream that stays paused means anything (ds_player.c). RACACIT_DS_DEBUG=1 logs them. */
+extern "C" void racacit_stream_pause_hook(ppu_context* ctx)
+{
+    const int on = (uint32_t)ctx->gpr[4] != 0;
+    { static int dbg = -1; if (dbg < 0) { const char* e = getenv("RACACIT_DS_DEBUG"); dbg = e && *e == '1'; }
+      static int n; if (dbg && n < 2000) { n++; fprintf(stderr, "[ds-pause] %llu us stream %08X: %s%c", ps3_qpc_us(), (uint32_t)ctx->gpr[3], on ? "paused" : "resumed", 10); } }
+    ds_player_stream_pause((uint32_t)ctx->gpr[3], on);
+}
 extern "C" void racacit_luac_trace(ppu_context* ctx, const char* name)
 {
+    /* The game ending speech: the controller's copy ends with it (the radio at DisableRadio
+     * and on a station change; everything when a scene or a landing clears the VO). */
+    if (name[0] == 's') {
+        if (!strcmp(name, "stop_vo")) ds_player_stop_lines(0);
+        else if (!strcmp(name, "stop_all_vo") || !strcmp(name, "space_land_ship")) ds_player_stop_lines(1);
+    }
     racacit_lua_note_state((uint32_t)ctx->gpr[3]);   /* RACACIT_LUA_FILE (test hook) */
     racacit_lua_file(ctx, (uint32_t)ctx->gpr[3]);
     /* RACACIT_SPACE_FREE_LANDING (default 1): every moon and planet in space
@@ -659,6 +678,7 @@ extern "C" { volatile unsigned g_racacit_level_changes = 0; }
 extern "C" uint32_t racacit_level_change(uint32_t level)
 {
     g_racacit_level_changes++;
+    ds_player_stop_lines(1);   /* the game's voices end with the level: a line on the controller did not */
     static int done = 0;
     static long want = -1;
     if (want < 0) {
@@ -1149,7 +1169,13 @@ static int racacit_ds_classify(const char* name)
                  skip = e ? e : "wep_turret_,wep_krell,wep_pirateturret_,wep_vis_,wep_nef_,wep_thrown_,mrzurkon_hover,"
                                  "handloop,activeloop,lavaloop,beeploop,motorloop,windloop,alarm_clock,"
                                  "wep_wrench_,wep_clank_,damage,death,idle,flyby,ricochet,debris,"
-                                 "proximity_beep,proximitylatch,zoom_amb,_amb_,tracking,connector"; }
+                                 "proximity_beep,proximitylatch,zoom_amb,_amb_,tracking,connector,"
+                                 /* the Hydrodisplacer's tank, held: a gurgling loop for as long as it has
+                                  * liquid, at a shot's level ("too moist", owner, 0.9.4). It stays on the TV.
+                                  * zoni_force_field_cro, the field at Nefarious Station's Zoni: "zoni" routed
+                                  * it, a loop that restarts its layer several times a second ("a constant
+                                  * churning", owner, 0.9.5). */
+                                 "supsoakalive,force_field"; }
     return racacit_ds_match(name, route) && !racacit_ds_match(name, skip) ? 1 : 0;
 }
 /* The speaker level of a routed sound (v69): one ceiling per kind instead of
@@ -1200,7 +1226,7 @@ static int racacit_ds_haptic(const char* name)
     if (!skip) { const char* e = getenv("RACACIT_DS_HAPTIC_SKIP");
                  skip = e ? e : "wep_turret_,wep_krell,wep_pirateturret_,wep_vis_,wep_nef_,wep_thrown_,mrzurkon_hover,"
                                  "loop,idle,flyby,ricochet,equip,emptied,wep_gen_,wep_wrench_whoosh,_vox,vocal,ui_,^cha_,^hca_,"
-                                 "zoom_amb,_amb_,tracking,connector,proximity_beep,proximitylatch"; }
+                                 "zoom_amb,_amb_,tracking,connector,proximity_beep,proximitylatch,supsoakalive"; }
     return racacit_ds_match(name, route) && !racacit_ds_match(name, skip) ? 4 : 0;
 }
 /* The start returned: the instance holds its SCREAM handle at +0x14 (0 if
