@@ -6,6 +6,14 @@ project(racacit_windows C CXX)
 
 get_filename_component(RACACIT_ROOT "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
 
+# zig cc keeps a frame pointer in every function by default, a register the lifted
+# code could use; and on this target clang assumes math calls may set errno, so sqrt()
+# stayed a real call (to zig's software square root) even with AVX2 on. Neither changes
+# a result: x86's square root is correctly rounded, as the software one was.
+if(NOT MSVC)
+    add_compile_options(-fomit-frame-pointer -fno-math-errno)
+endif()
+
 # ---- SDL2 (prebuilt by scripts/build_windows.sh into tools/sdl2-win) -------
 list(APPEND CMAKE_PREFIX_PATH "${RACACIT_ROOT}/tools/sdl2-win")
 find_package(SDL2 REQUIRED CONFIG)

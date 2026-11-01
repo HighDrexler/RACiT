@@ -103,6 +103,37 @@ def lift_block(name, raw, base, out_raw, spu_dir, hints=()):
     return True
 
 
+def patch_igpm_clear(path):
+    """igPm clears local store 16 bytes a turn before each job: a plain loop, not
+    two trampoline hops per turn (a large part of a busy lane's time)."""
+    old = [
+        "void igpm_rt_spu_func_0003F90C(spu_context* SPU_RESTRICT ctx) {",
+        "        ctx->gpr[4] = spu_ai(ctx->gpr[4], -1);",
+        "        ctx->gpr[66] = spu_ceqi(ctx->gpr[4], -1);",
+        "        if (ctx->gpr[66]._u32[0] == 0) { ctx->pc = 0x3F904; g_spu_trampoline_fn = igpm_rt_spu_func_0003F904; return; }",
+    ]
+    new = [
+        old[0],
+        "        /* The job launch clears local store, 16 bytes a turn: as a plain loop here",
+        "         * (scripts/lift_spu_jobs.py), not two trampoline hops per turn. */",
+        "        for (;;) {",
+        "            ctx->gpr[4] = spu_ai(ctx->gpr[4], -1);",
+        "            ctx->gpr[66] = spu_ceqi(ctx->gpr[4], -1);",
+        "            if (ctx->gpr[66]._u32[0] != 0) break;",
+        "            spu_ls_write128(ctx, ctx->gpr[3]._u32[0] + 0x0, ctx->gpr[5]);",
+        "            ctx->gpr[3] = spu_ai(ctx->gpr[3], 16);",
+        "        }",
+    ]
+    with open(path, newline="") as f:
+        text = f.read()
+    eol = chr(13) + chr(10) if chr(13) in text else chr(10)
+    a, b = eol.join(old) + eol, eol.join(new) + eol
+    if a not in text:
+        raise SystemExit("igpm_rt: the local store clear loop has changed: review patch_igpm_clear")
+    with open(path, "w", newline="") as f:
+        f.write(text.replace(a, b, 1))
+
+
 def main_extra(d, sg):
     out_raw = os.path.join(ROOT, "out", "spu_jobs")
     spu_dir = os.path.join(ROOT, "game", "spu")
@@ -113,6 +144,8 @@ def main_extra(d, sg):
         if not lift_block(name, raw, base, out_raw, spu_dir, EXTRA_HINTS.get(name, ())):
             print(f"{name}: lifter FAILED, see out/spu_jobs/{name}.lift.log")
             continue
+        if name == "igpm_rt":
+            patch_igpm_clear(os.path.join(spu_dir, name, "spu_recomp.c"))
         decls.append(f"extern void {name}_spu_recomp_register(void);")
         regs.append(f"    spu_begin_image({img}); {name}_spu_recomp_register(); spu_begin_image(0);")
         print(f"{name}: 0x{ea:X} size 0x{size:X} at LS 0x{base:X} -> image {img}")

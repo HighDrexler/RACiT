@@ -316,6 +316,7 @@ static void present_guest_frame(void)
  * and every RSX label the guest waited on cost up to 4 ms -- 52 fps in an
  * idle menu, ~40 in play, with every thread mostly waiting. */
 #if defined(_WIN32) || defined(__ANDROID__)
+extern "C" int racacit_few_cpus(void);   /* sys_timer.c */
 static HANDLE s_walker_wake;
 static void walker_wake(void) { if (s_walker_wake) SetEvent(s_walker_wake); }
 #endif
@@ -605,7 +606,14 @@ static DWORD WINAPI frame_clock(LPVOID)
         if (!cellGcm_fifo_pending()) {
             /* RACACIT_WALKER_SPIN_US: how long (us) to spin before sleeping. */
             static LONGLONG s_spin_us = -1;
-            if (s_spin_us < 0) { const char* e = getenv("RACACIT_WALKER_SPIN_US"); s_spin_us = e ? atoll(e) : 1000; }
+            if (s_spin_us < 0) { const char* e = getenv("RACACIT_WALKER_SPIN_US");
+#if defined(_WIN32) && !defined(__ANDROID__)
+                /* Few CPU threads: the wake event is quick, and every ms spun here is a ms the SPU lanes wait. */
+                s_spin_us = e ? atoll(e) : (racacit_few_cpus() ? 50 : 1000);
+#else
+                s_spin_us = e ? atoll(e) : 1000;
+#endif
+            }
             LARGE_INTEGER f_, a_, n_; QueryPerformanceFrequency(&f_); QueryPerformanceCounter(&a_);
             const LONGLONG lim_ = f_.QuadPart * s_spin_us / 1000000;
             int got_ = 0;

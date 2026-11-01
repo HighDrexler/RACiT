@@ -240,6 +240,16 @@ if(SPU_SOURCES)
         # three blocks in four behind real time). Every x86-64 CPU since 2008.
         if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64" AND NOT ANDROID)
             set_source_files_properties(${SPU_SOURCES} PROPERTIES COMPILE_OPTIONS "-O3;-msse4.1;-ffp-contract=off;${RACACIT_SIMD_FLAGS};${RACACIT_LIFTED_FLAGS}")
+            # The hot modules together in the exe (scripts/dev/hot_funcs.py).
+            if(WIN32 AND EXISTS "${CMAKE_CURRENT_LIST_DIR}/hot_spu_modules.cmake")
+                include("${CMAKE_CURRENT_LIST_DIR}/hot_spu_modules.cmake")
+                foreach(t 0 1)
+                    foreach(m ${RACACIT_HOT_SPU${t}})
+                        set_property(SOURCE "${SPU_DIR}/${m}/spu_recomp.c" APPEND PROPERTY
+                                     COMPILE_OPTIONS "-include;${CMAKE_CURRENT_LIST_DIR}/hot_spu${t}.h")
+                    endforeach()
+                endforeach()
+            endif()
         else()
             set_source_files_properties(${SPU_SOURCES} PROPERTIES COMPILE_OPTIONS "-O2")
         endif()
@@ -356,12 +366,17 @@ endif()
 #     default; a PPC fmadd is spelt as one where the lifter means one.
 #   - /bigobj on MSVC. A single lifted file routinely passes the 65,536-section
 #     limit of the default object format.
+# The hot functions together in the exe (scripts/dev/hot_funcs.py): only where they sit changes.
+set(RACACIT_HOT_PPU "")
+if(WIN32 AND NOT MSVC AND EXISTS "${CMAKE_CURRENT_LIST_DIR}/hot_ppu.h")
+    set(RACACIT_HOT_PPU "-include;${CMAKE_CURRENT_LIST_DIR}/hot_ppu.h")
+endif()
 if(MSVC)
     set_source_files_properties(${RECOMP_SOURCES} PROPERTIES
         COMPILE_OPTIONS "/w;/bigobj")
 else()
     set_source_files_properties(${RECOMP_SOURCES} PROPERTIES
-        COMPILE_OPTIONS "-w;-ffp-contract=off;${RACACIT_SIMD_FLAGS};${RACACIT_LIFTED_FLAGS}")
+        COMPILE_OPTIONS "-w;${RACACIT_HOT_PPU};-ffp-contract=off;${RACACIT_SIMD_FLAGS};${RACACIT_LIFTED_FLAGS}")
 endif()
 # Guest loads and stores of ordinary memory inlined into the lifted code
 # (ppu_recomp.h); the runtime keeps calling the out-of-line accessors.
