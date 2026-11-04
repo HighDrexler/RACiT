@@ -332,7 +332,7 @@ index 0000000..68a2795
 +
 +#endif /* AUDIO_STRETCH_H */
 diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
-index b51fb7c..ecbb5d0 100644
+index b51fb7c..b40faae 100644
 --- a/libs/audio/cellAudio.c
 +++ b/libs/audio/cellAudio.c
 @@ -15,6 +15,9 @@
@@ -709,23 +709,30 @@ index b51fb7c..ecbb5d0 100644
              fprintf(stderr, "[cellAudio] GetCurrentPadding failed 0x%08lX -- clock pacing%c", (unsigned long)hr, 10);
          return -1;
      }
-@@ -408,10 +701,30 @@ static inline float ld_be_f32(const float* p)
+@@ -408,10 +701,37 @@ static inline float ld_be_f32(const float* p)
      return f;
  }
  
 +/* Host monotonic microseconds -- the same epoch as sys_time_get_system_time
-+ * and the PPU timebase (CLOCK_MONOTONIC / absolute QPC). */
++ * and the PPU timebase (CLOCK_MONOTONIC / QPC from the guest clock origin,
++ * sys_timer.c). */
++#ifdef _WIN32
++extern uint64_t ps3_guest_clock_epoch_qpc(void);
++#else
++extern uint64_t ps3_guest_clock_epoch_ns(void);
++#endif
 +static u64 audio_now_us(void)
 +{
 +#ifdef _WIN32
 +    static LARGE_INTEGER f; LARGE_INTEGER c;
 +    if (!f.QuadPart) QueryPerformanceFrequency(&f);
 +    QueryPerformanceCounter(&c);
-+    return (u64)(c.QuadPart / f.QuadPart) * 1000000ULL +
-+           (u64)(c.QuadPart % f.QuadPart) * 1000000ULL / (u64)f.QuadPart;
++    const u64 q = (u64)c.QuadPart - ps3_guest_clock_epoch_qpc();
++    return (q / (u64)f.QuadPart) * 1000000ULL +
++           (q % (u64)f.QuadPart) * 1000000ULL / (u64)f.QuadPart;
 +#else
 +    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
-+    return (u64)ts.tv_sec * 1000000ULL + (u64)ts.tv_nsec / 1000ULL;
++    return ((u64)ts.tv_sec * 1000000000ULL + (u64)ts.tv_nsec - ps3_guest_clock_epoch_ns()) / 1000ULL;
 +#endif
 +}
 +
@@ -740,7 +747,7 @@ index b51fb7c..ecbb5d0 100644
  
      mutex_lock(&s_audio_mutex);
  
-@@ -445,15 +758,21 @@ static void audio_mix_one_block(void)
+@@ -445,15 +765,21 @@ static void audio_mix_one_block(void)
  
          /* Read one block at the current read_index */
          u32 block_idx = (u32)(port->read_index % nblock);
@@ -765,7 +772,7 @@ index b51fb7c..ecbb5d0 100644
                  char map[36]; u32 b;
                  for (b = 0; b < nblock && b < 32; b++) {
                      const float* bp = port->buffer + b * CELL_AUDIO_BLOCK_SAMPLES * nch;
-@@ -463,8 +782,8 @@ static void audio_mix_one_block(void)
+@@ -463,8 +789,8 @@ static void audio_mix_one_block(void)
                      map[b] = nz ? '#' : '.';
                  }
                  map[b] = 0;
@@ -776,7 +783,7 @@ index b51fb7c..ecbb5d0 100644
              } } }
  
          for (u32 s = 0; s < CELL_AUDIO_BLOCK_SAMPLES; s++) {
-@@ -493,17 +812,37 @@ static void audio_mix_one_block(void)
+@@ -493,17 +819,37 @@ static void audio_mix_one_block(void)
              s_mix_buffer[s * 2 + 1] += right;
          }
  
@@ -816,7 +823,7 @@ index b51fb7c..ecbb5d0 100644
      }
  
      mutex_unlock(&s_audio_mutex);
-@@ -513,6 +852,136 @@ static void audio_mix_one_block(void)
+@@ -513,6 +859,136 @@ static void audio_mix_one_block(void)
          if (s_mix_buffer[i] > 1.0f) s_mix_buffer[i] = 1.0f;
          if (s_mix_buffer[i] < -1.0f) s_mix_buffer[i] = -1.0f;
      }
@@ -953,7 +960,7 @@ index b51fb7c..ecbb5d0 100644
  }
  
  /* ---------------------------------------------------------------------------
-@@ -521,6 +990,15 @@ static void audio_mix_one_block(void)
+@@ -521,6 +997,15 @@ static void audio_mix_one_block(void)
  
  static void audio_notify_event_queues(void)
  {
@@ -969,7 +976,7 @@ index b51fb7c..ecbb5d0 100644
      /* Push the audio-period event (data1 = CELL_AUDIO_EVENT_MIX = 0) to each
       * registered notify queue, so the game's audio loop (blocked on
       * sys_event_queue_receive) wakes once per block and writes the next one.
-@@ -528,17 +1006,117 @@ static void audio_notify_event_queues(void)
+@@ -528,17 +1013,117 @@ static void audio_notify_event_queues(void)
      for (int i = 0; i < CELL_AUDIO_MAX_NOTIFY_EVENT_QUEUES; i++) {
          if (!s_notify_queues[i].in_use) continue;
          uint32_t qid = sys_event_find_queue_by_key(s_notify_queues[i].key);
@@ -1089,7 +1096,7 @@ index b51fb7c..ecbb5d0 100644
  
      /* Pace to the device clock. The PS3 consumes one block every 5.33 ms;
       * the old Sleep(2)/Sleep(5) loop keyed on a queue depth the 1056-frame
-@@ -550,6 +1128,22 @@ static unsigned __stdcall audio_mix_thread_func(void* arg)
+@@ -550,6 +1135,22 @@ static unsigned __stdcall audio_mix_thread_func(void* arg)
      unsigned long long blocks = 0;
      while (s_mix_thread_running) {
          const int room = audio_backend_room();
@@ -1112,7 +1119,7 @@ index b51fb7c..ecbb5d0 100644
          if (room >= 0 && room < CELL_AUDIO_BLOCK_SAMPLES) { audio_backend_wait(); continue; }
          if (room < 0) {
              LARGE_INTEGER now; QueryPerformanceCounter(&now);
-@@ -573,11 +1167,7 @@ static unsigned __stdcall audio_mix_thread_func(void* arg)
+@@ -573,11 +1174,7 @@ static unsigned __stdcall audio_mix_thread_func(void* arg)
                  float a = s_mix_buffer[i]; if (a < 0) a = -a; if (a > pk) pk = a; }
              if ((++_n % 200) == 0 || (pk > 0.001f && _n < 40))
                  fprintf(stderr, "[audio-peak] block#%u peak=%.4f\n", _n, pk); } }
@@ -1125,7 +1132,7 @@ index b51fb7c..ecbb5d0 100644
          audio_backend_submit(s_mix_buffer, CELL_AUDIO_BLOCK_SAMPLES);
          /* AUDIO_RATE=1: blocks mixed vs real time, and frames dropped. */
          { static int on = -1; if (on < 0) on = getenv("AUDIO_RATE") ? 1 : 0;
-@@ -610,6 +1200,10 @@ static void* audio_mix_thread_func(void* arg)
+@@ -610,6 +1207,10 @@ static void* audio_mix_thread_func(void* arg)
  
      while (s_mix_thread_running) {
          audio_mix_one_block();
@@ -1136,7 +1143,7 @@ index b51fb7c..ecbb5d0 100644
          audio_backend_submit(s_mix_buffer, CELL_AUDIO_BLOCK_SAMPLES);
          audio_notify_event_queues();
  
-@@ -629,6 +1223,8 @@ static void* audio_mix_thread_func(void* arg)
+@@ -629,6 +1230,8 @@ static void* audio_mix_thread_func(void* arg)
  static int audio_start_mix_thread(void)
  {
      s_mix_thread_running = 1;
@@ -1145,7 +1152,7 @@ index b51fb7c..ecbb5d0 100644
  
  #ifdef _WIN32
      s_mix_thread = (HANDLE)_beginthreadex(NULL, 0, audio_mix_thread_func,
-@@ -785,7 +1381,10 @@ s32 cellAudioPortOpen(const CellAudioPortParam* param, u32* portNum)
+@@ -785,7 +1388,10 @@ s32 cellAudioPortOpen(const CellAudioPortParam* param, u32* portNum)
      port->param.nChannel = nch;
      port->param.nBlock   = nblk;
      port->read_index  = 0;
@@ -1156,7 +1163,7 @@ index b51fb7c..ecbb5d0 100644
  
      /* Allocate the audio buffer in GUEST memory so portAddr/readIndexAddr are
       * real guest addresses (the game's mixer -- FMOD here -- writes PCM there
-@@ -890,6 +1489,10 @@ s32 cellAudioPortStop(u32 portNum)
+@@ -890,6 +1496,10 @@ s32 cellAudioPortStop(u32 portNum)
  
  s32 cellAudioGetPortBlockTag(u32 portNum, u64 blockNo, u64* tag)
  {
@@ -1167,7 +1174,7 @@ index b51fb7c..ecbb5d0 100644
      uint32_t tag_ea = (uint32_t)(uintptr_t)tag;
      if (!s_audio_initialized)
          return CELL_AUDIO_ERROR_NOT_INIT;
-@@ -907,8 +1510,8 @@ s32 cellAudioGetPortBlockTag(u32 portNum, u64 blockNo, u64* tag)
+@@ -907,8 +1517,8 @@ s32 cellAudioGetPortBlockTag(u32 portNum, u64 blockNo, u64* tag)
          mutex_unlock(&s_audio_mutex);
          return CELL_AUDIO_ERROR_PARAM;
      }
@@ -1178,7 +1185,7 @@ index b51fb7c..ecbb5d0 100644
      mutex_unlock(&s_audio_mutex);
  
      vm_write64(tag_ea, t);
-@@ -917,6 +1520,10 @@ s32 cellAudioGetPortBlockTag(u32 portNum, u64 blockNo, u64* tag)
+@@ -917,6 +1527,10 @@ s32 cellAudioGetPortBlockTag(u32 portNum, u64 blockNo, u64* tag)
  
  s32 cellAudioGetPortTimestamp(u32 portNum, u64 tag, u64* stamp)
  {
@@ -1189,7 +1196,7 @@ index b51fb7c..ecbb5d0 100644
      uint32_t stamp_ea = (uint32_t)(uintptr_t)stamp;
      if (!s_audio_initialized)
          return CELL_AUDIO_ERROR_NOT_INIT;
-@@ -928,7 +1535,7 @@ s32 cellAudioGetPortTimestamp(u32 portNum, u64 tag, u64* stamp)
+@@ -928,7 +1542,7 @@ s32 cellAudioGetPortTimestamp(u32 portNum, u64 tag, u64* stamp)
          return CELL_AUDIO_ERROR_PARAM;
  
      mutex_lock(&s_audio_mutex);
@@ -1198,7 +1205,7 @@ index b51fb7c..ecbb5d0 100644
      mutex_unlock(&s_audio_mutex);
      if (tag > global_counter)
          return CELL_AUDIO_ERROR_TAG_NOT_FOUND;
-@@ -1074,7 +1681,7 @@ s32 cellAudioGetPortConfig(u32 portNum, CellAudioPortConfig* config)
+@@ -1074,7 +1688,7 @@ s32 cellAudioGetPortConfig(u32 portNum, CellAudioPortConfig* config)
      vm_write32(cfg + 24, port->buf_size);                                   /* portSize */
      vm_write32(cfg + 28, (u32)port->port_addr);                             /* portAddr */
  
@@ -6848,7 +6855,7 @@ index f6e4e31..6c69330 100644
      vm_write32(user - 12, 0);                            /* poison: catch double free */
      slot_lock();
 diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
-index cdb0464..b67c0ae 100644
+index cdb0464..8d352f1 100644
 --- a/libs/video/cellGcmSys.c
 +++ b/libs/video/cellGcmSys.c
 @@ -29,6 +29,7 @@ static u32 s_gcm_context_ea = 0;
@@ -6859,7 +6866,34 @@ index cdb0464..b67c0ae 100644
  #endif
  
  /* ---------------------------------------------------------------------------
-@@ -199,7 +200,7 @@ static void ydkj_restore_handler_opd(u32 opd, u32 code) {
+@@ -47,20 +48,24 @@ static void ensure_qpc_init(void)
+     }
+ }
+ 
++/* From the guest clock origin (sys_timer.c), like the timebase: the game
++ * compares report timestamps against its own clock. */
++extern uint64_t ps3_guest_clock_epoch_qpc(void);
+ static u64 get_timestamp_ns(void)
+ {
+     LARGE_INTEGER now;
+     ensure_qpc_init();
+     QueryPerformanceCounter(&now);
+     /* Convert to nanoseconds: (count * 1e9) / freq */
+-    return (u64)((double)now.QuadPart * 1000000000.0 / (double)s_qpc_freq.QuadPart);
++    return (u64)((double)((u64)now.QuadPart - ps3_guest_clock_epoch_qpc()) * 1000000000.0 / (double)s_qpc_freq.QuadPart);
+ }
+ #else
++extern uint64_t ps3_guest_clock_epoch_ns(void);
+ static u64 get_timestamp_ns(void)
+ {
+     struct timespec ts;
+     clock_gettime(CLOCK_MONOTONIC, &ts);
+-    return (u64)ts.tv_sec * 1000000000ULL + (u64)ts.tv_nsec;
++    return (u64)ts.tv_sec * 1000000000ULL + (u64)ts.tv_nsec - ps3_guest_clock_epoch_ns();
+ }
+ #endif
+ 
+@@ -199,7 +204,7 @@ static void ydkj_restore_handler_opd(u32 opd, u32 code) {
      extern u8* vm_base; if (!vm_base) return;
      if (vm_read32(opd) == 0) {
          u8* p = vm_base + opd; p[0]=(u8)(code>>24); p[1]=(u8)(code>>16); p[2]=(u8)(code>>8); p[3]=(u8)code;
@@ -6868,7 +6902,7 @@ index cdb0464..b67c0ae 100644
      }
  }
  static void gcm_update_handler_mask(void)
-@@ -599,7 +600,7 @@ void cellGcmSetWaitFlipUnsafe(void) { cellGcmSetWaitFlip(); }
+@@ -599,7 +604,7 @@ void cellGcmSetWaitFlipUnsafe(void) { cellGcmSetWaitFlip(); }
  void cellGcmResetFlipStatus(void)
  {
      { static int n = 0;
@@ -6877,7 +6911,7 @@ index cdb0464..b67c0ae 100644
            fprintf(stderr, "[FLIP] ResetFlipStatus%c", 10); }
      s_flip_status = CELL_GCM_FLIP_STATUS_WAITING;
  }
-@@ -615,7 +616,7 @@ u32 cellGcmGetFlipStatus(void)
+@@ -615,7 +620,7 @@ u32 cellGcmGetFlipStatus(void)
       * every wait-for-flip loop exit on its first poll, so titles ran
       * completely unpaced (wave: 95 fps with a fixed-dt simulation). */
      { static int n = 0;
@@ -6886,7 +6920,7 @@ index cdb0464..b67c0ae 100644
            fprintf(stderr, "[FLIP] GetFlipStatus -> %u (0=DONE 1=WAITING)%c",
                    s_flip_status, 10); }
      return s_flip_status;
-@@ -701,6 +702,7 @@ void ppu_gcm_pump(void)
+@@ -701,6 +706,7 @@ void ppu_gcm_pump(void)
                             0, 0, 0, 0, 0, 0, 0);
      }
      if (p & 2) {
@@ -6894,7 +6928,7 @@ index cdb0464..b67c0ae 100644
          s_flip_status = CELL_GCM_FLIP_STATUS_DONE;
          if (s_flip_handler_opd && g_ps3_guest_caller) {
              ydkj_restore_handler_opd(s_flip_handler_opd, s_flip_handler_code);
-@@ -730,10 +732,13 @@ void cellGcmTickVBlank(void) { s_vblank_count++; GCM_PENDING_SET(1); }
+@@ -730,10 +736,13 @@ void cellGcmTickVBlank(void) { s_vblank_count++; GCM_PENDING_SET(1); }
   * and its handler runs code that puts the status back to WAITING, so the
   * poll never saw DONE and the game never rendered another frame. On hardware
   * the callback IS the flip interrupt -- no flip, no callback. */
@@ -6909,7 +6943,7 @@ index cdb0464..b67c0ae 100644
  }
  
  /* Drain the game's GCM FIFO into the RSX backend. Called from the present thread
-@@ -743,6 +748,36 @@ void cellGcmTickFlip(void)
+@@ -743,6 +752,36 @@ void cellGcmTickFlip(void)
   * the recompiled code to update it via vm_write). Once that's fixed (+ the title
   * runs past its early self-exit to actually draw), parse get..put here with
   * rsx_process_command_buffer so the game's clears/draws render. */
@@ -6946,7 +6980,7 @@ index cdb0464..b67c0ae 100644
  /* Translate an RSX IO offset to a guest EA via the offset table (1MB pages,
   * populated by cellGcmInit / cellGcmMapMainMemory / MapEaIoAddress). */
  static u32 gcm_io2ea(u32 io)
-@@ -780,6 +815,13 @@ static u32 s_sema_offset = 0;   /* NV406E semaphore offset (label window) */
+@@ -780,6 +819,13 @@ static u32 s_sema_offset = 0;   /* NV406E semaphore offset (label window) */
  #define GCM_RECYCLE_MARGIN 0x20000u
  static u32 gcm_ea2io(u32 ea);   /* defined with the wrap callback below */
  static u32 s_fifo_getoff  = 0;
@@ -6960,7 +6994,7 @@ index cdb0464..b67c0ae 100644
  static u32 s_last_ring_off = 0;   /* last offset the walker actually consumed */
  static u32 s_fifo_calloff = 0;
  
-@@ -860,15 +902,37 @@ static void nv3089_blit(void)
+@@ -860,15 +906,37 @@ static void nv3089_blit(void)
            if ((poll++ & 63u) == 0) { FILE* g = fopen(gate, "rb"); open_gate = g != NULL; if (g) fclose(g); }
            if (open_gate) {
                int _sl = (s_nv3089.src_dma != 0xFEED0001u), _dl = (s_gcm2d.dst_dma != 0xFEED0001u);
@@ -7000,7 +7034,7 @@ index cdb0464..b67c0ae 100644
      /* A copy out of a surface the live renderer drew exists only on the GPU;
       * mirror 1:1 blits there too (the guest-memory copy below still runs). */
      if (s_nv3089.ds_dx == 0x100000u && s_nv3089.dt_dy == 0x100000u &&
-@@ -919,6 +983,20 @@ static void nv3089_blit(void)
+@@ -919,6 +987,20 @@ static void nv3089_blit(void)
          u32 src2 = cellGcmResolveLocated(sl, s_nv3089.in_off);
          u32 dst2 = cellGcmResolveLocated(1, s_nv309e.offset);
          u32 u0b = s_nv3089.in_uv & 0xFFFF, v0b = s_nv3089.in_uv >> 16;
@@ -7021,7 +7055,7 @@ index cdb0464..b67c0ae 100644
          /* Copy words verbatim through raw pointers rather than vm_read32/
           * vm_write32: this moves ~500k pixels per blit and several blits run per
           * frame, and the two byte swaps would cancel anyway. */
-@@ -963,7 +1041,7 @@ static void nv3089_blit(void)
+@@ -963,7 +1045,7 @@ static void nv3089_blit(void)
                   cellGcmResolveLocated(_dl, s_gcm2d.dst_offset), dst_pitch, _dl?"LOCAL":"MAIN",
                   out_x, out_y, 10); }
          static int _w = 0;
@@ -7030,7 +7064,7 @@ index cdb0464..b67c0ae 100644
          return;
      }
      int src_local = (s_nv3089.src_dma != 0xFEED0001u);
-@@ -988,11 +1066,75 @@ static void nv3089_blit(void)
+@@ -988,11 +1070,75 @@ static void nv3089_blit(void)
      u32 dbpp = (s_gcm2d.color_fmt == 4u /* R5G6B5 */) ? 2u
               : (s_gcm2d.color_fmt == 1u /* Y8 */)     ? 1u : 4u;
      u32 bpp = (sbpp == dbpp) ? sbpp : 4u;
@@ -7106,7 +7140,7 @@ index cdb0464..b67c0ae 100644
          for (u32 x = 0; x < out_w; x++) {
              u32 dx = out_x + x;
              if (dx < cx0 || dx >= cx1) continue;
-@@ -1005,6 +1147,10 @@ static void nv3089_blit(void)
+@@ -1005,6 +1151,10 @@ static void nv3089_blit(void)
              else               vm_write8(d, vm_read8(s));
          }
      }
@@ -7117,7 +7151,7 @@ index cdb0464..b67c0ae 100644
      { static int _n = 0; static int cap = -1;
        if (cap < 0) { const char* e = getenv("NV3089_DBG"); cap = e ? atoi(e) : 0; }
        if (cap && _n < cap) { _n++;
-@@ -1012,6 +1158,140 @@ static void nv3089_blit(void)
+@@ -1012,6 +1162,140 @@ static void nv3089_blit(void)
                 out_w, out_h, f, src, in_pitch, dst, dst_pitch, out_x, out_y); } }
  }
  
@@ -7258,7 +7292,7 @@ index cdb0464..b67c0ae 100644
  static void gcm_2d_method(u32 subch, u32 method, u32 data)
  {
      /* GCM2D_TRACE=1: histogram of (subchannel, method) actually seen. The
-@@ -1056,7 +1336,7 @@ static void gcm_2d_method(u32 subch, u32 method, u32 data)
+@@ -1056,7 +1340,7 @@ static void gcm_2d_method(u32 subch, u32 method, u32 data)
           * NV308A, so seeing it identifies the object bound here. */
          if (method == 0x0300) { s_nv309e.fmt = data; s_nv309e.active = 1;
                                  s_nv309e.subch = (int)subch;
@@ -7267,7 +7301,7 @@ index cdb0464..b67c0ae 100644
                  printf("[NV309E] format=0x%08X (log2 %ux%u fmt=0x%X)%c", data,
                         1u << ((data >> 16) & 0xFF), 1u << ((data >> 24) & 0xFF),
                         data & 0xFFFF, 10); }
-@@ -1079,7 +1359,7 @@ static void gcm_2d_method(u32 subch, u32 method, u32 data)
+@@ -1079,7 +1363,7 @@ static void gcm_2d_method(u32 subch, u32 method, u32 data)
              int local = (s_gcm2d.dst_dma != 0xFEED0001u);
              u32 base = cellGcmResolveLocated(local, s_gcm2d.dst_offset);
              { static int _it = 0;
@@ -7276,7 +7310,7 @@ index cdb0464..b67c0ae 100644
                    printf("[GCM2D] inline write dst=0x%08X (off=0x%X dma=0x%X pt=%u,%u pitch=%u) = 0x%08X\n",
                           base + py * dst_pitch + px * 4, s_gcm2d.dst_offset,
                           s_gcm2d.dst_dma, px, py, dst_pitch, data); }
-@@ -1124,9 +1404,6 @@ static void gcm_2d_method(u32 subch, u32 method, u32 data)
+@@ -1124,9 +1408,6 @@ static void gcm_2d_method(u32 subch, u32 method, u32 data)
      if (wcap < 0) { const char* e = getenv("GCM2D_DBG"); wcap = e ? atoi(e) : 8; }
      if (warned < wcap) { warned++;
          printf("[GCM2D-UNH] subch %u method 0x%04X data=0x%08X\n", subch, method, data); }
@@ -7286,7 +7320,7 @@ index cdb0464..b67c0ae 100644
  }
  
  /* Present gate for the ticker: a flip is ready once the drain has consumed
-@@ -1166,12 +1443,44 @@ static volatile u32 s_ref_qhead = 0, s_ref_qtail = 0;   /* single producer+consu
+@@ -1166,12 +1447,44 @@ static volatile u32 s_ref_qhead = 0, s_ref_qtail = 0;   /* single producer+consu
   * a title spinning on ctrl->ref waits forever with no indication why. Tokyo
   * Jungle did exactly this -- get left the 1 MB ring for IO 0x00F00000, which it
   * never mapped, while put sat at 0x604. Stop at the bad word and say so. */
@@ -7332,7 +7366,7 @@ index cdb0464..b67c0ae 100644
  }
  
  /* A bad branch nearly always means the walker mis-counted a method batch a few
-@@ -1234,6 +1543,7 @@ void gcm_forget_spu_blocks(void)
+@@ -1234,6 +1547,7 @@ void gcm_forget_spu_blocks(void)
  
  void gcm_note_spu_put(u32 ea, u32 size)
  {
@@ -7340,7 +7374,7 @@ index cdb0464..b67c0ae 100644
      if (!size || size > 0x40000u) return;
      u32 room = 0;
      u32 io = gcm_ea2io_range(ea, &room);
-@@ -1293,7 +1603,7 @@ static void gcm_fifo_resync_why(const char* why, u32* getoff, u32 put)
+@@ -1293,7 +1607,7 @@ static void gcm_fifo_resync_why(const char* why, u32* getoff, u32 put)
       * by the backend as prim=0. */
      u32 land = gcm_spu_block_for_put(put);
      if (land == 0xFFFFFFFFu) land = put;
@@ -7349,7 +7383,7 @@ index cdb0464..b67c0ae 100644
          fprintf(stderr, "[cellGcmSys] resync landing on SPU pushbuffer "
                  "0x%08X (put 0x%08X) instead of skipping to put\n", land, put); }
  
-@@ -1311,7 +1621,7 @@ static void gcm_fifo_resync_why(const char* why, u32* getoff, u32 put)
+@@ -1311,7 +1625,7 @@ static void gcm_fifo_resync_why(const char* why, u32* getoff, u32 put)
              gcm_ref_push_at(vm_read32(dea), io);
              rescued++;
          }
@@ -7358,7 +7392,7 @@ index cdb0464..b67c0ae 100644
              fprintf(stderr, "[cellGcmSys] resync rescued %u fence(s) from"
                      " 0x%08X..0x%08X\n", rescued, from, land); }
      }
-@@ -1347,7 +1657,7 @@ static void gcm_ref_push_at(u32 v, u32 getoff)
+@@ -1347,7 +1661,7 @@ static void gcm_ref_push_at(u32 v, u32 getoff)
      if (t - s_ref_qhead >= GCM_REF_QLEN) {   /* overflow: drop oldest (keeps liveness) */
          s_ref_qhead++;
          static int _o = 0;
@@ -7367,7 +7401,7 @@ index cdb0464..b67c0ae 100644
      }
      s_ref_q[t % GCM_REF_QLEN] = v;
      s_ref_qtail = t + 1;
-@@ -1466,12 +1776,69 @@ void cellGcm_rsx_process_fifo(void)
+@@ -1466,12 +1780,69 @@ void cellGcm_rsx_process_fifo(void)
      ReleaseSRWLockExclusive(&s_gcm_fifo_lock);
  }
  
@@ -7438,7 +7472,7 @@ index cdb0464..b67c0ae 100644
            unsigned long long now = ps3_ms_now();
            if (_t0 == 0) _t0 = now;
            if (now - _t0 >= 2000) {
-@@ -1507,12 +1874,19 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1507,12 +1878,19 @@ static void gcm_rsx_process_fifo_unlocked(void)
       * then runs off the end of the previous frame's bytes until it meets a
       * word that is not a command, and parks there forever. */
      atomic_thread_fence(memory_order_acquire);
@@ -7459,7 +7493,7 @@ index cdb0464..b67c0ae 100644
          static u32 last_ptr = 0xFFFFFFFFu, last_cur = 0xFFFFFFFFu;
          u32 ptr = vm_read32(s_gcm_ctx_out_ea);
          u32 cur = ptr ? vm_read32(ptr + 0x8) : 0;
-@@ -1527,8 +1901,29 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1527,8 +1905,29 @@ static void gcm_rsx_process_fifo_unlocked(void)
          }
      }
  
@@ -7490,7 +7524,7 @@ index cdb0464..b67c0ae 100644
          static int n = 0;
          if (n++ % 60 == 0)
              printf("[DRAIN] getoff=%08X put=%08X ref=%08X ctx.current=%08X\n",
-@@ -1541,7 +1936,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1541,7 +1940,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
       * two very different causes -- we missed the command, or it was never
       * submitted -- and only a direct scan of the ring separates them. */
      { static int scanned = 0;
@@ -7499,7 +7533,7 @@ index cdb0464..b67c0ae 100644
          unsigned found = 0;
          for (u32 io = 0; io + 8 <= put; io += 4) {
              u32 ea = gcm_io2ea(io); if (!ea) continue;
-@@ -1635,6 +2030,8 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1635,6 +2034,8 @@ static void gcm_rsx_process_fifo_unlocked(void)
                if (dbg && (flips <= 8ull || (flips % 200ull) == 0))
                    fprintf(stderr, "[flipword] %llu FIFO flip words decoded%c",
                            flips, 10); }
@@ -7508,7 +7542,7 @@ index cdb0464..b67c0ae 100644
              if ((w & 0xFFFFFF00u) == GCM_FLIP_MARKER) {
                  /* Queued by _cellGcmSetFlipCommand, which already did the
                   * guest-visible half of the request. */
-@@ -1660,7 +2057,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1660,7 +2061,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
          }
  
          if (type == 1) {                       /* JUMP: 0x20000000 | offset */
@@ -7517,7 +7551,7 @@ index cdb0464..b67c0ae 100644
                if (_rd) fprintf(stderr, "[JMP] %08X -> %08X (put=%08X)\n",
                                 s_fifo_getoff, w & 0x1FFFFFFCu, put); }
              { u32 tgt = w & 0x1FFFFFFCu;
-@@ -1682,17 +2079,20 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1682,17 +2083,20 @@ static void gcm_rsx_process_fifo_unlocked(void)
                                                gcm_fifo_resync_why("jump-park", &s_fifo_getoff, put); }
                    break;
                }
@@ -7538,7 +7572,7 @@ index cdb0464..b67c0ae 100644
              s_fifo_getoff = s_fifo_calloff;
              s_fifo_calloff = 0;
              continue;
-@@ -1701,6 +2101,22 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1701,6 +2105,22 @@ static void gcm_rsx_process_fifo_unlocked(void)
              u32 count  = (w >> 18) & 0x7FF;
              u32 method = w & 0x1FFCu;
              u32 subch  = (w >> 13) & 7;
@@ -7561,7 +7595,7 @@ index cdb0464..b67c0ae 100644
              /* TCONST_FIFO=1: how the title actually streams vertex constants.
               * NV4097_SET_TRANSFORM_CONSTANT is a 32-register window; if a block
               * arrives NON-INCREMENTING then every dword carries the same method
-@@ -1733,35 +2149,165 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1733,35 +2153,165 @@ static void gcm_rsx_process_fifo_unlocked(void)
               * while it waits. Semaphore offsets index the same label window
               * cellGcmGetLabelAddress hands out. */
              if (subch == 0 && (method == 0x64u || method == 0x68u || method == 0x6Cu)) {
@@ -7737,7 +7771,7 @@ index cdb0464..b67c0ae 100644
                  /* GCM_SET_USER_COMMAND is method 0xEB00, which this decode
                   * splits into subchannel 7 / method 0x0B00 -- so it was landing
                   * in the 2D engine path and being dropped as unrecognised. It
-@@ -1770,7 +2316,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1770,7 +2320,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
                   * blocks on. */
                  { static int sd = -1; static unsigned long s7 = 0;
                    if (sd < 0) sd = getenv("GCM_SUBCH7") ? 1 : 0;
@@ -7746,7 +7780,7 @@ index cdb0464..b67c0ae 100644
                        fprintf(stderr, "[subch7] method=0x%04X data=0x%08X\n",
                                m, vm_read32(dea)); }
                  if (subch == 7 && m == 0x0B00u) {
-@@ -1823,7 +2369,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1823,7 +2373,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
                    { static u32 vw = 1;
                      if (vw == 1) { const char* e = getenv("GCM_VAL_WATCH"); vw = e ? (u32)strtoul(e, 0, 16) : 0; }
                      if (vw && vm_read32(dea) == vw) {
@@ -7755,7 +7789,7 @@ index cdb0464..b67c0ae 100644
                              printf("[valwatch] subch=%u method=0x%04X = 0x%08X get=0x%X%c", subch, m, vw, s_fifo_getoff, 10);
                      } }
                    /* ...and surface offsets (colour 0x210/0x218/0x288/0x28C, zeta 0x214) and texture 1 offset */
-@@ -1878,7 +2424,17 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1878,7 +2428,17 @@ static void gcm_rsx_process_fifo_unlocked(void)
                  } else if (mfull == 0xE920u || mfull == 0xE924u) {
                      cellGcmSetFlipCommand(vm_read32(dea) & 7u);
                  } else if (subch == 0 || (subch == 1 && !s1_2d)) {
@@ -7774,7 +7808,7 @@ index cdb0464..b67c0ae 100644
                      /* NV406E_SET_REFERENCE: queue the fence value for PACED
                       * publication (gcm_ref_publish below) instead of letting a
                       * later fence in the same batch overwrite it. */
-@@ -1887,22 +2443,53 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1887,22 +2447,53 @@ static void gcm_rsx_process_fifo_unlocked(void)
                       * area. Sample counts are not measured, so a ZPASS query
                       * reports "visible" -- the conservative answer; reading 0
                       * tells the title every queried object is occluded. */
@@ -7832,7 +7866,7 @@ index cdb0464..b67c0ae 100644
              fprintf(stderr, "[FIFOUW] unknown word 0x%08X at getoff 0x%X\n", w, s_fifo_getoff); }
          s_fifo_getoff += 4;                    /* unknown word: skip */
      }
-@@ -1948,16 +2535,33 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1948,16 +2539,33 @@ static void gcm_rsx_process_fifo_unlocked(void)
        } else burned = 0; }
  
      { static u32 last = 0xFFFFFFFFu; static int stuck = 0;
@@ -7868,7 +7902,7 @@ index cdb0464..b67c0ae 100644
          static int n2 = 0;
          if (n2++ % 60 == 0)
              fprintf(stderr, "[DRAINEND] %s: %08X -> %08X (%u bytes), put=%08X\n",
-@@ -2040,7 +2644,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -2040,7 +2648,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
                  s_fifo_getoff = io_begin;                          /* get */
                  put = io_begin;
                  static int n = 0;
@@ -7877,7 +7911,7 @@ index cdb0464..b67c0ae 100644
                      fprintf(stderr, "[cellGcmSys] recycled the title's own ring "
                              "(ctx=0x%08X begin=0x%08X end=0x%08X) -- its callback "
                              "does not%c", ctx, begin, end, 10);
-@@ -2057,7 +2661,8 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -2057,7 +2665,8 @@ static void gcm_rsx_process_fifo_unlocked(void)
       * If the overflow survives this, `get` is not what it consults. */
      { static int eq = -1;
        if (eq < 0) { const char* e = getenv("GCM_GET_EQ_PUT"); eq = e ? atoi(e) : 0; }
@@ -7887,7 +7921,7 @@ index cdb0464..b67c0ae 100644
  
      AcquireSRWLockExclusive(&s_ref_pub_lock);                           /* ref */
      gcm_ref_publish_one();
-@@ -2122,7 +2727,7 @@ void cellGcm_fifo_recycle(u32 ctx_ea)
+@@ -2122,7 +2731,7 @@ void cellGcm_fifo_recycle(u32 ctx_ea)
      while (g_gcm_fifo_drained_ea != begin && spins < 2000) { Sleep(1); spins++; }
      if (spins >= 2000) {
          static int warned = 0;
@@ -7896,7 +7930,7 @@ index cdb0464..b67c0ae 100644
              printf("[cellGcmSys] fifo recycle: drain stalled (drained=0x%08X begin=0x%08X)\n",
                     g_gcm_fifo_drained_ea, begin);
      }
-@@ -2164,6 +2769,18 @@ s32 cellGcmSetDisplayBuffer(u32 bufferId, u32 offset, u32 pitch,
+@@ -2164,6 +2773,18 @@ s32 cellGcmSetDisplayBuffer(u32 bufferId, u32 offset, u32 pitch,
      return CELL_OK;
  }
  
@@ -7915,7 +7949,7 @@ index cdb0464..b67c0ae 100644
  /* Backend query (not a guest API): is this raw RSX offset a registered
   * display buffer? Used to split display draws (-> backbuffer) from
   * offscreen render-to-texture passes. */
-@@ -2230,7 +2847,7 @@ static s32 gcm_flip_request(u32 bufferId, int in_fifo)
+@@ -2230,7 +2851,7 @@ static s32 gcm_flip_request(u32 bufferId, int in_fifo)
            }
        } }
  
@@ -7924,7 +7958,7 @@ index cdb0464..b67c0ae 100644
          fprintf(stderr, "[FLIP] SetFlipCommand(buf=%u) set=%d\n",
                  bufferId, bufferId < CELL_GCM_MAX_DISPLAY_BUFFER_NUM ? s_display_buffer_set[bufferId] : -1); }
      if (bufferId >= CELL_GCM_MAX_DISPLAY_BUFFER_NUM)
-@@ -2554,7 +3171,7 @@ s32 cellGcmAddressToOffset(u32 address, u32* offset)
+@@ -2554,7 +3175,7 @@ s32 cellGcmAddressToOffset(u32 address, u32* offset)
      printf("[cellGcmSys] WARNING: AddressToOffset failed for 0x%08X\n", address);
      vm_write32(off_ea, 0);
      { static int _d = -1; if (_d < 0) _d = getenv("A2O_FAILDBG") ? 1 : 0;
@@ -7933,7 +7967,7 @@ index cdb0464..b67c0ae 100644
            fprintf(stderr, "[A2O] FAILED ea=0x%08X (not in local or IO space)%c",
                    address, 10); } }
      return CELL_GCM_ERROR_FAILURE;
-@@ -2769,7 +3386,14 @@ u32 cellGcmResolveLocated(int local, u32 offset)
+@@ -2769,7 +3390,14 @@ u32 cellGcmResolveLocated(int local, u32 offset)
  {
      if (local)
          return s_config.localAddress + offset;
@@ -7949,7 +7983,7 @@ index cdb0464..b67c0ae 100644
  }
  
  /* ---------------------------------------------------------------------------
-@@ -2943,7 +3567,7 @@ u32 cellGcmGetTiledPitchSize(u32 size)
+@@ -2943,7 +3571,7 @@ u32 cellGcmGetTiledPitchSize(u32 size)
              if (s_valid_pitches[i] >= size) { r = s_valid_pitches[i]; break; }
          }
      }
@@ -7958,7 +7992,7 @@ index cdb0464..b67c0ae 100644
      return r;
  }
  
-@@ -3451,6 +4075,8 @@ void cellGcm_syscall_set_fifo(u32 put, u32 get)
+@@ -3451,6 +4079,8 @@ void cellGcm_syscall_set_fifo(u32 put, u32 get)
  {
      vm_write32(GCM_CONTROL_GUEST_ADDR + 0, put);
      vm_write32(GCM_CONTROL_GUEST_ADDR + 4, get);
@@ -27602,27 +27636,39 @@ index e73a151..cc6c8e2 100644
      while (g_trampoline_fn) { void (*tf)(void*) = g_trampoline_fn; g_trampoline_fn = 0; tf(&ctx); }
      return 0;
 diff --git a/runtime/ppu/ppu_sysprx.cpp b/runtime/ppu/ppu_sysprx.cpp
-index d857f30..61691d2 100644
+index d857f30..48278e7 100644
 --- a/runtime/ppu/ppu_sysprx.cpp
 +++ b/runtime/ppu/ppu_sysprx.cpp
-@@ -64,10 +64,13 @@ static void sys_initialize_tls(ppu_context* ctx)
+@@ -61,16 +61,24 @@ static void sys_initialize_tls(ppu_context* ctx)
+  * lands here) paced the intro at ~1/10th speed: video decoded at <1 fps,
+  * the audio preload threshold took forever to fill (movie stayed silent),
+  * and every frontend animation timed off it crawled. */
++#ifdef _WIN32
++extern "C" uint64_t ps3_guest_clock_epoch_qpc(void);   /* sys_timer.c */
++#else
++extern "C" uint64_t ps3_guest_clock_epoch_ns(void);
++#endif
  static void sys_time_get_system_time(ppu_context* ctx)
  {
  #ifdef _WIN32
 -    static LARGE_INTEGER s_freq, s_base;
 -    if (!s_freq.QuadPart) { QueryPerformanceFrequency(&s_freq); QueryPerformanceCounter(&s_base); }
-+    /* Same epoch as the timebase and cellAudio timestamps (absolute QPC, the
-+     * Windows counterpart of CLOCK_MONOTONIC); split multiply, no overflow. */
++    /* Same epoch as the timebase and cellAudio timestamps (QPC from the guest
++     * clock origin, sys_timer.c); split multiply, no overflow. */
 +    static LARGE_INTEGER s_freq;
 +    if (!s_freq.QuadPart) QueryPerformanceFrequency(&s_freq);
      LARGE_INTEGER now; QueryPerformanceCounter(&now);
 -    ctx->gpr[3] = (uint64_t)((now.QuadPart - s_base.QuadPart) * 1000000ull / (uint64_t)s_freq.QuadPart);
-+    uint64_t q = (uint64_t)s_freq.QuadPart, c = (uint64_t)now.QuadPart;
++    uint64_t q = (uint64_t)s_freq.QuadPart, c = (uint64_t)now.QuadPart - ps3_guest_clock_epoch_qpc();
 +    ctx->gpr[3] = (c / q) * 1000000ull + (c % q) * 1000000ull / q;
  #else
      struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
-     ctx->gpr[3] = (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)ts.tv_nsec / 1000ull;
-@@ -109,6 +112,10 @@ static void sys_process_is_stack(ppu_context* ctx)
+-    ctx->gpr[3] = (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)ts.tv_nsec / 1000ull;
++    ctx->gpr[3] = ((uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec - ps3_guest_clock_epoch_ns()) / 1000ull;
+ #endif
+ }
+ 
+@@ -109,6 +117,10 @@ static void sys_process_is_stack(ppu_context* ctx)
  
  #ifdef _WIN32
  static HANDLE lwm_sem(uint32_t addr);   /* fwd (defined below) */
@@ -27633,7 +27679,7 @@ index d857f30..61691d2 100644
  #endif
  static void sys_lwmutex_create(ppu_context* ctx)
  {
-@@ -129,6 +136,8 @@ static void sys_lwmutex_create(ppu_context* ctx)
+@@ -129,6 +141,8 @@ static void sys_lwmutex_create(ppu_context* ctx)
       * previous holder exited while holding). Force the semaphore signaled;
       * over-release of an already-free sem fails harmlessly at max count 1. */
      { HANDLE s = lwm_sem(lwm); if (s) ReleaseSemaphore(s, 1, NULL); }
@@ -27642,7 +27688,7 @@ index d857f30..61691d2 100644
  #endif
      ctx->gpr[3] = 0;
  }
-@@ -179,6 +188,16 @@ static struct LwmSlot* lwm_find(uint32_t addr){
+@@ -179,6 +193,16 @@ static struct LwmSlot* lwm_find(uint32_t addr){
          if(cur==0) return nullptr; }
      return nullptr;
  }
@@ -27659,7 +27705,7 @@ index d857f30..61691d2 100644
  static HANDLE lwm_sem(uint32_t addr)
  {
      if (!addr) return nullptr;
-@@ -187,25 +206,161 @@ static HANDLE lwm_sem(uint32_t addr)
+@@ -187,25 +211,161 @@ static HANDLE lwm_sem(uint32_t addr)
          uint32_t idx = (h + i) & (LWM_HASH - 1);
          long cur = g_lwm[idx].addr;
          if ((uint32_t)cur == addr) return g_lwm[idx].sem;
@@ -27836,7 +27882,7 @@ index d857f30..61691d2 100644
  #endif
  /* Contention-probe window flag: 0 by default (prints stay bounded). A title's
   * diagnostic code may set it around a suspect wait to uncap the [LWM-BLOCK]
-@@ -259,6 +414,18 @@ static void sys_lwmutex_lock(ppu_context* ctx)
+@@ -259,6 +419,18 @@ static void sys_lwmutex_lock(ppu_context* ctx)
          }
      }
      if (lwm_trace()) { struct LwmSlot* sl = lwm_find(lwm); if (sl) { sl->holder = (long)self; sl->acq_us = lwm_now_us(); sl->acq_fences = g_gcm_ref_pub_count; sl->acq_cpu_us = ppu_thread_cpu_us(self); } }
@@ -27855,7 +27901,7 @@ index d857f30..61691d2 100644
  #endif
      vm_write32(lwm + LWM_OWNER, self);
      vm_write32(lwm + LWM_RECUR, 1);
-@@ -279,6 +446,15 @@ static void sys_lwmutex_trylock(ppu_context* ctx)
+@@ -279,6 +451,15 @@ static void sys_lwmutex_trylock(ppu_context* ctx)
          if (WaitForSingleObject(s, 0) != WAIT_OBJECT_0) { ctx->gpr[3] = (uint64_t)(int64_t)(int32_t)0x8001000Bu; return; } // EBUSY
      }
      if (lwm_trace()) { struct LwmSlot* sl = lwm_find(lwm); if (sl) { sl->holder = (long)self; sl->acq_us = lwm_now_us(); sl->acq_fences = g_gcm_ref_pub_count; sl->acq_cpu_us = ppu_thread_cpu_us(self); } }
@@ -27871,7 +27917,7 @@ index d857f30..61691d2 100644
  #endif
      vm_write32(lwm + LWM_OWNER, self);
      vm_write32(lwm + LWM_RECUR, 1);
-@@ -328,6 +504,8 @@ static void sys_lwmutex_unlock(ppu_context* ctx)
+@@ -328,6 +509,8 @@ static void sys_lwmutex_unlock(ppu_context* ctx)
       * hands lwmutex ownership across threads. Over-release (unlock of a free
       * mutex) fails harmlessly at the max count of 1. */
      if (s) ReleaseSemaphore(s, 1, NULL);
@@ -27880,7 +27926,7 @@ index d857f30..61691d2 100644
  #endif
      ctx->gpr[3] = 0;
  }
-@@ -342,17 +520,182 @@ static void sys_lwmutex_unlock(ppu_context* ctx)
+@@ -342,17 +525,182 @@ static void sys_lwmutex_unlock(ppu_context* ctx)
   * +0x08 lwcond_queue id. */
  static void sys_lwcond_create(ppu_context* ctx)
  {
@@ -28069,7 +28115,7 @@ index d857f30..61691d2 100644
  /* Now that the lwmutex is REAL, a no-op wait that keeps holding it deadlocks the
   * signaler. Release the paired lwmutex, wait briefly, reacquire (poll-style: the
   * guest's while(!predicate) loop re-checks; signalers stay no-ops). Handles the
-@@ -360,22 +703,103 @@ static void sys_lwcond_signal_to(ppu_context* ctx)  { ctx->gpr[3] = 0; }
+@@ -360,22 +708,103 @@ static void sys_lwcond_signal_to(ppu_context* ctx)  { ctx->gpr[3] = 0; }
  static void sys_lwcond_wait(ppu_context* ctx)
  {
      uint32_t lwcond  = (uint32_t)ctx->gpr[3];
@@ -28185,7 +28231,7 @@ index d857f30..61691d2 100644
  }
  
  /* sys_ppu_thread_get_id(vm::ptr<u64> id) -> *id = calling thread's real id.
-@@ -446,6 +870,7 @@ static void sys_lwmutex_destroy_counted(ppu_context* ctx)
+@@ -446,6 +875,7 @@ static void sys_lwmutex_destroy_counted(ppu_context* ctx)
        if (getenv("LWM_COUNT") && (_n<=24 || (_n%50000)==0))
          fprintf(stderr, "[LWM] destroy #%lld lwm=0x%08X r4=0x%08X r5=0x%08X\n", _n,
                  (uint32_t)ctx->gpr[3], (uint32_t)ctx->gpr[4], (uint32_t)ctx->gpr[5]); }
@@ -28193,7 +28239,7 @@ index d857f30..61691d2 100644
      ctx->gpr[3] = 0;
  }
  
-@@ -822,7 +1247,7 @@ static void sys_spinlock_lock(ppu_context* ctx)
+@@ -822,7 +1252,7 @@ static void sys_spinlock_lock(ppu_context* ctx)
              unsigned long owner = spin_owner_of(ea);
              unsigned long me    = GetCurrentThreadId();
              static int reported = 0;
@@ -33467,7 +33513,7 @@ index 19ecafc..ddea233 100644
                      sem_id, s->value, count, s->max_value); }
          LeaveCriticalSection(&s->value_lock);
 diff --git a/runtime/syscalls/sys_timer.c b/runtime/syscalls/sys_timer.c
-index d8f4081..7c471e8 100644
+index d8f4081..c4ff4f6 100644
 --- a/runtime/syscalls/sys_timer.c
 +++ b/runtime/syscalls/sys_timer.c
 @@ -6,6 +6,9 @@
@@ -33480,7 +33526,66 @@ index d8f4081..7c471e8 100644
  #include <string.h>
  #include <stdlib.h>
  
-@@ -54,17 +57,98 @@ int lv2_deadline_passed(int64_t deadline)
+@@ -43,6 +46,58 @@ int lv2_deadline_passed(int64_t deadline)
+ }
+ #endif
+ 
++/* ---------------------------------------------------------------------------
++ * The guest clocks' origin.
++ *
++ * Absolute host time is time since the HOST booted: after two weeks of uptime
++ * it is ~1.3 million seconds, where a 32-bit float only holds steps of 0.125 s
++ * (a float has 24 bits of mantissa: 2^20 s and up go in eighths). A Crack in
++ * Time keeps a float seconds clock off the timebase and animates the Axiom
++ * City cranes, their containers, the spinning platforms and the ship's
++ * landing from it: they moved 8 times a second, and Ratchet riding a
++ * platform with them. A PS3's clock counts from power-on, so the guest's
++ * clocks here count from its first read, 30 s in. All of them subtract the
++ * same origin, so they still share one epoch. RACACIT_GUEST_CLOCK=host keeps
++ * absolute host time (the old behaviour).
++ * -----------------------------------------------------------------------*/
++#define PS3_GUEST_CLOCK_LEAD_S 30u
++static int guest_clock_host(void)
++{
++    static int s = -1;
++    if (s < 0) { const char* e = getenv("RACACIT_GUEST_CLOCK"); s = e && strcmp(e, "host") == 0; }
++    return s;
++}
++#ifdef _WIN32
++uint64_t ps3_guest_clock_epoch_qpc(void)
++{
++    static volatile LONG64 s_epoch = -1;
++    LONG64 e = s_epoch;
++    if (e >= 0) return (uint64_t)e;
++    ensure_qpc_init();
++    LARGE_INTEGER now;
++    QueryPerformanceCounter(&now);
++    const LONG64 lead = (LONG64)PS3_GUEST_CLOCK_LEAD_S * s_qpc_freq.QuadPart;
++    e = guest_clock_host() || now.QuadPart <= lead ? 0 : now.QuadPart - lead;
++    const LONG64 was = InterlockedCompareExchange64(&s_epoch, e, -1);   /* the first caller's wins */
++    return (uint64_t)(was >= 0 ? was : e);
++}
++#else
++uint64_t ps3_guest_clock_epoch_ns(void)
++{
++    static volatile int64_t s_epoch = -1;
++    int64_t e = __atomic_load_n(&s_epoch, __ATOMIC_ACQUIRE);
++    if (e >= 0) return (uint64_t)e;
++    struct timespec ts;
++    clock_gettime(CLOCK_MONOTONIC, &ts);
++    const int64_t now = (int64_t)ts.tv_sec * 1000000000ll + ts.tv_nsec;
++    const int64_t lead = (int64_t)PS3_GUEST_CLOCK_LEAD_S * 1000000000ll;
++    e = guest_clock_host() || now <= lead ? 0 : now - lead;
++    int64_t expect = -1;
++    if (!__atomic_compare_exchange_n(&s_epoch, &expect, e, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) e = expect;
++    return (uint64_t)e;
++}
++#endif
++
+ /* ---------------------------------------------------------------------------
+  * PPU timebase (mftb/mftbu) -- THE guest clock.
+  *
+@@ -54,22 +109,105 @@ int lv2_deadline_passed(int64_t deadline)
   * polled. Overflow-safe split multiply (rem < qpf, so
   * rem * 79.8e6 < ~8e14 << 2^63).
   * -----------------------------------------------------------------------*/
@@ -33521,7 +33626,7 @@ index d8f4081..7c471e8 100644
 +    LARGE_INTEGER now;
 +    QueryPerformanceCounter(&now);
 +    const uint64_t t = __rdtsc();
-+    const uint64_t qpc = (uint64_t)now.QuadPart, tbq = tb_from_qpc(qpc);
++    const uint64_t qpc = (uint64_t)now.QuadPart - ps3_guest_clock_epoch_qpc(), tbq = tb_from_qpc(qpc);
 +    if (s_tsc_ok < 0) {
 +        unsigned a = 0, b = 0, c = 0, d = 0;
 +        s_tsc_ok = __get_cpuid(0x80000007u, &a, &b, &c, &d) && (d & (1u << 8)) && !getenv("PS3_TB_QPC");
@@ -33558,12 +33663,13 @@ index d8f4081..7c471e8 100644
  {
  #ifdef _WIN32
 -    static LONGLONG t0 = 0;
-+    /* Absolute QPC, NOT anchored at the first call: every guest-visible clock
-+     * (this timebase, sys_time_get_system_time, cellAudio port timestamps, GCM
-+     * report timestamps) must share one epoch, as they do on POSIX where all
-+     * read CLOCK_MONOTONIC. Anchoring each one separately put the audio
-+     * timestamps hours away from the game's own clock on Windows. The TSC
-+     * reading below is that same clock, anchored on QPC readings. */
++    /* QPC from the one guest origin (ps3_guest_clock_epoch_qpc), NOT anchored
++     * at each clock's own first call: every guest-visible clock (this
++     * timebase, sys_time_get_system_time, cellAudio port timestamps, GCM
++     * report timestamps) must share one epoch. Anchoring each one separately
++     * put the audio timestamps hours away from the game's own clock on
++     * Windows. The TSC reading below is that same clock, anchored on QPC
++     * readings. */
      ensure_qpc_init();
 +#ifdef PS3_TB_TSC
 +    { const long cur = s_tba_cur;
@@ -33579,12 +33685,20 @@ index d8f4081..7c471e8 100644
 -    uint64_t d = (uint64_t)(now.QuadPart - t0);
 -    uint64_t q = (uint64_t)s_qpc_freq.QuadPart;
 -    return (d / q) * PS3_TIMEBASE_FREQ + (d % q) * PS3_TIMEBASE_FREQ / q;
-+    return tb_from_qpc((uint64_t)now.QuadPart);
++    return tb_from_qpc((uint64_t)now.QuadPart - ps3_guest_clock_epoch_qpc());
 +#endif
  #else
      struct timespec ts;
      clock_gettime(CLOCK_MONOTONIC, &ts);
-@@ -99,6 +183,139 @@ static void write_be64(uint32_t addr, uint64_t val)
+-    return (uint64_t)ts.tv_sec * PS3_TIMEBASE_FREQ +
+-           (uint64_t)ts.tv_nsec * PS3_TIMEBASE_FREQ / 1000000000ull;
++    const uint64_t ns = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec - ps3_guest_clock_epoch_ns();
++    return (ns / 1000000000ull) * PS3_TIMEBASE_FREQ +
++           (ns % 1000000000ull) * PS3_TIMEBASE_FREQ / 1000000000ull;
+ #endif
+ }
+ 
+@@ -99,6 +237,139 @@ static void write_be64(uint32_t addr, uint64_t val)
      *p = val;
  }
  
@@ -33724,7 +33838,7 @@ index d8f4081..7c471e8 100644
  /* ---------------------------------------------------------------------------
   * sys_timer_usleep
   *
-@@ -107,10 +324,43 @@ static void write_be64(uint32_t addr, uint64_t val)
+@@ -107,10 +378,43 @@ static void write_be64(uint32_t addr, uint64_t val)
  int64_t sys_timer_usleep(ppu_context* ctx)
  {
      uint64_t usec = LV2_ARG_U64(ctx, 0);
@@ -33769,7 +33883,7 @@ index d8f4081..7c471e8 100644
      /* PS3_POLLTOP=<seconds>: name the usleep poll sites.
       *
       * A title that is "hung" is usually not blocked on anything -- every thread
-@@ -175,7 +425,7 @@ int64_t sys_timer_usleep(ppu_context* ctx)
+@@ -175,7 +479,7 @@ int64_t sys_timer_usleep(ppu_context* ctx)
                        s_wo = e ? (long)strtoul(e, 0, 16) : 0; }
        if (s_wo && (uint32_t)ctx->lr == (uint32_t)s_wo) {
          static int _n = 0;
@@ -33778,7 +33892,7 @@ index d8f4081..7c471e8 100644
            /* Dump the words at EVERY plausible object register, not just r29.
             * Which register holds the object is per-title -- r29 was right for
             * the title this was written for and is a spin COUNTER in Guitar
-@@ -212,6 +462,13 @@ int64_t sys_timer_usleep(ppu_context* ctx)
+@@ -212,6 +516,13 @@ int64_t sys_timer_usleep(ppu_context* ctx)
          extern void ppu_log_host_chain(const char*);
          ppu_log_host_chain("usleep1ms"); } }
  
@@ -33792,7 +33906,7 @@ index d8f4081..7c471e8 100644
  #ifdef _WIN32
      /* Use high-resolution sleep via waitable timer for better precision */
      if (usec >= 1000) {
-@@ -233,10 +490,19 @@ int64_t sys_timer_usleep(ppu_context* ctx)
+@@ -233,10 +544,19 @@ int64_t sys_timer_usleep(ppu_context* ctx)
           * and busy-spins at full speed (so the wait is effectively a no-op).
           * Busy-wait to a precise QPC deadline, yielding inside the spin
           * (SwitchToThread) so a sibling host thread the guest may be waiting on
@@ -33813,6 +33927,28 @@ index d8f4081..7c471e8 100644
          const int64_t qpc_deadline = qpc_start.QuadPart +
              (int64_t)((usec * (uint64_t)s_qpc_freq.QuadPart) / 1000000ULL);
          do {
+diff --git a/runtime/syscalls/sys_timer.h b/runtime/syscalls/sys_timer.h
+index 3588dce..3a49175 100644
+--- a/runtime/syscalls/sys_timer.h
++++ b/runtime/syscalls/sys_timer.h
+@@ -32,6 +32,17 @@ extern "C" {
+  * to the PS3 timebase. Called from every lifted mftb site (ppu_lifter.py). */
+ uint64_t ppu_timebase_now(void);
+ 
++/* The origin of every guest-visible clock (this timebase,
++ * sys_time_get_system_time, cellAudio port timestamps, GCM timestamps): the
++ * host clock (QPC ticks on Windows, CLOCK_MONOTONIC ns elsewhere) at the
++ * guest's first clock read, less 30 s -- a PS3 counts from power-on. Each of
++ * those clocks subtracts this from its host reading. */
++#ifdef _WIN32
++uint64_t ps3_guest_clock_epoch_qpc(void);
++#else
++uint64_t ps3_guest_clock_epoch_ns(void);
++#endif
++
+ #ifdef _WIN32
+ /* Sub-millisecond timed-wait support for the lv2 sync primitives.
+  * SleepConditionVariableCS / WaitForSingleObject floor a timed wait to 1 ms,
 diff --git a/tools/gen_hle_nids.py b/tools/gen_hle_nids.py
 index ac13929..9252321 100644
 --- a/tools/gen_hle_nids.py
