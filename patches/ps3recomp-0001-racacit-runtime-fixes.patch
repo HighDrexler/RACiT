@@ -332,7 +332,7 @@ index 0000000..68a2795
 +
 +#endif /* AUDIO_STRETCH_H */
 diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
-index b51fb7c..b40faae 100644
+index b51fb7c..9fa1944 100644
 --- a/libs/audio/cellAudio.c
 +++ b/libs/audio/cellAudio.c
 @@ -15,6 +15,9 @@
@@ -987,9 +987,9 @@ index b51fb7c..b40faae 100644
                                         0 /*CELL_AUDIO_EVENT_MIX*/, 0, 0);
 +            if (rc == 0) g_audio_push_ok++; else g_audio_push_fail++;
 +        } else g_audio_push_fail++;
-     }
- }
- 
++    }
++}
++
 +/* The clock of what the game sees: one step per block in real time, with the
 + * period event its frame waits on. The step leans 1% to keep what is buffered
 + * (device queue + stretcher + finished unread blocks) near the target: the device's clock
@@ -1041,8 +1041,8 @@ index b51fb7c..b40faae 100644
 +        }
 +        t_next += step;
 +        audio_notify_event_queues();
-+    }
-+}
+     }
+ }
 +#endif
 +
 +/* AUDIO_WAV=<file>: append the final mix as raw f32le stereo 48 kHz
@@ -1081,7 +1081,7 @@ index b51fb7c..b40faae 100644
 +    return 1;
 +}
 +#endif
-+
+ 
  #ifdef _WIN32
  static unsigned __stdcall audio_mix_thread_func(void* arg)
  {
@@ -1152,7 +1152,26 @@ index b51fb7c..b40faae 100644
  
  #ifdef _WIN32
      s_mix_thread = (HANDLE)_beginthreadex(NULL, 0, audio_mix_thread_func,
-@@ -785,7 +1388,10 @@ s32 cellAudioPortOpen(const CellAudioPortParam* param, u32* portNum)
+@@ -699,15 +1302,9 @@ s32 cellAudioInit(void)
+     }
+ 
+ 
+-#ifdef _WIN32
+-    { LARGE_INTEGER f, c;
+-      QueryPerformanceFrequency(&f); QueryPerformanceCounter(&c);
+-      s_audio_start_us = (u64)(c.QuadPart / f.QuadPart) * 1000000ULL +
+-          (u64)(c.QuadPart % f.QuadPart) * 1000000ULL / (u64)f.QuadPart; }
+-#else
+-    { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+-      s_audio_start_us = (u64)ts.tv_sec * 1000000ULL + (u64)ts.tv_nsec / 1000ULL; }
+-#endif
++    /* Port timestamps (cellAudioGetPortTimestamp) count from here: the same
++     * guest clock origin as the timebase and audio_now_us, not raw host time. */
++    s_audio_start_us = audio_now_us();
+     if (audio_start_mix_thread() < 0) {
+         printf("[cellAudio] WARNING: Could not start mixing thread\n");
+     }
+@@ -785,7 +1382,10 @@ s32 cellAudioPortOpen(const CellAudioPortParam* param, u32* portNum)
      port->param.nChannel = nch;
      port->param.nBlock   = nblk;
      port->read_index  = 0;
@@ -1163,7 +1182,7 @@ index b51fb7c..b40faae 100644
  
      /* Allocate the audio buffer in GUEST memory so portAddr/readIndexAddr are
       * real guest addresses (the game's mixer -- FMOD here -- writes PCM there
-@@ -890,6 +1496,10 @@ s32 cellAudioPortStop(u32 portNum)
+@@ -890,6 +1490,10 @@ s32 cellAudioPortStop(u32 portNum)
  
  s32 cellAudioGetPortBlockTag(u32 portNum, u64 blockNo, u64* tag)
  {
@@ -1174,7 +1193,7 @@ index b51fb7c..b40faae 100644
      uint32_t tag_ea = (uint32_t)(uintptr_t)tag;
      if (!s_audio_initialized)
          return CELL_AUDIO_ERROR_NOT_INIT;
-@@ -907,8 +1517,8 @@ s32 cellAudioGetPortBlockTag(u32 portNum, u64 blockNo, u64* tag)
+@@ -907,8 +1511,8 @@ s32 cellAudioGetPortBlockTag(u32 portNum, u64 blockNo, u64* tag)
          mutex_unlock(&s_audio_mutex);
          return CELL_AUDIO_ERROR_PARAM;
      }
@@ -1185,7 +1204,7 @@ index b51fb7c..b40faae 100644
      mutex_unlock(&s_audio_mutex);
  
      vm_write64(tag_ea, t);
-@@ -917,6 +1527,10 @@ s32 cellAudioGetPortBlockTag(u32 portNum, u64 blockNo, u64* tag)
+@@ -917,6 +1521,10 @@ s32 cellAudioGetPortBlockTag(u32 portNum, u64 blockNo, u64* tag)
  
  s32 cellAudioGetPortTimestamp(u32 portNum, u64 tag, u64* stamp)
  {
@@ -1196,7 +1215,7 @@ index b51fb7c..b40faae 100644
      uint32_t stamp_ea = (uint32_t)(uintptr_t)stamp;
      if (!s_audio_initialized)
          return CELL_AUDIO_ERROR_NOT_INIT;
-@@ -928,7 +1542,7 @@ s32 cellAudioGetPortTimestamp(u32 portNum, u64 tag, u64* stamp)
+@@ -928,7 +1536,7 @@ s32 cellAudioGetPortTimestamp(u32 portNum, u64 tag, u64* stamp)
          return CELL_AUDIO_ERROR_PARAM;
  
      mutex_lock(&s_audio_mutex);
@@ -1205,7 +1224,7 @@ index b51fb7c..b40faae 100644
      mutex_unlock(&s_audio_mutex);
      if (tag > global_counter)
          return CELL_AUDIO_ERROR_TAG_NOT_FOUND;
-@@ -1074,7 +1688,7 @@ s32 cellAudioGetPortConfig(u32 portNum, CellAudioPortConfig* config)
+@@ -1074,7 +1682,7 @@ s32 cellAudioGetPortConfig(u32 portNum, CellAudioPortConfig* config)
      vm_write32(cfg + 24, port->buf_size);                                   /* portSize */
      vm_write32(cfg + 28, (u32)port->port_addr);                             /* portAddr */
  
