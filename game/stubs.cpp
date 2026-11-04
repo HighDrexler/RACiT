@@ -251,6 +251,36 @@ extern "C" void racacit_register_language(void)   /* main.cpp, after ppu_hle_ini
     /* English, or not one the disc has */
 }
 
+/* ---------------------------------------------------------------------------
+ * Trophies. The set and the unlocks live in the runtime (libs/network/
+ * sceNpTrophy.c: the disc's TROPHY.TRP, dev_hdd0/home/00000001/trophy/
+ * NPWR00941_00/trophies.txt). One rule of this game's goes here.
+ *
+ * The bolt trophies -- 24 For a Rainy Day (10,000), 25 Greed is Good
+ * (50,000), 31 Retirement Fund (250,000), 34 Thrifty (1,000,000) -- are asked
+ * for by func_00169EDC from the game's stat 11 (bolts collected), for the
+ * highest tier that stat is in ONLY: > 999,999 -> 34, else > 249,999 -> 31,
+ * else > 49,999 -> 25, else > 9,999 -> 24. On a console the stat passes each
+ * tier on its way up. A save already past a tier whose trophy was lost (RACiT
+ * kept trophies inside builds\vNN until 0.9.7; the owner's 1M+ save asked for
+ * 34 only) would never ask for the lower ones again. A higher tier means the
+ * lower ones' counts were reached, so they come with it.
+ * -----------------------------------------------------------------------*/
+extern "C" int  sceNpTrophyHostUnlock(int trophyId, const char* why);
+extern "C" void sceNpTrophySetUnlockHook(void (*hook)(int trophyId));
+static void racacit_trophy_unlocked(int id)
+{
+    static const int tiers[] = { 24, 25, 31, 34 };
+    for (int i = 1; i < 4; i++)
+        if (id == tiers[i])
+            for (int j = i - 1; j >= 0; j--)
+                sceNpTrophyHostUnlock(tiers[j], "its bolt count is below the one just reached");
+}
+extern "C" void racacit_register_trophies(void)   /* main.cpp, after ppu_hle_init */
+{
+    sceNpTrophySetUnlockHook(racacit_trophy_unlocked);
+}
+
 extern "C" const char* racacit_lua_last_exec(void);
 /* racacit: luaD_throw (0x50A83C) hook -- print the error object (Lua 5.1
  * layout: L->top at +8, 16-byte TValue with tt at +8, TString body at +16). */
@@ -671,6 +701,69 @@ extern "C" void racacit_gcm_put_moved(int wait)
  * great_clock_e (20) is NEVER skipped: it is the final boss, the ending
  * movie, the credits and the beat-the-game trophy (end.lua). Skipping it used
  * to send the player to the Insomniac Museum with no ending. */
+/* ---------------------------------------------------------------------------
+ * Field of view and camera distance (Settings > General > Camera; settings.txt
+ * RACACIT_FOV, RACACIT_CAM_DIST, percent of the game's own, 100 = as shipped).
+ *
+ * Both act on the follow camera, the one behind Ratchet in play, so cutscenes
+ * and the game's other cameras keep their own. Its field of view (+0x90, in
+ * degrees: 75.9 on Zolar) eases toward a
+ * target (+0x1D4) every frame (func_0003E874): racacit_follow_fov scales the
+ * target there (patch_lift.py #18), so a change glides in like the game's own
+ * zooms, and the camera manager carries the angle on into the struct at
+ * 0x00F511A0 (+0x90) that the picture is drawn from. The scripts'
+ * get_follow_cam_fov (func_0022CDC0) gets the angle back unscaled.
+ * (Not the view setups that copy 0x00F511A0's +0x90 into a view's +0x110:
+ * func_00201A34, func_003309B0, func_004AB328, func_004E5498 run once or
+ * never in play; scaling them changed nothing on screen, v109 tests.)
+ *
+ * The follow camera eases its distance (+0x1CC)
+ * toward a target (+0x1D0) every frame (func_00042558, also func_0003E9F0):
+ * racacit_follow_dist scales the target there, so a change glides in, and
+ * the camera's own collision still pulls it in at walls. The level scripts'
+ * get_follow_cam_dist (func_0022D058) reads +0x1CC: it gets the distance back
+ * unscaled, since the scripts blend from it to their own distances, which
+ * are then scaled.
+ * -----------------------------------------------------------------------*/
+static void racacit_camera_opts(int* fov, int* dist)
+{
+    rsx_host_options o; rsx_host_ui_options(&o);
+    *fov  = o.fov >= 75 && o.fov <= 150 ? o.fov : 100;
+    *dist = o.cam_dist >= 50 && o.cam_dist <= 200 ? o.cam_dist : 100;
+}
+extern "C" double racacit_follow_fov(double a)
+{
+    int f, k; racacit_camera_opts(&f, &k);
+    static int s_pct = 100; static double s_a = -1.0; static int s_n;
+    if ((f != s_pct || (f != 100 && (a < s_a - 0.01 || a > s_a + 0.01))) && s_n < 64) {
+        s_n++; s_pct = f; s_a = a;
+        fprintf(stderr, "[camera] follow camera field of view %.2f degrees x %d%%%c", a, f, 10);
+    }
+    if (f == 100 || !(a > 0.0) || a >= 160.0) return a;
+    const double v = a * (f / 100.0);
+    return v > 160.0 ? 160.0 : v;
+}
+extern "C" double racacit_follow_fov_unscale(double a)
+{
+    int f, k; racacit_camera_opts(&f, &k);
+    return f == 100 || !(a > 0.0) ? a : a * (100.0 / f);
+}
+extern "C" double racacit_follow_dist(double d)
+{
+    int f, k; racacit_camera_opts(&f, &k);
+    static int s_pct = 100; static double s_d = -1.0; static int s_n;
+    if ((k != s_pct || (k != 100 && (d < s_d - 0.5 || d > s_d + 0.5))) && s_n < 64) {
+        s_n++; s_pct = k; s_d = d;
+        fprintf(stderr, "[camera] follow camera distance %.2f x %d%%%c", d, k, 10);
+    }
+    return k == 100 ? d : d * (k / 100.0);
+}
+extern "C" double racacit_follow_dist_unscale(double d)
+{
+    int f, k; racacit_camera_opts(&f, &k);
+    return k == 100 ? d : d * (100.0 / k);
+}
+
 /* Armor looks, picked in the game's own Extras > Skins menu (settings.txt
  * RACACIT_ARMOR_LOOK; scripts/patch_lift.py #16 and #17): Ratchet wears the
  * chosen armor's look -- 1 Holoflux, 2 Ectoflux, 3 Thermaflux, 4 Hyperflux --
@@ -1326,6 +1419,11 @@ static float racacit_ds_level(const char* name)
     if (scale < 0.0f) { const char* e = getenv("RACACIT_DS_LEVEL_SCALE"); scale = e ? (float)atof(e) : 1.0f; }
     static const struct { const char* k; float lv; } t[] = {
         { "zurk", 0.70f },                                       /* Mr. Zurkon: the one above the guns */
+        /* The RYNO V: its rockets under its music, the 1812 Overture (a
+         * dialogue line, mus_ryno_1812, at 0.91 -- ppu_fs.cpp
+         * fs_ds_line_level): "the center piece of the weapon sounds over the
+         * actual fx of the bullets" (owner, 0.9.7). */
+        { "ryno", 0.30f },
         { "beep", 0.15f }, { "latch", 0.15f }, { "equip", 0.15f }, { "_arm", 0.15f }, { "click", 0.15f },
         { "reload", 0.15f }, { "emptied", 0.15f }, { "^wep_gen_", 0.15f }, { "helpdesk", 0.25f },
         /* the Zoni and the weapon level-up popup: rewards, just above a shot

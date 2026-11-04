@@ -381,6 +381,7 @@ std::string Store::migrate_from(const fs::path& old, Progress* p, std::string* s
         if (!r.empty()) return r;
         s += " Saves and HDD data copied (" + format_size(p->total) + ").";
     } else s += " No dev_hdd0 to copy.";
+    if (import_old_trophies(old, u8(old.filename()), true)) s += " Its trophies brought along.";
 
     int nc = 0;
     for (const wchar_t* cf : { L"shadercache.bin", L"pipelinecache.bin", L"pipelinelist.bin" })
@@ -441,6 +442,33 @@ std::vector<fs::path> Store::find_old_launchers() const
     return out;
 }
 
+// Until 0.9.7 a build kept its trophies beside itself (builds\vNN\gamedata\trophies\NPWR00941.json,
+// or gamedata\trophies in a plain release folder). The game merges every file it finds in its
+// trophy folder's import\ at start (sceNpTrophy.c); copied there, named after where they came from.
+// `dir` holds build folders, or is one when `single`. Returns how many were copied.
+int Store::import_old_trophies(const fs::path& dir, const std::string& from, bool single)
+{
+    std::error_code ec;
+    const fs::path imp = hdd() / L"home" / L"00000001" / L"trophy" / L"NPWR00941_00" / L"import";
+    int n = 0;
+    auto take = [&](const fs::path& build) {
+        std::error_code e2;
+        const fs::path j = build / L"gamedata" / L"trophies" / L"NPWR00941.json";
+        if (!fs::is_regular_file(j, e2)) return;
+        fs::create_directories(imp, e2);
+        const fs::path to = imp / (widen(from) + L"_" + build.filename().wstring() + L".json");
+        fs::copy_file(j, to, fs::copy_options::overwrite_existing, e2);
+        n += !e2;
+    };
+    if (single) take(dir);
+    else
+        for (fs::directory_iterator b(dir, fs::directory_options::skip_permission_denied, ec), e; !ec && b != e; b.increment(ec)) {
+            std::error_code e2;
+            if (b->is_directory(e2)) take(b->path());
+        }
+    return n;
+}
+
 std::string Store::migrate_from_launcher(const fs::path& old, Progress* p, std::string* summary)
 {
     std::error_code ec;
@@ -461,6 +489,8 @@ std::string Store::migrate_from_launcher(const fs::path& old, Progress* p, std::
         if (!r.empty()) return r;
         s += "Saves and HDD data copied (" + format_size(p->total) + ").";
     } else s += "No saves to copy.";
+    if (const int nt = import_old_trophies(old / L"builds", u8(old.filename())))
+        s += " Trophies of " + std::to_string(nt) + " older builds brought along.";
 
     int nc = 0;
     fs::create_directories(cache(), ec);

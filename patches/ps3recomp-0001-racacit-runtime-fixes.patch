@@ -1209,10 +1209,10 @@ index b51fb7c..ecbb5d0 100644
                  (u32)port->port_addr, (u32)port->read_idx_addr); }
 diff --git a/libs/audio/ds_player.c b/libs/audio/ds_player.c
 new file mode 100644
-index 0000000..e2cee54
+index 0000000..17ebc1d
 --- /dev/null
 +++ b/libs/audio/ds_player.c
-@@ -0,0 +1,826 @@
+@@ -0,0 +1,841 @@
 +/*
 + * ds_player -- the DualSense speaker's own sound player.
 + *
@@ -1447,6 +1447,7 @@ index 0000000..e2cee54
 + * first end frame, or `max` bytes); the data is copied. -1 if none is free.
 + * A bank sound's voice (script >= 0) is held to its sample's ceiling, on
 + * the speaker and the actuators. */
++static void voice_free(ds_voice* v);
 +static int voice_start(const uint8_t* src, uint32_t max, uint32_t rate, float spk, float felt,
 +                       uint32_t owner, int script, uint32_t delay, int up, int down, const char* name)
 +{
@@ -1461,6 +1462,20 @@ index 0000000..e2cee54
 +    }
 +    int k = -1;
 +    for (int i = 0; i < DS_VOICES; i++) if (!s_v[i].used) { k = i; break; }
++    /* Full: an effect makes room -- one already fading, else the oldest. A
++     * line's voice is never taken. The RYNO V's rockets alone held all 64
++     * voices, and its 1812 Overture (a line) found none ("player full",
++     * 0.9.7); a new sound now takes the oldest one's place instead of being
++     * dropped. */
++    if (k < 0) {
++        uint64_t best = 0;
++        for (int i = 0; i < DS_VOICES; i++) {
++            if (!s_v[i].used || s_v[i].line) continue;
++            const uint64_t score = (uint64_t)s_v[i].age + (s_v[i].fade > 0.0f ? (1ull << 40) : 0ull) + 1u;
++            if (score > best) { best = score; k = i; }
++        }
++        if (k >= 0) voice_free(&s_v[k]);
++    }
 +    if (k < 0) return -1;
 +    uint8_t* d = (uint8_t*)malloc((size_t)n * 16u);
 +    if (!d) return -1;
@@ -1864,7 +1879,7 @@ index 0000000..e2cee54
 +    for (int j = 0; j < DS_VOICES; j++) {
 +        ds_voice* v = &s_v[j];
 +        if (!v->used || !v->line) continue;
-+        if (!all && (strstr(v->name, "_zurk_") || strstr(v->name, "_zoni_"))) continue;
++        if (!all && (strstr(v->name, "_zurk_") || strstr(v->name, "_zoni_") || strstr(v->name, "mus_ryno_"))) continue;   /* weapons' lines */
 +        if (dbg()) fprintf(stderr, "[ds-dbg] %s stopped by the game at frame %u of %u, %.2f s%c", v->name, v->fr, v->nfr, s_clock / (double)DS_RATE, 10);
 +        voice_release(v);
 +    }
@@ -3836,6 +3851,1438 @@ index d39d88d..53f72f6 100644
  
      /* Parse status line: "HTTP/1.x SSS reason\r\n" */
      int major = 0, minor = 0, status = 0;
+diff --git a/libs/network/sceNpTrophy.c b/libs/network/sceNpTrophy.c
+index d99e8ac..1171516 100644
+--- a/libs/network/sceNpTrophy.c
++++ b/libs/network/sceNpTrophy.c
+@@ -1,180 +1,711 @@
+ /*
+  * ps3recomp - sceNpTrophy HLE implementation
+  *
+- * Trophy management with persistent storage.  Unlocked trophies are saved
+- * to a JSON file at gamedata/trophies/{commId}.json.
++ * The trophy set is the game's own, read from the disc the player dumped:
++ * PS3_GAME/TROPDIR/<NPCOMMID>_00/TROPHY.TRP (a TRP archive: TROPCONF.SFM,
++ * TROP.SFM and TROP_xx.SFM per language -- XML with each trophy's grade,
++ * hidden flag, name and description -- plus ICON0.PNG and TROPnnn.PNG).
+  *
+- * JSON format (hand-written, no external dependency):
+- * { "trophies": [ { "id": N, "timestamp": T }, ... ] }
++ * Registration installs the set the way the console does, into the player's
++ * folder on the PS3 hard drive, dev_hdd0/home/00000001/trophy/<NPCOMMID>_00/
++ * (TROPCONF.SFM, TROP.SFM in the chosen language, the icons), and the
++ * unlocks are kept there in trophies.txt ("<id> <unix seconds> <name>" per
++ * line). dev_hdd0 is the launcher's data\dev_hdd0, so they survive new
++ * builds, and the launcher's bring-over copies them with the saves.
++ *
++ * Until RACiT 0.9.7 this file kept them in gamedata/trophies/<commId>.json
++ * beside the running exe: a new build started with none. Those files are
++ * merged in at registration (the build's own, the launcher's other builds,
++ * and every .json in <trophy folder>/import, where the launcher puts an
++ * older install's), never removed.
++ *
++ * The structs the game reads are big-endian guest memory; every field is
++ * written with vm_write*. Error codes are the system's: a title tells
++ * "already unlocked" from a failure by them.
+  */
+ 
+ #include "sceNpTrophy.h"
+ #include "../system/cellSysutil.h"
++#include "../video/rsx_host_ui.h"
+ #include "ps3emu/guest_call.h"
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+ #include <time.h>
+ #include <stdint.h>
++#include <ctype.h>
+ #include "../../runtime/ppu/ppu_memory.h"   /* vm_base (guest mem) */
+-#include "ps3emu/endian.h"                   /* ps3_bswap64 -- guest is big-endian */
+-#include "../guest_struct.h"   /* GUEST_EA, guest_struct_load/store */
+-/* HLE args arrive as guest effective addresses; translate before deref. */
+-#define GUEST_PTR(p, T) ((T)((p) ? (void*)(vm_base + (uint32_t)(uintptr_t)(p)) : (void*)0))
++#include "ps3emu/endian.h"
++#include "../guest_struct.h"   /* GUEST_EA */
++#include "../codec/stb_image.h"   /* declarations only: cellPngDec.c holds the implementation */
+ 
+ #ifdef _WIN32
++#include <windows.h>
+ #include <direct.h>
+-#include <io.h>
+ #define mkdir_p(path) _mkdir(path)
+ #define PATH_SEP '\\'
+ #else
+ #include <sys/stat.h>
+ #include <unistd.h>
++#include <dirent.h>
+ #define mkdir_p(path) mkdir(path, 0755)
+ #define PATH_SEP '/'
+ #endif
+ 
++extern int cellfs_translate_path(const char* ps3_path, char* host_buf, size_t buf_size);
++
+ /* ---------------------------------------------------------------------------
+- * Internal state
++ * The set and the player's unlocks
+  * -----------------------------------------------------------------------*/
++#define TR_MAX SCE_NP_TROPHY_MAX_NUM_TROPHIES
++
++typedef struct {
++    int  grade;                 /* SCE_NP_TROPHY_GRADE_* */
++    int  hidden;
++    int  pid;                   /* the platinum it counts towards, -1 none */
++    char name[SCE_NP_TROPHY_NAME_MAX_SIZE];     /* UTF-8, as on the disc */
++    char detail[SCE_NP_TROPHY_DESC_MAX_SIZE];
++} TrophyDef;
++
++static struct {
++    int  loaded;                /* 1 set read, -1 tried and failed */
++    char comm[16];              /* "NPWR00941_00" */
++    char title[SCE_NP_TROPHY_GAME_TITLE_MAX_SIZE];
++    char title_detail[SCE_NP_TROPHY_GAME_DESC_MAX_SIZE];
++    int  n;
++    TrophyDef t[TR_MAX];
++    char dir[1024];             /* the player's trophy folder */
++    int  installed;
++    u8   unlocked[TR_MAX];
++    long long when[TR_MAX];     /* unix seconds */
++} s_set;
++
++static volatile int s_lock_v;
++static void tlock(void)   { while (__atomic_exchange_n(&s_lock_v, 1, __ATOMIC_ACQUIRE)) { } }
++static void tunlock(void) { __atomic_store_n(&s_lock_v, 0, __ATOMIC_RELEASE); }
++
++static void (*s_hook)(int);
+ 
+ static int s_trophy_initialized = 0;
+-static char s_storage_path[512] = "gamedata/trophies";
+ 
+-/* Per-context data */
+ typedef struct {
+-    int                      in_use;
+-    int                      registered;
+-    SceNpCommunicationId     commId;
+-    u8                       unlocked[SCE_NP_TROPHY_MAX_NUM_TROPHIES];
+-    u64                      unlock_time[SCE_NP_TROPHY_MAX_NUM_TROPHIES];
+-    u32                      total_trophies;
++    int in_use, registered;
++    char comm[16];
+ } TrophyContext;
+-
+-typedef struct {
+-    int in_use;
+-} TrophyHandle;
++typedef struct { int in_use; } TrophyHandle;
+ 
+ /* ID zero is the firmware invalid sentinel; retain all four usable slots. */
+ static TrophyContext s_contexts[SCE_NP_TROPHY_MAX_CONTEXTS + 1];
+ static TrophyHandle  s_handles[SCE_NP_TROPHY_MAX_HANDLES + 1];
+ 
++static const char* grade_name(int g)
++{
++    return g == SCE_NP_TROPHY_GRADE_PLATINUM ? "platinum" : g == SCE_NP_TROPHY_GRADE_GOLD ? "gold"
++         : g == SCE_NP_TROPHY_GRADE_SILVER ? "silver" : g == SCE_NP_TROPHY_GRADE_BRONZE ? "bronze" : "?";
++}
++
+ /* ---------------------------------------------------------------------------
+- * Persistent storage helpers
++ * Files
+  * -----------------------------------------------------------------------*/
++static unsigned char* read_all(const char* path, size_t* n)
++{
++    FILE* f = fopen(path, "rb");
++    if (!f) return NULL;
++    fseek(f, 0, SEEK_END);
++    const long sz = ftell(f);
++    fseek(f, 0, SEEK_SET);
++    if (sz <= 0 || sz > (64L << 20)) { fclose(f); return NULL; }
++    unsigned char* b = (unsigned char*)malloc((size_t)sz + 1);
++    if (b && fread(b, 1, (size_t)sz, f) != (size_t)sz) { free(b); b = NULL; }
++    fclose(f);
++    if (b) { b[sz] = 0; *n = (size_t)sz; }
++    return b;
++}
++
++static void make_dirs(const char* path)
++{
++    char tmp[1024];
++    snprintf(tmp, sizeof tmp, "%s", path);
++    for (char* p = tmp + 1; *p; p++)
++        if (*p == '/' || *p == '\\') {
++            if (p[-1] == ':') continue;   /* "C:\" */
++            const char c = *p; *p = 0; mkdir_p(tmp); *p = c;
++        }
++    mkdir_p(tmp);
++}
++
++static int write_all(const char* path, const void* data, size_t n)
++{
++    char tmp[1100];
++    snprintf(tmp, sizeof tmp, "%s.tmp", path);
++    FILE* f = fopen(tmp, "wb");
++    if (!f) return -1;
++    const int ok = fwrite(data, 1, n, f) == n;
++    if (fclose(f) != 0 || !ok) { remove(tmp); return -1; }
++#ifdef _WIN32
++    if (!MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) { remove(tmp); return -1; }
++#else
++    if (rename(tmp, path) != 0) { remove(tmp); return -1; }
++#endif
++    return 0;
++}
+ 
+-static void trophy_ensure_dir(void)
++static long long file_size(const char* path)
+ {
+-    char tmp[512];
+-    char* p;
++    FILE* f = fopen(path, "rb");
++    if (!f) return -1;
++    fseek(f, 0, SEEK_END);
++    const long long n = ftell(f);
++    fclose(f);
++    return n;
++}
+ 
+-    strncpy(tmp, s_storage_path, sizeof(tmp) - 1);
+-    tmp[sizeof(tmp) - 1] = '\0';
++/* ---------------------------------------------------------------------------
++ * TROPHY.TRP: header 0x40 (magic DC A2 4D 00, version, file size, entry
++ * count, entry size), then entries of 0x40: name[32], offset, size (u64 BE).
++ * -----------------------------------------------------------------------*/
++typedef struct { const unsigned char* d; size_t n; } trp_t;
+ 
+-    /* Create directories recursively */
+-    for (p = tmp + 1; *p; p++) {
+-        if (*p == '/' || *p == '\\') {
+-            *p = '\0';
+-            mkdir_p(tmp);
+-            *p = PATH_SEP;
++static const unsigned char* trp_find(const trp_t* t, const char* name, size_t* len)
++{
++    if (t->n < 0x40 || t->d[0] != 0xDC || t->d[1] != 0xA2 || t->d[2] != 0x4D || t->d[3] != 0x00) return NULL;
++    const u32 cnt = ((u32)t->d[16] << 24) | ((u32)t->d[17] << 16) | ((u32)t->d[18] << 8) | t->d[19];
++    const u32 esz = ((u32)t->d[20] << 24) | ((u32)t->d[21] << 16) | ((u32)t->d[22] << 8) | t->d[23];
++    if (esz < 48 || cnt > 4096) return NULL;
++    for (u32 i = 0; i < cnt; i++) {
++        const size_t e = 0x40 + (size_t)i * esz;
++        if (e + 48 > t->n) break;
++        char nm[33]; memcpy(nm, t->d + e, 32); nm[32] = 0;
++        if (strcmp(nm, name) != 0) continue;
++        u64 off = 0, sz = 0;
++        for (int k = 0; k < 8; k++) { off = (off << 8) | t->d[e + 32 + k]; sz = (sz << 8) | t->d[e + 40 + k]; }
++        if (off + sz > t->n) return NULL;
++        *len = (size_t)sz;
++        return t->d + off;
++    }
++    return NULL;
++}
++
++/* ---------------------------------------------------------------------------
++ * SFM (XML) reading
++ * -----------------------------------------------------------------------*/
++static void xml_text(const char* s, const char* e, char* out, size_t n)
++{
++    size_t k = 0;
++    while (s < e && k + 1 < n) {
++        if (*s == '&') {
++            const char* semi = (const char*)memchr(s, ';', (size_t)(e - s));
++            if (semi && semi - s <= 10) {
++                unsigned cp = 0; const char* ent = s + 1; const size_t el = (size_t)(semi - ent);
++                if (el == 3 && !strncmp(ent, "amp", 3)) cp = '&';
++                else if (el == 2 && !strncmp(ent, "lt", 2)) cp = '<';
++                else if (el == 2 && !strncmp(ent, "gt", 2)) cp = '>';
++                else if (el == 4 && !strncmp(ent, "quot", 4)) cp = '"';
++                else if (el == 4 && !strncmp(ent, "apos", 4)) cp = '\'';
++                else if (el > 1 && ent[0] == '#') cp = (unsigned)strtoul(ent + 1 + (ent[1] == 'x'), NULL, ent[1] == 'x' ? 16 : 10);
++                if (cp) {   /* as UTF-8 */
++                    char u[4]; int ul = 0;
++                    if (cp < 0x80) u[ul++] = (char)cp;
++                    else if (cp < 0x800) { u[ul++] = (char)(0xC0 | (cp >> 6)); u[ul++] = (char)(0x80 | (cp & 63)); }
++                    else if (cp < 0x10000) { u[ul++] = (char)(0xE0 | (cp >> 12)); u[ul++] = (char)(0x80 | ((cp >> 6) & 63)); u[ul++] = (char)(0x80 | (cp & 63)); }
++                    for (int q = 0; q < ul && k + 1 < n; q++) out[k++] = u[q];
++                    s = semi + 1;
++                    continue;
++                }
++            }
+         }
++        out[k++] = (*s == '\r' || *s == '\n' || *s == '\t') ? ' ' : *s;
++        s++;
+     }
+-    mkdir_p(tmp);
++    out[k] = 0;
++    while (k && out[k - 1] == ' ') out[--k] = 0;
++}
++
++/* The value of attribute `a` inside the tag [s, e). */
++static int xml_attr(const char* s, const char* e, const char* a, char* out, size_t n)
++{
++    const size_t al = strlen(a);
++    for (const char* p = s; p + al + 2 < e; p++) {
++        if (strncmp(p, a, al) != 0 || p[al] != '=' || (p > s && isalnum((unsigned char)p[-1]))) continue;
++        const char q = p[al + 1];
++        if (q != '"' && q != '\'') continue;
++        const char* v = p + al + 2;
++        const char* ve = (const char*)memchr(v, q, (size_t)(e - v));
++        if (!ve) return 0;
++        xml_text(v, ve, out, n);
++        return 1;
++    }
++    return 0;
++}
++
++/* The text of <tag>...</tag> inside [s, e). */
++static int xml_elem(const char* s, const char* e, const char* tag, char* out, size_t n)
++{
++    char open[40], close[40];
++    snprintf(open, sizeof open, "<%s>", tag); snprintf(close, sizeof close, "</%s>", tag);
++    const char* a = strstr(s, open);
++    if (!a || a >= e) return 0;
++    a += strlen(open);
++    const char* b = strstr(a, close);
++    if (!b || b > e) return 0;
++    xml_text(a, b, out, n);
++    return 1;
++}
++
++/* Every <trophy ...> of an SFM: grade, hidden, pid, and (TROP*.SFM) name and detail. */
++static int sfm_parse(const char* x, int names)
++{
++    int count = 0;
++    if (names) {
++        const char* end = x + strlen(x);
++        const char* tl = strstr(x, "<trophy ");
++        if (!tl) tl = end;
++        xml_elem(x, tl, "title-name", s_set.title, sizeof s_set.title);
++        xml_elem(x, tl, "title-detail", s_set.title_detail, sizeof s_set.title_detail);
++    }
++    for (const char* p = strstr(x, "<trophy "); p; p = strstr(p + 1, "<trophy ")) {
++        const char* te = strchr(p, '>');
++        if (!te) break;
++        char v[32];
++        if (!xml_attr(p, te, "id", v, sizeof v)) continue;
++        const int id = atoi(v);
++        if (id < 0 || id >= TR_MAX) continue;
++        TrophyDef* d = &s_set.t[id];
++        if (xml_attr(p, te, "ttype", v, sizeof v))
++            d->grade = v[0] == 'P' ? SCE_NP_TROPHY_GRADE_PLATINUM : v[0] == 'G' ? SCE_NP_TROPHY_GRADE_GOLD
++                     : v[0] == 'S' ? SCE_NP_TROPHY_GRADE_SILVER : v[0] == 'B' ? SCE_NP_TROPHY_GRADE_BRONZE : 0;
++        if (xml_attr(p, te, "hidden", v, sizeof v)) d->hidden = !strcmp(v, "yes");
++        d->pid = xml_attr(p, te, "pid", v, sizeof v) ? atoi(v) : -1;
++        if (names) {
++            const char* next = strstr(te, "<trophy ");
++            const char* close = strstr(te, "</trophy>");
++            const char* lim = close && (!next || close < next) ? close : next ? next : te + strlen(te);
++            char nm[SCE_NP_TROPHY_NAME_MAX_SIZE], dt[SCE_NP_TROPHY_DESC_MAX_SIZE];
++            if (xml_elem(te, lim, "name", nm, sizeof nm) && nm[0]) snprintf(d->name, sizeof d->name, "%s", nm);
++            if (xml_elem(te, lim, "detail", dt, sizeof dt) && dt[0]) snprintf(d->detail, sizeof d->detail, "%s", dt);
++        }
++        if (id + 1 > s_set.n) s_set.n = id + 1;
++        count++;
++    }
++    return count;
++}
++
++/* The overlay's font is ASCII: accents folded, typographic marks to plain ones. */
++static void fold_ascii(const char* in, char* out, size_t n)
++{
++    static const char* const latin1[64] = {
++        "A","A","A","A","A","A","AE","C","E","E","E","E","I","I","I","I",
++        "D","N","O","O","O","O","O","x","O","U","U","U","U","Y","Th","ss",
++        "a","a","a","a","a","a","ae","c","e","e","e","e","i","i","i","i",
++        "d","n","o","o","o","o","o","/","o","u","u","u","u","y","th","y" };
++    const unsigned char* s = (const unsigned char*)in;
++    size_t k = 0;
++    while (*s && k + 4 < n) {
++        unsigned cp = *s; int len = 1;
++        if (cp >= 0xF0 && s[1] && s[2] && s[3]) { cp = ((cp & 7) << 18) | ((s[1] & 63) << 12) | ((s[2] & 63) << 6) | (s[3] & 63); len = 4; }
++        else if (cp >= 0xE0 && s[1] && s[2]) { cp = ((cp & 15) << 12) | ((s[1] & 63) << 6) | (s[2] & 63); len = 3; }
++        else if (cp >= 0xC0 && s[1]) { cp = ((cp & 31) << 6) | (s[1] & 63); len = 2; }
++        s += len;
++        char one[2] = { 0, 0 };
++        const char* r = "?";
++        if (cp >= 32 && cp < 127) { one[0] = (char)cp; r = one; }
++        else if (cp < 32 || cp == 0xA0) r = " ";
++        else if (cp >= 0xC0 && cp <= 0xFF) r = latin1[cp - 0xC0];
++        else if (cp == 0x2018 || cp == 0x2019 || cp == 0x201A || cp == 0x2032 || cp == 0xB4) r = "'";
++        else if (cp == 0x201C || cp == 0x201D || cp == 0x201E || cp == 0xAB || cp == 0xBB) r = "\"";
++        else if (cp == 0x2013 || cp == 0x2014 || cp == 0x2212) r = "-";
++        else if (cp == 0x2026) r = "...";
++        else if (cp == 0x152) r = "OE";
++        else if (cp == 0x153) r = "oe";
++        else if (cp == 0xA1 || cp == 0xBF || cp == 0xAD) r = "";
++        else if (cp == 0x2122) r = "(TM)";
++        else if (cp == 0xAE) r = "(R)";
++        else if (cp == 0xA9) r = "(C)";
++        else if (cp == 0xBA || cp == 0xB0) r = "o";
++        else if (cp == 0xAA) r = "a";
++        for (; *r && k + 1 < n; r++) out[k++] = *r;
++    }
++    out[k] = 0;
++}
++
++/* TROP_xx.SFM by RACACIT_LANGUAGE (the game's language setting): the system
++ * language numbers, CELL_SYSUTIL_LANG_*. English when unset or not on the disc. */
++static int chosen_language(void)
++{
++    const char* e = getenv("RACACIT_LANGUAGE");
++    if (!e || !*e) return 1;
++    static const struct { const char* code; const char* name; int id; } k[] = {
++        { "en", "english", 1 }, { "fr", "french", 2 }, { "es", "spanish", 3 }, { "de", "german", 4 },
++        { "it", "italian", 5 }, { "nl", "dutch", 6 } };
++    char l[16] = { 0 };
++    for (int i = 0; e[i] && i < 15; i++) l[i] = (char)tolower((unsigned char)e[i]);
++    for (size_t i = 0; i < sizeof k / sizeof k[0]; i++)
++        if (!strcmp(l, k[i].code) || !strcmp(l, k[i].name) || atoi(l) == k[i].id) return k[i].id;
++    return 1;
+ }
+ 
+-static void trophy_get_filepath(const SceNpCommunicationId* commId,
+-                                 char* buf, size_t bufsize)
++/* ---------------------------------------------------------------------------
++ * Load the set (once per communication id)
++ * -----------------------------------------------------------------------*/
++static void ui_push(void);
++static void install_and_icons(const trp_t* trp, const char* lang_sfm, size_t lang_len);
++
++static int set_load(const char* comm)
+ {
+-    snprintf(buf, bufsize, "%s/%s.json", s_storage_path, commId->data);
++    if (s_set.loaded && !strcmp(s_set.comm, comm)) return s_set.loaded > 0 ? 0 : -1;
++    memset(&s_set, 0, sizeof s_set);
++    snprintf(s_set.comm, sizeof s_set.comm, "%s", comm);
++    s_set.loaded = -1;
++
++    char ps3[256], trp_path[1200] = "";
++    snprintf(ps3, sizeof ps3, "/dev_bdvd/PS3_GAME/TROPDIR/%s/TROPHY.TRP", comm);
++    if (cellfs_translate_path(ps3, trp_path, sizeof trp_path) != 0 || file_size(trp_path) <= 0) {
++        const char* root = getenv("PS3_VFS_ROOT");
++        snprintf(trp_path, sizeof trp_path, "%s/PS3_GAME/TROPDIR/%s/TROPHY.TRP", root && *root ? root : ".", comm);
++    }
++    size_t n = 0;
++    unsigned char* d = read_all(trp_path, &n);
++    if (!d) { printf("[trophy] no trophy set: %s not found (trophies are still kept, without names)\n", trp_path); }
++    trp_t trp = { d, n };
++    size_t cl = 0, ll = 0;
++    const unsigned char* conf = d ? trp_find(&trp, "TROPCONF.SFM", &cl) : NULL;
++    char lname[32];
++    snprintf(lname, sizeof lname, "TROP_%02d.SFM", chosen_language());
++    const unsigned char* lang = d ? trp_find(&trp, lname, &ll) : NULL;
++    size_t dl = 0;
++    const unsigned char* deflt = d ? trp_find(&trp, "TROP.SFM", &dl) : NULL;
++    if (!lang) { lang = deflt; ll = dl; snprintf(lname, sizeof lname, "TROP.SFM"); }
++
++    for (int i = 0; i < TR_MAX; i++) s_set.t[i].pid = -1;
++    if (conf) {
++        char* x = (char*)malloc(cl + 1); memcpy(x, conf, cl); x[cl] = 0;
++        sfm_parse(x, 0); free(x);
++    }
++    if (deflt) {   /* English names first: a language file missing one keeps it */
++        char* x = (char*)malloc(dl + 1); memcpy(x, deflt, dl); x[dl] = 0;
++        sfm_parse(x, 1); free(x);
++    }
++    if (lang && lang != deflt) {
++        char* x = (char*)malloc(ll + 1); memcpy(x, lang, ll); x[ll] = 0;
++        sfm_parse(x, 1); free(x);
++    }
++    if (s_set.n > 0) {
++        s_set.loaded = 1;
++        int g[5] = { 0 };
++        for (int i = 0; i < s_set.n; i++) g[s_set.t[i].grade >= 1 && s_set.t[i].grade <= 4 ? s_set.t[i].grade : 0]++;
++        printf("[trophy] %s: \"%s\", %d trophies (%d platinum, %d gold, %d silver, %d bronze), names from %s\n",
++               comm, s_set.title, s_set.n, g[1], g[2], g[3], g[4], lname);
++    }
++
++    /* The player's folder on the PS3 hard drive. */
++    char hp[256];
++    snprintf(hp, sizeof hp, "/dev_hdd0/home/00000001/trophy/%s", comm);
++    if (cellfs_translate_path(hp, s_set.dir, sizeof s_set.dir) != 0) {
++        const char* h = getenv("PS3_HDD0_ROOT");
++        snprintf(s_set.dir, sizeof s_set.dir, "%s%chome%c00000001%ctrophy%c%s", h && *h ? h : "dev_hdd0",
++                 PATH_SEP, PATH_SEP, PATH_SEP, PATH_SEP, comm);
++    }
++    make_dirs(s_set.dir);
++    if (d) install_and_icons(&trp, lang ? (const char*)lang : NULL, ll);
++    free(d);
++    return s_set.loaded > 0 ? 0 : -1;
+ }
+ 
+-static void trophy_save(TrophyContext* ctx)
++/* The console installs the set into the player's folder on registration; so
++ * do we (once: the launcher reads it from there), and the icons go to the
++ * overlay. */
++static void install_and_icons(const trp_t* trp, const char* lang_sfm, size_t lang_len)
+ {
+-    char filepath[1024];
+-    FILE* fp;
+-    int first = 1;
++    char p[1200];
++    size_t cl = 0;
++    const unsigned char* conf = trp_find(trp, "TROPCONF.SFM", &cl);
++    snprintf(p, sizeof p, "%s%cTROPCONF.SFM", s_set.dir, PATH_SEP);
++    const int fresh = conf && file_size(p) != (long long)cl;
++    if (fresh) write_all(p, conf, cl);
++    snprintf(p, sizeof p, "%s%cTROP.SFM", s_set.dir, PATH_SEP);
++    if (lang_sfm && file_size(p) != (long long)lang_len) write_all(p, lang_sfm, lang_len);
++    for (int i = -1; i < s_set.n; i++) {
++        char nm[32];
++        if (i < 0) snprintf(nm, sizeof nm, "ICON0.PNG"); else snprintf(nm, sizeof nm, "TROP%03d.PNG", i);
++        size_t il = 0;
++        const unsigned char* png = trp_find(trp, nm, &il);
++        if (!png) continue;
++        snprintf(p, sizeof p, "%s%c%s", s_set.dir, PATH_SEP, nm);
++        if (file_size(p) != (long long)il) write_all(p, png, il);
++        if (i < 0) continue;
++        int w = 0, h = 0, c = 0;
++        unsigned char* px = stbi_load_from_memory(png, (int)il, &w, &h, &c, 4);
++        if (px) { rsx_host_ui_trophy_icon(i, px, w, h); stbi_image_free(px); }
++    }
++    s_set.installed = 1;
++    if (fresh) printf("[trophy] installed the trophy set into %s\n", s_set.dir);
++}
+ 
+-    trophy_ensure_dir();
+-    trophy_get_filepath(&ctx->commId, filepath, sizeof(filepath));
++/* ---------------------------------------------------------------------------
++ * trophies.txt and the older JSON files
++ * -----------------------------------------------------------------------*/
++static void state_path(char* out, size_t n) { snprintf(out, n, "%s%ctrophies.txt", s_set.dir, PATH_SEP); }
+ 
+-    fp = fopen(filepath, "w");
+-    if (!fp) {
+-        printf("[sceNpTrophy] WARNING: Could not save trophies to %s\n",
+-               filepath);
+-        return;
++static int state_load(void)
++{
++    char p[1200]; state_path(p, sizeof p);
++    size_t n = 0;
++    char* d = (char*)read_all(p, &n);
++    if (!d) return 0;
++    int got = 0;
++    for (char* line = d; line && *line; ) {
++        char* nl = strchr(line, '\n');
++        if (nl) *nl = 0;
++        int id = -1; long long t = 0;
++        if (isdigit((unsigned char)line[0]) && sscanf(line, "%d %lld", &id, &t) >= 1 && id >= 0 && id < TR_MAX) {
++            if (!s_set.unlocked[id]) got++;
++            s_set.unlocked[id] = 1;
++            s_set.when[id] = t > 0 ? t : 1;
++        }
++        line = nl ? nl + 1 : NULL;
+     }
++    free(d);
++    return got;
++}
++
++static void state_save(void)
++{
++    char* b = (char*)malloc(64 * 1024);
++    if (!b) return;
++    size_t k = (size_t)snprintf(b, 64 * 1024,
++        "# RACiT trophies: %s (%s)\n# <trophy id> <unlocked at, unix seconds UTC> <name>\n", s_set.title, s_set.comm);
++    for (int i = 0; i < TR_MAX && k < 60 * 1024; i++)
++        if (s_set.unlocked[i]) {
++            char nm[128]; fold_ascii(s_set.t[i].name, nm, sizeof nm);
++            k += (size_t)snprintf(b + k, 64 * 1024 - k, "%d %lld %s\n", i, s_set.when[i], nm);
++        }
++    char p[1200]; state_path(p, sizeof p);
++    if (write_all(p, b, k) != 0) printf("[trophy] WARNING: could not write %s\n", p);
++    free(b);
++}
+ 
+-    fprintf(fp, "{\n  \"trophies\": [");
+-    for (u32 i = 0; i < ctx->total_trophies; i++) {
+-        if (ctx->unlocked[i]) {
+-            if (!first) fprintf(fp, ",");
+-            fprintf(fp, "\n    { \"id\": %u, \"timestamp\": %llu }",
+-                    i, (unsigned long long)ctx->unlock_time[i]);
+-            first = 0;
++/* {"trophies": [ {"id": N, "timestamp": T}, ... ]} (this file's own format until 0.9.7). */
++static int legacy_merge(const char* path)
++{
++    size_t n = 0;
++    char* d = (char*)read_all(path, &n);
++    if (!d) return 0;
++    int got = 0;
++    for (const char* p = strstr(d, "\"id\""); p; p = strstr(p + 4, "\"id\"")) {
++        const char* c = strchr(p + 4, ':');
++        if (!c) break;
++        const int id = atoi(c + 1);
++        const char* ts = strstr(c, "\"timestamp\"");
++        const char* nx = strstr(c, "\"id\"");
++        long long t = 0;
++        if (ts && (!nx || ts < nx)) { const char* tc = strchr(ts + 11, ':'); if (tc) t = atoll(tc + 1); }
++        if (id < 0 || id >= TR_MAX || (s_set.n && id >= s_set.n)) continue;
++        if (!s_set.unlocked[id] || (t > 0 && t < s_set.when[id])) {
++            if (!s_set.unlocked[id]) got++;
++            s_set.unlocked[id] = 1;
++            s_set.when[id] = t > 0 ? t : 1;
+         }
+     }
+-    fprintf(fp, "\n  ]\n}\n");
+-    fclose(fp);
+-}
+-
+-static void trophy_load(TrophyContext* ctx)
+-{
+-    char filepath[1024];
+-    FILE* fp;
+-    char line[256];
+-
+-    trophy_get_filepath(&ctx->commId, filepath, sizeof(filepath));
+-
+-    fp = fopen(filepath, "r");
+-    if (!fp)
+-        return; /* no saved data, all locked */
+-
+-    /*
+-     * Simple JSON parser -- look for "id": N and "timestamp": T patterns.
+-     * This avoids any external JSON library dependency.
+-     */
+-    while (fgets(line, sizeof(line), fp)) {
+-        const char* id_pos = strstr(line, "\"id\":");
+-        if (id_pos) {
+-            u32 tid = 0;
+-            u64 ts = 0;
+-            const char* ts_pos;
+-
+-            if (sscanf(id_pos, "\"id\": %u", &tid) == 1 &&
+-                tid < SCE_NP_TROPHY_MAX_NUM_TROPHIES) {
+-                ts_pos = strstr(line, "\"timestamp\":");
+-                if (ts_pos)
+-                    sscanf(ts_pos, "\"timestamp\": %llu",
+-                           (unsigned long long*)&ts);
+-                ctx->unlocked[tid] = 1;
+-                ctx->unlock_time[tid] = ts;
++    free(d);
++    if (got) printf("[trophy] brought over %d unlock(s) from %s\n", got, path);
++    return got;
++}
++
++static int legacy_scan_dir(const char* dir, const char* only)   /* *.json in dir (or just `only`) */
++{
++    int got = 0;
++    char p[1400];
++    if (only) { snprintf(p, sizeof p, "%s%c%s", dir, PATH_SEP, only); return legacy_merge(p); }
++#ifdef _WIN32
++    WIN32_FIND_DATAA fd;
++    snprintf(p, sizeof p, "%s\\*.json", dir);
++    HANDLE h = FindFirstFileA(p, &fd);
++    if (h == INVALID_HANDLE_VALUE) return 0;
++    do {
++        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
++        snprintf(p, sizeof p, "%s\\%s", dir, fd.cFileName);
++        got += legacy_merge(p);
++    } while (FindNextFileA(h, &fd));
++    FindClose(h);
++#else
++    DIR* dd = opendir(dir);
++    if (!dd) return 0;
++    struct dirent* de;
++    while ((de = readdir(dd))) {
++        const size_t l = strlen(de->d_name);
++        if (l < 6 || strcmp(de->d_name + l - 5, ".json")) continue;
++        snprintf(p, sizeof p, "%s/%s", dir, de->d_name);
++        got += legacy_merge(p);
++    }
++    closedir(dd);
++#endif
++    return got;
++}
++
++static int legacy_import(const char* comm9)
++{
++    char file[64];
++    snprintf(file, sizeof file, "%s.json", comm9);
++    int got = legacy_scan_dir("gamedata/trophies", file);   /* the old default, beside the exe */
++    char p[1200];
++    snprintf(p, sizeof p, "%s%cimport", s_set.dir, PATH_SEP);   /* the launcher's bring-over */
++    got += legacy_scan_dir(p, NULL);
++#ifdef _WIN32
++    /* The launcher runs builds\vNN\RaCACiT.exe: its other builds kept their own. */
++    char exe[MAX_PATH * 2];
++    const DWORD el = GetModuleFileNameA(NULL, exe, (DWORD)sizeof exe);
++    char* slash = el ? strrchr(exe, '\\') : NULL;
++    if (slash) {
++        *slash = 0;                                  /* builds\vNN */
++        char* up = strrchr(exe, '\\');
++        char parent[MAX_PATH * 2] = "";
++        if (up) { snprintf(parent, sizeof parent, "%.*s", (int)(up - exe), exe); }
++        const char* pn = strrchr(parent, '\\');
++        if (parent[0] && pn && !_stricmp(pn + 1, "builds")) {   /* every build of this install */
++            WIN32_FIND_DATAA fd;
++            snprintf(p, sizeof p, "%s\\*", parent);
++            HANDLE h = FindFirstFileA(p, &fd);
++            if (h != INVALID_HANDLE_VALUE) {
++                do {
++                    if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || fd.cFileName[0] == '.') continue;
++                    char d2[1200];
++                    snprintf(d2, sizeof d2, "%s\\%s\\gamedata\\trophies", parent, fd.cFileName);
++                    got += legacy_scan_dir(d2, file);
++                } while (FindNextFileA(h, &fd));
++                FindClose(h);
+             }
++        } else {
++            char d2[1200];
++            snprintf(d2, sizeof d2, "%s\\gamedata\\trophies", exe);
++            got += legacy_scan_dir(d2, file);
+         }
+     }
+-    fclose(fp);
++#endif
++    return got;
++}
++
++/* ---------------------------------------------------------------------------
++ * The platinum
++ * -----------------------------------------------------------------------*/
++static int platinum_id(void)
++{
++    for (int i = 0; i < s_set.n; i++) if (s_set.t[i].grade == SCE_NP_TROPHY_GRADE_PLATINUM) return i;
++    return -1;
++}
++
++/* All the trophies that count towards it unlocked, it not: its id, else -1. */
++static int platinum_due(void)
++{
++    const int p = platinum_id();
++    if (p < 0 || s_set.unlocked[p]) return -1;
++    /* Those whose pid names it (every other one, in A Crack in Time); a set
++     * with no pids: every other one. */
++    int linked = 0;
++    for (int i = 0; i < s_set.n; i++) linked += i != p && s_set.t[i].pid == p;
++    int any = 0;
++    for (int i = 0; i < s_set.n; i++) {
++        if (i == p || s_set.t[i].grade == 0) continue;
++        if (linked && s_set.t[i].pid != p) continue;
++        any = 1;
++        if (!s_set.unlocked[i]) return -1;
++    }
++    return any ? p : -1;
++}
+ 
+-    printf("[sceNpTrophy] Loaded trophy data from %s\n", filepath);
++static int unlocked_count(void)
++{
++    int c = 0;
++    for (int i = 0; i < (s_set.n ? s_set.n : TR_MAX); i++) c += s_set.unlocked[i];
++    return c;
+ }
+ 
+-static u32 trophy_count_unlocked(TrophyContext* ctx)
++/* ---------------------------------------------------------------------------
++ * The overlay
++ * -----------------------------------------------------------------------*/
++static void ui_push(void)
+ {
+-    u32 count = 0;
+-    for (u32 i = 0; i < ctx->total_trophies; i++)
+-        if (ctx->unlocked[i]) count++;
+-    return count;
++    static rsx_trophy t[RSX_UI_TROPHY_MAX];
++    const int n = s_set.n < RSX_UI_TROPHY_MAX ? s_set.n : RSX_UI_TROPHY_MAX;
++    for (int i = 0; i < n; i++) {
++        memset(&t[i], 0, sizeof t[i]);
++        t[i].id = i; t[i].grade = s_set.t[i].grade; t[i].hidden = s_set.t[i].hidden;
++        t[i].when = s_set.unlocked[i] ? s_set.when[i] : 0;
++        if (s_set.t[i].name[0]) fold_ascii(s_set.t[i].name, t[i].name, sizeof t[i].name);
++        else snprintf(t[i].name, sizeof t[i].name, "Trophy %d", i);
++        fold_ascii(s_set.t[i].detail, t[i].detail, sizeof t[i].detail);
++    }
++    char title[128];
++    fold_ascii(s_set.title, title, sizeof title);
++    rsx_host_ui_trophy_set(title, t, n);
++}
++
++/* ---------------------------------------------------------------------------
++ * Unlocking (the game's and the host's)
++ * -----------------------------------------------------------------------*/
++/* Under the lock. Returns 0 unlocked now, 1 already, -1 no such trophy;
++ * *plat = the platinum that came with it, or -1. */
++static int unlock_locked(int id, int* plat)
++{
++    *plat = -1;
++    if (id < 0 || id >= TR_MAX || (s_set.n && id >= s_set.n)) return -1;
++    if (s_set.unlocked[id]) return 1;
++    const long long now = (long long)time(NULL);
++    s_set.unlocked[id] = 1; s_set.when[id] = now;
++    const int p = platinum_due();
++    if (p >= 0) { s_set.unlocked[p] = 1; s_set.when[p] = now; *plat = p; }
++    state_save();
++    return 0;
++}
++
++static void announce(int id, const char* why)
++{
++    char nm[128];
++    fold_ascii(s_set.t[id].name[0] ? s_set.t[id].name : "?", nm, sizeof nm);
++    printf("[trophy] unlocked %d \"%s\" (%s)%s%s -- %d of %d\n", id, nm, grade_name(s_set.t[id].grade),
++           why ? ": " : "", why ? why : "", unlocked_count(), s_set.n);
++    rsx_host_ui_trophy_unlocked(id, s_set.when[id], 1);
+ }
+ 
++int sceNpTrophyHostUnlock(int trophyId, const char* why)
++{
++    if (s_set.loaded <= 0 || !s_set.dir[0]) return -1;
++    int plat;
++    tlock();
++    const int r = unlock_locked(trophyId, &plat);
++    tunlock();
++    if (r != 0) return r;
++    announce(trophyId, why);
++    if (plat >= 0) announce(plat, "every other trophy");
++    if (s_hook) s_hook(trophyId);
++    return 0;
++}
++
++void sceNpTrophySetUnlockHook(void (*hook)(int trophyId)) { s_hook = hook; }
++
++/* ---------------------------------------------------------------------------
++ * Guest memory
++ * -----------------------------------------------------------------------*/
++static void put_str(u32 ea, const char* s, size_t cap)
++{
++    size_t i = 0;
++    for (; s && s[i] && i + 1 < cap; i++) vm_write8(ea + (u32)i, (u8)s[i]);
++    for (; i < cap; i++) vm_write8(ea + (u32)i, 0);
++}
++static void put_zero(u32 ea, size_t n) { for (size_t i = 0; i < n; i++) vm_write8(ea + (u32)i, 0); }
++
++/* CellRtcTick: microseconds since 0001-01-01 00:00 UTC. */
++static u64 rtc_tick(long long unix_s) { return (u64)unix_s * 1000000ull + 62135596800000000ull; }
++
++static int ctx_ok(SceNpTrophyContext c) { return c > 0 && c <= SCE_NP_TROPHY_MAX_CONTEXTS && s_contexts[c].in_use; }
++static int handle_ok(SceNpTrophyHandle h) { return h > 0 && h <= SCE_NP_TROPHY_MAX_HANDLES && s_handles[h].in_use; }
++
+ /* ---------------------------------------------------------------------------
+  * API implementations
+  * -----------------------------------------------------------------------*/
+ 
+ void sceNpTrophySetStoragePath(const char* path)
+ {
+-    path = GUEST_PTR(path, const char*);
+-    if (path) {
+-        strncpy(s_storage_path, path, sizeof(s_storage_path) - 1);
+-        s_storage_path[sizeof(s_storage_path) - 1] = '\0';
+-    }
++    (void)path;   /* the PS3 hard drive's trophy folder; see the top of this file */
+ }
+ 
+ s32 sceNpTrophyInit(void* poolPtr, u32 poolSize, u32 containerId, u64 options)
+@@ -199,12 +730,7 @@ s32 sceNpTrophyTerm(void)
+     if (!s_trophy_initialized)
+         return SCE_NP_TROPHY_ERROR_NOT_INITIALIZED;
+ 
+-    /* Save all registered contexts */
+-    for (int i = 1; i <= SCE_NP_TROPHY_MAX_CONTEXTS; i++) {
+-        if (s_contexts[i].in_use && s_contexts[i].registered)
+-            trophy_save(&s_contexts[i]);
+-    }
+-
++    /* Every unlock is saved when it happens; the set stays loaded for the next Init. */
+     memset(s_contexts, 0, sizeof(s_contexts));
+     memset(s_handles, 0, sizeof(s_handles));
+     s_trophy_initialized = 0;
+@@ -223,22 +749,29 @@ s32 sceNpTrophyCreateContext(SceNpTrophyContext* context,
+ 
+     if (!context || !commId)
+         return SCE_NP_TROPHY_ERROR_INVALID_ARGUMENT;
+-    const SceNpCommunicationId* commId_h = GUEST_PTR(commId, const SceNpCommunicationId*);
++    const u32 cea = GUEST_EA(commId);
++    char id9[10];
++    for (int i = 0; i < 9; i++) id9[i] = (char)vm_read8(cea + (u32)i);
++    id9[9] = 0;
++    for (int i = 0; i < 9; i++) if (!isalnum((unsigned char)id9[i])) { id9[i] = 0; break; }
++    if (!id9[0]) return SCE_NP_TROPHY_ERROR_INVALID_NP_COMM_ID;
++    const u8 num = vm_read8(cea + 10);
+ 
+     for (s32 i = 1; i <= SCE_NP_TROPHY_MAX_CONTEXTS; i++) {
+         if (!s_contexts[i].in_use) {
+             memset(&s_contexts[i], 0, sizeof(TrophyContext));
+             s_contexts[i].in_use = 1;
+-            s_contexts[i].commId = *commId_h;
+-            s_contexts[i].total_trophies = SCE_NP_TROPHY_MAX_NUM_TROPHIES;
++            snprintf(s_contexts[i].comm, sizeof s_contexts[i].comm, "%s_%02u", id9, (unsigned)num);
++            tlock();
++            set_load(s_contexts[i].comm);
++            tunlock();
+             vm_write32(GUEST_EA(context), (u32)i);
+-            printf("[sceNpTrophy] CreateContext(commId=\"%s\") -> ctx=%d\n",
+-                   commId_h->data, i);
++            printf("[sceNpTrophy] CreateContext(commId=\"%s\") -> ctx=%d\n", s_contexts[i].comm, i);
+             return CELL_OK;
+         }
+     }
+ 
+-    return SCE_NP_TROPHY_ERROR_OUT_OF_MEMORY;
++    return SCE_NP_TROPHY_ERROR_EXCEEDS_MAX;
+ }
+ 
+ s32 sceNpTrophyDestroyContext(SceNpTrophyContext context)
+@@ -246,12 +779,8 @@ s32 sceNpTrophyDestroyContext(SceNpTrophyContext context)
+     if (!s_trophy_initialized)
+         return SCE_NP_TROPHY_ERROR_NOT_INITIALIZED;
+ 
+-    if (context <= 0 || context > SCE_NP_TROPHY_MAX_CONTEXTS ||
+-        !s_contexts[context].in_use)
+-        return SCE_NP_TROPHY_ERROR_INVALID_CONTEXT;
+-
+-    if (s_contexts[context].registered)
+-        trophy_save(&s_contexts[context]);
++    if (!ctx_ok(context))
++        return SCE_NP_TROPHY_ERROR_UNKNOWN_CONTEXT;
+ 
+     s_contexts[context].in_use = 0;
+     printf("[sceNpTrophy] DestroyContext(ctx=%d)\n", context);
+@@ -275,7 +804,7 @@ s32 sceNpTrophyCreateHandle(SceNpTrophyHandle* handle)
+         }
+     }
+ 
+-    return SCE_NP_TROPHY_ERROR_OUT_OF_MEMORY;
++    return SCE_NP_TROPHY_ERROR_EXCEEDS_MAX;
+ }
+ 
+ s32 sceNpTrophyDestroyHandle(SceNpTrophyHandle handle)
+@@ -283,9 +812,8 @@ s32 sceNpTrophyDestroyHandle(SceNpTrophyHandle handle)
+     if (!s_trophy_initialized)
+         return SCE_NP_TROPHY_ERROR_NOT_INITIALIZED;
+ 
+-    if (handle <= 0 || handle > SCE_NP_TROPHY_MAX_HANDLES ||
+-        !s_handles[handle].in_use)
+-        return SCE_NP_TROPHY_ERROR_INVALID_HANDLE;
++    if (!handle_ok(handle))
++        return SCE_NP_TROPHY_ERROR_UNKNOWN_HANDLE;
+ 
+     s_handles[handle].in_use = 0;
+     printf("[sceNpTrophy] DestroyHandle(handle=%d)\n", handle);
+@@ -303,26 +831,51 @@ s32 sceNpTrophyRegisterContext(SceNpTrophyContext context,
+     if (!s_trophy_initialized)
+         return SCE_NP_TROPHY_ERROR_NOT_INITIALIZED;
+ 
+-    if (context <= 0 || context > SCE_NP_TROPHY_MAX_CONTEXTS ||
+-        !s_contexts[context].in_use)
+-        return SCE_NP_TROPHY_ERROR_INVALID_CONTEXT;
+-
+-    if (handle <= 0 || handle > SCE_NP_TROPHY_MAX_HANDLES ||
+-        !s_handles[handle].in_use)
+-        return SCE_NP_TROPHY_ERROR_INVALID_HANDLE;
++    if (!ctx_ok(context))
++        return SCE_NP_TROPHY_ERROR_UNKNOWN_CONTEXT;
+ 
+-    if (s_contexts[context].registered)
+-        return SCE_NP_TROPHY_ERROR_CONTEXT_ALREADY_REG;
++    if (!handle_ok(handle))
++        return SCE_NP_TROPHY_ERROR_UNKNOWN_HANDLE;
+ 
+     if (!statusCb) return SCE_NP_TROPHY_ERROR_INVALID_ARGUMENT;
+-    if (!g_ps3_guest_caller) return SCE_NP_TROPHY_ERROR_UNKNOWN;
+-
+-    /* Load any previously saved trophy data */
+-    trophy_load(&s_contexts[context]);
++    if (!g_ps3_guest_caller) return SCE_NP_TROPHY_ERROR_ABORT;
++
++    /* The set in the player's folder, the unlocks so far, the older files. */
++    int plat = -1, got = 0, merged = 0;
++    char comm9[16];
++    snprintf(comm9, sizeof comm9, "%s", s_contexts[context].comm);
++    { char* us = strrchr(comm9, '_'); if (us) *us = 0; }
++    tlock();
++    set_load(s_contexts[context].comm);
++    if (s_set.dir[0]) {
++        got = state_load();
++        merged = legacy_import(comm9);
++        plat = platinum_due();
++        if (plat >= 0) { s_set.unlocked[plat] = 1; s_set.when[plat] = (long long)time(NULL); }
++        if (merged || plat >= 0) state_save();
++    }
++    tunlock();
+     s_contexts[context].registered = 1;
++    if (s_set.dir[0]) {
++        printf("[trophy] %d of %d unlocked (%d from %s%ctrophies.txt%s)\n", unlocked_count(), s_set.n, got,
++               s_set.dir, PATH_SEP, merged ? ", the rest from older builds' files" : "");
++        ui_push();
++        if (plat >= 0) announce(plat, "every other trophy");
++        /* The game's rules (game/stubs.cpp: a higher bolt trophy brings the
++         * lower ones) for what was unlocked before this start too: the
++         * owner's 0.9.7 had only the 1,000,000-bolt one, kept by an older
++         * build, and the game, finding it unlocked, never asks for it again,
++         * so the rule would never run for it. */
++        if (s_hook) {
++            static unsigned char had[TR_MAX];
++            const int n = s_set.n ? s_set.n : TR_MAX;
++            tlock(); for (int i = 0; i < n; i++) had[i] = (unsigned char)s_set.unlocked[i]; tunlock();
++            for (int i = 0; i < n; i++) if (had[i]) s_hook(i);
++        }
++    }
+ 
+-    printf("[sceNpTrophy] RegisterContext(ctx=%d, handle=%d, statusCb=0x%08X, "
+-           "arg=0x%08X) -> loaded saved data\n", context, handle, statusCb, arg);
++    printf("[sceNpTrophy] RegisterContext(ctx=%d, handle=%d, statusCb=0x%08X, arg=0x%08X)\n",
++           context, handle, statusCb, arg);
+ 
+     /* Use the runner's OPD bridge, not the optional code/TOC scaffold entry
+      * point. Registration status is synchronous; its terminal notification is
+@@ -331,8 +884,8 @@ s32 sceNpTrophyRegisterContext(SceNpTrophyContext context,
+     g_ps3_guest_caller(statusCb, (u32)context, SCE_NP_TROPHY_STATUS_INSTALLED,
+                        0, 0, arg, 0, 0, 0);
+     if (!s_trophy_initialized) return SCE_NP_TROPHY_ERROR_NOT_INITIALIZED;
+-    if (!s_contexts[context].in_use) return SCE_NP_TROPHY_ERROR_INVALID_CONTEXT;
+-    if (!s_handles[handle].in_use) return SCE_NP_TROPHY_ERROR_INVALID_HANDLE;
++    if (!s_contexts[context].in_use) return SCE_NP_TROPHY_ERROR_UNKNOWN_CONTEXT;
++    if (!s_handles[handle].in_use) return SCE_NP_TROPHY_ERROR_UNKNOWN_HANDLE;
+     const u64 completion[8] = {(u32)context, SCE_NP_TROPHY_STATUS_PROCESSING_COMPLETE,
+                                0, 0, arg, 0, 0, 0};
+     if (cellSysutilQueueGuestCallbackArgs(statusCb, completion) != CELL_OK) {
+@@ -352,22 +905,15 @@ s32 sceNpTrophyGetRequiredDiskSpace(SceNpTrophyContext context,
+     if (!s_trophy_initialized)
+         return SCE_NP_TROPHY_ERROR_NOT_INITIALIZED;
+ 
+-    if (context <= 0 || context > SCE_NP_TROPHY_MAX_CONTEXTS ||
+-        !s_contexts[context].in_use)
+-        return SCE_NP_TROPHY_ERROR_INVALID_CONTEXT;
++    if (!ctx_ok(context))
++        return SCE_NP_TROPHY_ERROR_UNKNOWN_CONTEXT;
+ 
+     if (!reqSpace)
+         return SCE_NP_TROPHY_ERROR_INVALID_ARGUMENT;
+-    reqSpace = GUEST_PTR(reqSpace, u64*);
+-
+-    /* Typical trophy pack size. The guest is big-endian and reads this u64
+-     * back in BE order, so the value MUST be byte-swapped on write -- otherwise
+-     * a host-LE 0x100000 is read as 0x0010000000000000 (2^44). LBP feeds this
+-     * "required disk space" straight into its save-data free-space accounting
+-     * (sub_379EC0: errB = budget - usedKB - reqSpaceKB); a garbage 2^44 makes
+-     * errB underflow negative -> cellGame GameData check returns ERROR-B ->
+-     * boot bails. (Same LE-write class as the cellUserInfo fix.) */
+-    *reqSpace = ps3_bswap64((u64)(1024 * 1024)); /* 1 MB, big-endian */
++
++    /* Big-endian: LBP feeds this straight into its free-space sums (a host-LE
++     * 1 MB read back as 2^44 failed its GameData check). */
++    vm_write64(GUEST_EA(reqSpace), (u64)(1024 * 1024));
+     printf("[sceNpTrophy] GetRequiredDiskSpace(ctx=%d) -> 1MB\n", context);
+     return CELL_OK;
+ }
+@@ -382,40 +928,46 @@ s32 sceNpTrophyGetGameInfo(SceNpTrophyContext context,
+     if (!s_trophy_initialized)
+         return SCE_NP_TROPHY_ERROR_NOT_INITIALIZED;
+ 
+-    if (context <= 0 || context > SCE_NP_TROPHY_MAX_CONTEXTS ||
+-        !s_contexts[context].in_use)
+-        return SCE_NP_TROPHY_ERROR_INVALID_CONTEXT;
++    if (!ctx_ok(context))
++        return SCE_NP_TROPHY_ERROR_UNKNOWN_CONTEXT;
+ 
+     if (!s_contexts[context].registered)
+         return SCE_NP_TROPHY_ERROR_CONTEXT_NOT_REGISTERED;
+-    details = GUEST_PTR(details, SceNpTrophyGameDetails*);
+-    data = GUEST_PTR(data, SceNpTrophyGameData*);
++
++    int all[5] = { 0 }, got[5] = { 0 };
++    tlock();
++    for (int i = 0; i < s_set.n; i++) {
++        const int g = s_set.t[i].grade >= 1 && s_set.t[i].grade <= 4 ? s_set.t[i].grade : 0;
++        all[g]++;
++        if (s_set.unlocked[i]) got[g]++;
++    }
++    tunlock();
++    /* No set on the disc: as before, the game may use any id (unnamed). */
++    const int n = s_set.n ? s_set.n : TR_MAX;
++    const int un = s_set.n ? got[0] + got[1] + got[2] + got[3] + got[4] : unlocked_count();
+ 
+     if (details) {
+-        memset(details, 0, sizeof(SceNpTrophyGameDetails));
+-        details->numTrophies = 32; /* default trophy set */
+-        details->numPlatinum = 1;
+-        details->numGold     = 2;
+-        details->numSilver   = 8;
+-        details->numBronze   = 21;
+-        strncpy(details->title, "PS3 Game",
+-                SCE_NP_TROPHY_GAME_TITLE_MAX_SIZE - 1);
+-        strncpy(details->description, "Trophy set",
+-                SCE_NP_TROPHY_GAME_DESC_MAX_SIZE - 1);
++        const u32 ea = GUEST_EA(details);
++        vm_write32(ea + 0, (u32)n);
++        vm_write32(ea + 4, (u32)all[1]);
++        vm_write32(ea + 8, (u32)all[2]);
++        vm_write32(ea + 12, (u32)all[3]);
++        vm_write32(ea + 16, (u32)all[4]);
++        put_str(ea + 20, s_set.title, SCE_NP_TROPHY_GAME_TITLE_MAX_SIZE);
++        put_str(ea + 148, s_set.title_detail, SCE_NP_TROPHY_GAME_DESC_MAX_SIZE);
++        put_zero(ea + 1172, 4);
+     }
+ 
+     if (data) {
+-        memset(data, 0, sizeof(SceNpTrophyGameData));
+-        data->unlockedTrophies = trophy_count_unlocked(&s_contexts[context]);
+-        /* Count by grade would require per-trophy grade data;
+-         * return conservative estimates */
+-        data->unlockedPlatinum = 0;
+-        data->unlockedGold     = 0;
+-        data->unlockedSilver   = 0;
+-        data->unlockedBronze   = data->unlockedTrophies;
++        const u32 ea = GUEST_EA(data);
++        vm_write32(ea + 0, (u32)un);
++        vm_write32(ea + 4, (u32)got[1]);
++        vm_write32(ea + 8, (u32)got[2]);
++        vm_write32(ea + 12, (u32)got[3]);
++        vm_write32(ea + 16, (u32)got[4]);
+     }
+ 
+-    printf("[sceNpTrophy] GetGameInfo(ctx=%d)\n", context);
++    printf("[sceNpTrophy] GetGameInfo(ctx=%d) -> %d trophies, %d unlocked\n", context, n, un);
+     return CELL_OK;
+ }
+ 
+@@ -430,34 +982,33 @@ s32 sceNpTrophyGetTrophyInfo(SceNpTrophyContext context,
+     if (!s_trophy_initialized)
+         return SCE_NP_TROPHY_ERROR_NOT_INITIALIZED;
+ 
+-    if (context <= 0 || context > SCE_NP_TROPHY_MAX_CONTEXTS ||
+-        !s_contexts[context].in_use)
+-        return SCE_NP_TROPHY_ERROR_INVALID_CONTEXT;
++    if (!ctx_ok(context))
++        return SCE_NP_TROPHY_ERROR_UNKNOWN_CONTEXT;
+ 
+     if (!s_contexts[context].registered)
+         return SCE_NP_TROPHY_ERROR_CONTEXT_NOT_REGISTERED;
+ 
+-    if (trophyId < 0 || (u32)trophyId >= s_contexts[context].total_trophies)
++    if (trophyId < 0 || trophyId >= TR_MAX || (s_set.n && trophyId >= s_set.n))
+         return SCE_NP_TROPHY_ERROR_INVALID_ARGUMENT;
+-    details = GUEST_PTR(details, SceNpTrophyDetails*);
+-    data = GUEST_PTR(data, SceNpTrophyData*);
+ 
++    const TrophyDef* t = &s_set.t[trophyId];
+     if (details) {
+-        memset(details, 0, sizeof(SceNpTrophyDetails));
+-        details->trophyId = (u32)trophyId;
+-        details->trophyGrade = SCE_NP_TROPHY_GRADE_BRONZE;
+-        snprintf(details->name, SCE_NP_TROPHY_NAME_MAX_SIZE,
+-                 "Trophy %d", trophyId);
+-        snprintf(details->description, SCE_NP_TROPHY_DESC_MAX_SIZE,
+-                 "Trophy #%d description", trophyId);
+-        details->hidden = 0;
++        const u32 ea = GUEST_EA(details);
++        vm_write32(ea + 0, (u32)trophyId);
++        vm_write32(ea + 4, (u32)t->grade);
++        put_str(ea + 8, t->name, SCE_NP_TROPHY_NAME_MAX_SIZE);
++        put_str(ea + 136, t->detail, SCE_NP_TROPHY_DESC_MAX_SIZE);
++        vm_write8(ea + 1160, (u8)(t->hidden ? 1 : 0));
++        put_zero(ea + 1161, 3);
+     }
+ 
+     if (data) {
+-        memset(data, 0, sizeof(SceNpTrophyData));
+-        data->trophyId = (u32)trophyId;
+-        data->unlocked = s_contexts[context].unlocked[trophyId];
+-        data->timestamp = s_contexts[context].unlock_time[trophyId];
++        const u32 ea = GUEST_EA(data);
++        const int u = s_set.unlocked[trophyId];
++        vm_write64(ea + 0, u ? rtc_tick(s_set.when[trophyId]) : 0);
++        vm_write32(ea + 8, (u32)trophyId);
++        vm_write8(ea + 12, (u8)(u ? 1 : 0));
++        put_zero(ea + 13, 3);
+     }
+ 
+     return CELL_OK;
+@@ -468,44 +1019,38 @@ s32 sceNpTrophyUnlockTrophy(SceNpTrophyContext context,
+                             SceNpTrophyId trophyId,
+                             SceNpTrophyId* platinumId)
+ {
+-    (void)handle;
+-
+     if (!s_trophy_initialized)
+         return SCE_NP_TROPHY_ERROR_NOT_INITIALIZED;
+ 
+-    if (context <= 0 || context > SCE_NP_TROPHY_MAX_CONTEXTS ||
+-        !s_contexts[context].in_use)
+-        return SCE_NP_TROPHY_ERROR_INVALID_CONTEXT;
++    if (!ctx_ok(context))
++        return SCE_NP_TROPHY_ERROR_UNKNOWN_CONTEXT;
++
++    if (!handle_ok(handle))
++        return SCE_NP_TROPHY_ERROR_UNKNOWN_HANDLE;
+ 
+     if (!s_contexts[context].registered)
+         return SCE_NP_TROPHY_ERROR_CONTEXT_NOT_REGISTERED;
+ 
+-    if (trophyId < 0 || (u32)trophyId >= s_contexts[context].total_trophies)
+-        return SCE_NP_TROPHY_ERROR_INVALID_ARGUMENT;
+-
+-    if (s_contexts[context].unlocked[trophyId])
+-        return SCE_NP_TROPHY_ERROR_ALREADY_UNLOCKED;
++    if (platinumId) vm_write32(GUEST_EA(platinumId), (u32)SCE_NP_TROPHY_INVALID_TROPHY_ID);
+ 
+-    /* Unlock the trophy */
+-    s_contexts[context].unlocked[trophyId] = 1;
+-    s_contexts[context].unlock_time[trophyId] = (u64)time(NULL);
+-
+-    printf("************************************************************\n");
+-    printf("*  TROPHY UNLOCKED!  Trophy #%d                            \n",
+-           trophyId);
+-    printf("*  Context: %d  CommId: %s                                 \n",
+-           context, s_contexts[context].commId.data);
+-    printf("************************************************************\n");
+-
+-    /* Save immediately */
+-    trophy_save(&s_contexts[context]);
+-
+-    /* Check if all non-platinum trophies are unlocked -> platinum */
+-    if (platinumId) {
+-        vm_write32((u32)(uintptr_t)platinumId, (u32)SCE_NP_TROPHY_INVALID_TROPHY_ID);
+-        /* Simplified: don't auto-award platinum without grade info */
++    if (trophyId < 0 || trophyId >= TR_MAX || (s_set.n && trophyId >= s_set.n))
++        return SCE_NP_TROPHY_ERROR_INVALID_ARGUMENT;
++    if (s_set.t[trophyId].grade == SCE_NP_TROPHY_GRADE_PLATINUM)
++        return SCE_NP_TROPHY_ERROR_CANNOT_UNLOCK_PLATINUM;
++
++    int plat;
++    tlock();
++    const int r = s_set.dir[0] ? unlock_locked(trophyId, &plat) : -1;
++    tunlock();
++    if (r == 1) return SCE_NP_TROPHY_ERROR_ALREADY_UNLOCKED;
++    if (r < 0) return SCE_NP_TROPHY_ERROR_INVALID_ARGUMENT;
++
++    announce(trophyId, NULL);
++    if (plat >= 0) {
++        if (platinumId) vm_write32(GUEST_EA(platinumId), (u32)plat);
++        announce(plat, "every other trophy");
+     }
+-
++    if (s_hook) s_hook(trophyId);
+     return CELL_OK;
+ }
+ 
+@@ -519,9 +1064,8 @@ s32 sceNpTrophyGetTrophyUnlockState(SceNpTrophyContext context,
+     if (!s_trophy_initialized)
+         return SCE_NP_TROPHY_ERROR_NOT_INITIALIZED;
+ 
+-    if (context <= 0 || context > SCE_NP_TROPHY_MAX_CONTEXTS ||
+-        !s_contexts[context].in_use)
+-        return SCE_NP_TROPHY_ERROR_INVALID_CONTEXT;
++    if (!ctx_ok(context))
++        return SCE_NP_TROPHY_ERROR_UNKNOWN_CONTEXT;
+ 
+     if (!s_contexts[context].registered)
+         return SCE_NP_TROPHY_ERROR_CONTEXT_NOT_REGISTERED;
+@@ -529,19 +1073,14 @@ s32 sceNpTrophyGetTrophyUnlockState(SceNpTrophyContext context,
+     if (!flags || !count)
+         return SCE_NP_TROPHY_ERROR_INVALID_ARGUMENT;
+ 
+-    u32 flags_ea = (u32)(uintptr_t)flags;
+-    for (u32 o = 0; o < sizeof(SceNpTrophyFlagArray); o += 4)
+-        vm_write32(flags_ea + o, 0);
++    const u32 fea = GUEST_EA(flags);
++    const int n = s_set.n ? s_set.n : TR_MAX;
++    u32 w[TR_MAX / 32] = { 0 };
++    for (int i = 0; i < n; i++)
++        if (s_set.unlocked[i]) w[i / 32] |= 1u << (i % 32);
++    for (int k = 0; k < TR_MAX / 32; k++) vm_write32(fea + (u32)k * 4u, w[k]);
+ 
+-    for (u32 i = 0; i < s_contexts[context].total_trophies; i++) {
+-        if (s_contexts[context].unlocked[i])
+-            {
+-            u32 word_ea = flags_ea + (i / 32) * 4;
+-            vm_write32(word_ea, vm_read32(word_ea) | (1u << (i % 32)));
+-        }
+-    }
+-
+-    vm_write32((u32)(uintptr_t)count, (u32)s_contexts[context].total_trophies);
++    vm_write32(GUEST_EA(count), (u32)n);
+     return CELL_OK;
+ }
+ 
+@@ -554,9 +1093,8 @@ s32 sceNpTrophyGetGameProgress(SceNpTrophyContext context,
+     if (!s_trophy_initialized)
+         return SCE_NP_TROPHY_ERROR_NOT_INITIALIZED;
+ 
+-    if (context <= 0 || context > SCE_NP_TROPHY_MAX_CONTEXTS ||
+-        !s_contexts[context].in_use)
+-        return SCE_NP_TROPHY_ERROR_INVALID_CONTEXT;
++    if (!ctx_ok(context))
++        return SCE_NP_TROPHY_ERROR_UNKNOWN_CONTEXT;
+ 
+     if (!s_contexts[context].registered)
+         return SCE_NP_TROPHY_ERROR_CONTEXT_NOT_REGISTERED;
+@@ -564,13 +1102,10 @@ s32 sceNpTrophyGetGameProgress(SceNpTrophyContext context,
+     if (!percentage)
+         return SCE_NP_TROPHY_ERROR_INVALID_ARGUMENT;
+ 
+-    u32 total = s_contexts[context].total_trophies;
+-    u32 unlocked = trophy_count_unlocked(&s_contexts[context]);
+-
+-    s32 pct = total > 0 ? (s32)((unlocked * 100) / total) : 0;
++    const int total = s_set.n ? s_set.n : TR_MAX, unlocked = unlocked_count();
++    const s32 pct = total > 0 ? (s32)((unlocked * 100) / total) : 0;
+     vm_write32(GUEST_EA(percentage), (u32)pct);
+ 
+-    printf("[sceNpTrophy] GetGameProgress(ctx=%d) -> %d%%\n",
+-           context, pct);
++    printf("[sceNpTrophy] GetGameProgress(ctx=%d) -> %d%%\n", context, pct);
+     return CELL_OK;
+ }
+diff --git a/libs/network/sceNpTrophy.h b/libs/network/sceNpTrophy.h
+index 48faefd..511acf4 100644
+--- a/libs/network/sceNpTrophy.h
++++ b/libs/network/sceNpTrophy.h
+@@ -2,6 +2,9 @@
+  * ps3recomp - sceNpTrophy HLE
+  *
+  * Trophy/achievement system: create contexts, unlock trophies, query progress.
++ * The trophy set (names, grades, hidden flags, icons) comes from the game's own
++ * disc: PS3_GAME/TROPDIR/<NPCOMMID>_00/TROPHY.TRP. Unlocks are kept on the PS3
++ * hard drive, dev_hdd0/home/00000001/trophy/<NPCOMMID>_00/, as on a console.
+  */
+ 
+ #ifndef PS3RECOMP_SCE_NP_TROPHY_H
+@@ -16,24 +19,27 @@ extern "C" {
+ #endif
+ 
+ /* ---------------------------------------------------------------------------
+- * Error codes
++ * Error codes (the system's: a title compares against these, e.g. A Crack in
++ * Time takes ALREADY_UNLOCKED as "done" and anything else as "try again").
+  * -----------------------------------------------------------------------*/
+-#define SCE_NP_TROPHY_ERROR_NOT_INITIALIZED         0x80551601
+-#define SCE_NP_TROPHY_ERROR_ALREADY_INITIALIZED     0x80551602
+-#define SCE_NP_TROPHY_ERROR_INVALID_ARGUMENT        0x80551603
+-#define SCE_NP_TROPHY_ERROR_OUT_OF_MEMORY           0x80551604
+-#define SCE_NP_TROPHY_ERROR_INVALID_CONTEXT         0x80551605
+-#define SCE_NP_TROPHY_ERROR_INVALID_HANDLE          0x80551606
+-#define SCE_NP_TROPHY_ERROR_CONTEXT_NOT_REGISTERED  0x80551607
+-#define SCE_NP_TROPHY_ERROR_ALREADY_EXISTS          0x80551608
+-#define SCE_NP_TROPHY_ERROR_NOT_FOUND               0x80551609
+-#define SCE_NP_TROPHY_ERROR_ALREADY_UNLOCKED        0x8055160A
+-#define SCE_NP_TROPHY_ERROR_PLATINUM_CANNOT_UNLOCK  0x8055160B
+-#define SCE_NP_TROPHY_ERROR_CONTEXT_ALREADY_REG     0x8055160C
+-#define SCE_NP_TROPHY_ERROR_INSUFFICIENT_SPACE      0x8055160D
+-#define SCE_NP_TROPHY_ERROR_PROCESSING              0x8055160E
+-#define SCE_NP_TROPHY_ERROR_ABORT                   0x8055160F
+-#define SCE_NP_TROPHY_ERROR_UNKNOWN                 0x805516FF
++#define SCE_NP_TROPHY_ERROR_ALREADY_INITIALIZED     0x80022901
++#define SCE_NP_TROPHY_ERROR_NOT_INITIALIZED         0x80022902
++#define SCE_NP_TROPHY_ERROR_NOT_SUPPORTED           0x80022903
++#define SCE_NP_TROPHY_ERROR_CONTEXT_NOT_REGISTERED  0x80022904
++#define SCE_NP_TROPHY_ERROR_OUT_OF_MEMORY           0x80022905
++#define SCE_NP_TROPHY_ERROR_INVALID_ARGUMENT        0x80022906
++#define SCE_NP_TROPHY_ERROR_EXCEEDS_MAX             0x80022907
++#define SCE_NP_TROPHY_ERROR_INSUFFICIENT            0x80022909
++#define SCE_NP_TROPHY_ERROR_UNKNOWN_CONTEXT         0x8002290A
++#define SCE_NP_TROPHY_ERROR_INVALID_FORMAT          0x8002290B
++#define SCE_NP_TROPHY_ERROR_INVALID_CONTEXT         0x8002290E
++#define SCE_NP_TROPHY_ERROR_ABORT                   0x80022910
++#define SCE_NP_TROPHY_ERROR_UNKNOWN_HANDLE          0x80022911
++#define SCE_NP_TROPHY_ERROR_CANNOT_UNLOCK_PLATINUM  0x80022914
++#define SCE_NP_TROPHY_ERROR_ALREADY_UNLOCKED        0x80022915
++#define SCE_NP_TROPHY_ERROR_INVALID_HANDLE          0x80022917
++#define SCE_NP_TROPHY_ERROR_INVALID_NP_COMM_ID      0x80022918
++#define SCE_NP_TROPHY_ERROR_UNKNOWN_NP_COMM_ID      0x80022919
+ 
+ /* ---------------------------------------------------------------------------
+  * Constants
+@@ -44,7 +50,7 @@ extern "C" {
+ 
+ #define SCE_NP_TROPHY_MAX_NUM_TROPHIES      128
+ #define SCE_NP_TROPHY_NAME_MAX_SIZE         128
+-#define SCE_NP_TROPHY_DESC_MAX_SIZE         256
++#define SCE_NP_TROPHY_DESC_MAX_SIZE         1024
+ #define SCE_NP_TROPHY_GAME_TITLE_MAX_SIZE   128
+ #define SCE_NP_TROPHY_GAME_DESC_MAX_SIZE    1024
+ 
+@@ -59,50 +65,29 @@ extern "C" {
+ #define SCE_NP_TROPHY_GRADE_BRONZE          4
+ 
+ /* ---------------------------------------------------------------------------
+- * Types
++ * Types. These are the guest's (big-endian) layouts: the handlers write them
++ * field by field with vm_write*, never as host structs.
++ *   SceNpTrophyDetails      0 id, 4 grade, 8 name[128], 136 description[1024],
++ *                           1160 hidden, 1161 reserved[3]           (1164)
++ *   SceNpTrophyData         0 timestamp (CellRtcTick), 8 id, 12 unlocked,
++ *                           13 reserved[3]                          (16)
++ *   SceNpTrophyGameDetails  0 numTrophies, 4 platinum, 8 gold, 12 silver,
++ *                           16 bronze, 20 title[128], 148 description[1024],
++ *                           1172 reserved[4]                        (1176)
++ *   SceNpTrophyGameData     unlocked: 0 all, 4 platinum, 8 gold, 12 silver,
++ *                           16 bronze                               (20)
++ *   SceNpTrophyFlagArray    u32 flag_bits[4]: trophy i = bit (i % 32) of
++ *                           word i / 32                              (16)
+  * -----------------------------------------------------------------------*/
+ typedef s32 SceNpTrophyContext;
+ typedef s32 SceNpTrophyHandle;
+ typedef s32 SceNpTrophyId;
+ 
+-typedef struct SceNpTrophyDetails {
+-    u32  trophyId;
+-    u32  trophyGrade;
+-    char name[SCE_NP_TROPHY_NAME_MAX_SIZE];
+-    char description[SCE_NP_TROPHY_DESC_MAX_SIZE];
+-    u8   hidden;
+-    u8   padding[3];
+-} SceNpTrophyDetails;
+-
+-typedef struct SceNpTrophyData {
+-    u64  timestamp;     /* UNIX timestamp when unlocked, 0 if locked */
+-    u32  trophyId;
+-    u8   unlocked;
+-    u8   padding[3];
+-} SceNpTrophyData;
+-
+-typedef struct SceNpTrophyGameDetails {
+-    u32  numTrophies;
+-    u32  numPlatinum;
+-    u32  numGold;
+-    u32  numSilver;
+-    u32  numBronze;
+-    char title[SCE_NP_TROPHY_GAME_TITLE_MAX_SIZE];
+-    char description[SCE_NP_TROPHY_GAME_DESC_MAX_SIZE];
+-} SceNpTrophyGameDetails;
+-
+-typedef struct SceNpTrophyGameData {
+-    u32  unlockedTrophies;
+-    u32  unlockedPlatinum;
+-    u32  unlockedGold;
+-    u32  unlockedSilver;
+-    u32  unlockedBronze;
+-} SceNpTrophyGameData;
+-
+-/* Bitfield for trophy unlock state: 1 bit per trophy */
+-typedef struct SceNpTrophyFlagArray {
+-    u32 flag[SCE_NP_TROPHY_MAX_NUM_TROPHIES / 32];
+-} SceNpTrophyFlagArray;
++typedef struct SceNpTrophyDetails SceNpTrophyDetails;
++typedef struct SceNpTrophyData SceNpTrophyData;
++typedef struct SceNpTrophyGameDetails SceNpTrophyGameDetails;
++typedef struct SceNpTrophyGameData SceNpTrophyGameData;
++typedef struct SceNpTrophyFlagArray SceNpTrophyFlagArray;
+ 
+ /* ---------------------------------------------------------------------------
+  * Functions
+@@ -166,9 +151,22 @@ s32 sceNpTrophyGetGameProgress(SceNpTrophyContext context,
+                                SceNpTrophyHandle handle,
+                                s32* percentage);
+ 
+-/* Set the trophy storage directory (defaults to "gamedata/trophies") */
++/* Kept for the NID table; the storage is the PS3 hard drive now (a guest
++ * call to this is ignored). */
+ void sceNpTrophySetStoragePath(const char* path);
+ 
++/* ---------------------------------------------------------------------------
++ * Host side (not guest calls)
++ * -----------------------------------------------------------------------*/
++/* Unlock a trophy of the registered set from host code: a title's own rule
++ * (e.g. a trophy the game asks for only at a higher tier). Same as the
++ * game's unlock: saved, the platinum checked, the notice shown. Returns 0,
++ * 1 if it was unlocked already, -1 if there is no such trophy or no set. */
++int sceNpTrophyHostUnlock(int trophyId, const char* why);
++/* Called after every unlock (the game's or the host's), outside any lock,
++ * on the unlocking thread. */
++void sceNpTrophySetUnlockHook(void (*hook)(int trophyId));
++
+ #ifdef __cplusplus
+ }
+ #endif
 diff --git a/libs/spurs/cellFiber.c b/libs/spurs/cellFiber.c
 index e9cf770..934b066 100644
 --- a/libs/spurs/cellFiber.c
@@ -14620,10 +16067,10 @@ index cbec250..41829d8 100644
   * PSO identity should use rsx_fp_structural_hash in buffered mode. */
 diff --git a/libs/video/rsx_host_ui.c b/libs/video/rsx_host_ui.c
 new file mode 100644
-index 0000000..3f7f432
+index 0000000..b2a2271
 --- /dev/null
 +++ b/libs/video/rsx_host_ui.c
-@@ -0,0 +1,1862 @@
+@@ -0,0 +1,2192 @@
 +/*
 + * ps3recomp - host settings menu and on-screen display. See rsx_host_ui.h.
 + */
@@ -14633,6 +16080,7 @@ index 0000000..3f7f432
 +#include <stdlib.h>
 +#include <string.h>
 +#include <math.h>
++#include <time.h>
 +
 +#if defined(__has_include)
 +#  if __has_include(<SDL2/SDL.h>)
@@ -14676,7 +16124,22 @@ index 0000000..3f7f432
 +static unsigned long long s_dirty_ms;   /* unsaved changes since (0 = none) */
 +
 +/* Rows of the last layout, in target pixels, for the mouse. */
-+static struct { int x0, x1, y0[32], y1[32], n; float sx, sy; int tx0[3], tx1[3], ty0, ty1; } s_hit;
++static struct { int x0, x1, y0[32], y1[32], n; float sx, sy; int tx0[4], tx1[4], ty0, ty1; } s_hit;
++
++/* Trophies (rsx_host_ui_trophy_*): the set, the Trophies page's list and
++ * the notices waiting to be shown. Under the lock. */
++static struct {
++    char title[128];
++    int n;
++    rsx_trophy t[RSX_UI_TROPHY_MAX];
++    int has_icon[RSX_UI_TROPHY_MAX];
++    int sel, top, vis;               /* the page's selected row, first row shown, rows that fit */
++    int show_hidden;
++    int pop[16];                     /* notices, oldest first */
++    volatile int pop_n;
++    unsigned long long pop_t0;       /* the first one's start; 0 = not shown yet */
++} s_tr;
++#define TR_PAGE 3
 +
 +/* FPS counter */
 +static double s_ft[128];             /* recent frame intervals, ms */
@@ -14750,6 +16213,8 @@ index 0000000..3f7f432
 +    { const char* v = getenv("RACACIT_MOUSE_SENS"); const double m = v && *v ? atof(v) : 1.0;
 +      o.mouse_sens = clampi((int)(m * 100.0 + 0.5), 10, 500); }
 +    o.mouse_invert  = env_int("RACACIT_MOUSE_INVERT_Y", 0) ? 1 : 0;
++    o.fov           = clampi(env_int("RACACIT_FOV", 100), 75, 150);
++    o.cam_dist      = clampi(env_int("RACACIT_CAM_DIST", 100), 50, 200);
 +    if (s_texq_active < 0) s_texq_active = o.tex_quality;
 +    g_racacit_spu_spin_us = o.cpu_mode ? 200 : 30;
 +    g_racacit_present_pace = o.present_pace;
@@ -14832,6 +16297,8 @@ index 0000000..3f7f432
 +    snprintf(kv[k++], 96, "RACACIT_KBM=%d", o->kbm);
 +    snprintf(kv[k++], 96, "RACACIT_MOUSE_SENS=%.2f", o->mouse_sens / 100.0);
 +    snprintf(kv[k++], 96, "RACACIT_MOUSE_INVERT_Y=%d", o->mouse_invert);
++    snprintf(kv[k++], 96, "RACACIT_FOV=%d", o->fov);
++    snprintf(kv[k++], 96, "RACACIT_CAM_DIST=%d", o->cam_dist);
 +    *n = k;
 +}
 +
@@ -14989,7 +16456,8 @@ index 0000000..3f7f432
 +enum { R_DISPLAY = 1, R_WINSIZE, R_VSYNC, R_ASPECT, R_UPSCALE, R_SHARP, R_BRIGHT,
 +       R_RES, R_ANISO, R_TRI, R_DSSPK, R_DSVOL, R_DSHAP, R_DSHVOL, R_DSRUMBLE, R_DSTRIG, R_DSSWAP,
 +       R_DSLIGHT, R_DSMOTION, R_FPS, R_DISCORD, R_SKIPCLANK, R_RESUME, R_QUIT,
-+       R_PRESET, R_TEXQ, R_PACE, R_CPU, R_KBM, R_MSENS, R_MINV, R_DSTRIGSTR };
++       R_PRESET, R_TEXQ, R_PACE, R_CPU, R_KBM, R_MSENS, R_MINV, R_DSTRIGSTR, R_TROPHIES,
++       R_FOV, R_CAMDIST };
 +typedef struct { int kind, id; const char* label; } ui_row;
 +/* Three pages: General; Graphics -- every option that changes how the game
 + * is drawn, for fitting it to a slower PC (each scales detail only: the
@@ -15000,6 +16468,9 @@ index 0000000..3f7f432
 +    { K_OPT, R_WINSIZE, "Window size" },
 +    { K_OPT, R_VSYNC,   "VSync" },
 +    { K_OPT, R_ASPECT,  "Aspect ratio" },
++    { K_HEAD, 0, "Camera" },
++    { K_OPT, R_FOV,     "Field of view" },
++    { K_OPT, R_CAMDIST, "Camera distance" },
 +    { K_HEAD, 0, "Other" },
 +    { K_OPT, R_FPS,     "FPS counter" },
 +    { K_OPT, R_DISCORD, "Discord status" },
@@ -15048,8 +16519,13 @@ index 0000000..3f7f432
 +    { K_ACT, R_RESUME,  "Resume" },
 +    { K_ACT, R_QUIT,    "Quit game" },
 +};
-+#define N_PAGES 3
-+static const char* const k_page_names[N_PAGES] = { "General", "Graphics", "Controls" };
++/* The Trophies page draws its own list (tr_build); its one row only keeps the
++ * row-based code (selection, adjust) on something harmless. */
++static const ui_row k_rows_trophies[] = {
++    { K_OPT, R_TROPHIES, "Trophies" },
++};
++#define N_PAGES 4
++static const char* const k_page_names[N_PAGES] = { "General", "Graphics", "Controls", "Trophies" };
 +static const ui_row* page_rows(int p, int* n)
 +{
 +    /* Filtered copies, made once. Without the DualSense Plus mod: no
@@ -15060,6 +16536,7 @@ index 0000000..3f7f432
 +     * capture). */
 +    static ui_row f[3][N_OF(k_rows_controls) + N_OF(k_rows_general) + N_OF(k_rows_graphics)];
 +    static int fn[3] = { -1, -1, -1 };
++    if (p == TR_PAGE) { *n = N_OF(k_rows_trophies); return k_rows_trophies; }
 +    if (p < 0 || p > 2) p = 0;
 +    if (fn[p] < 0) {
 +        rsx_host_ui_load_options();
@@ -15177,7 +16654,9 @@ index 0000000..3f7f432
 +    case R_KBM:     snprintf(b, n, "%s", o->kbm ? "On" : "Off"); break;
 +    case R_MSENS:   snprintf(b, n, "%d%%", o->mouse_sens); break;
 +    case R_MINV:    snprintf(b, n, "%s", o->mouse_invert ? "On" : "Off"); break;
-+    case R_FPS:     snprintf(b, n, "%s", o->fps ? "On" : "Off"); break;
++    case R_FOV:     snprintf(b, n, "%d%%%s", o->fov, o->fov == 100 ? " (as the game has it)" : ""); break;
++    case R_CAMDIST: snprintf(b, n, "%d%%%s", o->cam_dist, o->cam_dist == 100 ? " (as the game has it)" : ""); break;
++    case R_FPS:    snprintf(b, n, "%s", o->fps ? "On" : "Off"); break;
 +    case R_DISCORD: snprintf(b, n, "%s", o->discord ? "On" : "Off"); break;
 +    case R_SKIPCLANK: snprintf(b, n, "%s", o->skip_clank ? "Skip" : "Play"); break;
 +    case R_QUIT:    if (s_quit_armed) snprintf(b, n, "Press again to quit"); break;
@@ -15245,7 +16724,9 @@ index 0000000..3f7f432
 +    case R_KBM:     o->kbm = !o->kbm; break;
 +    case R_MSENS:   o->mouse_sens = clampi(o->mouse_sens + dir * (o->mouse_sens + dir * 5 > 100 ? 25 : 10), 10, 500); break;
 +    case R_MINV:    o->mouse_invert = !o->mouse_invert; break;
-+    case R_FPS:     o->fps = !o->fps; break;
++    case R_FOV:     o->fov = clampi(o->fov + dir * 5, 75, 150); break;
++    case R_CAMDIST: o->cam_dist = clampi(o->cam_dist + dir * 10, 50, 200); break;
++    case R_FPS:    o->fps = !o->fps; break;
 +    case R_DISCORD: o->discord = !o->discord; break;
 +    case R_SKIPCLANK: o->skip_clank = !o->skip_clank; break;
 +    default: UNLOCK(); return;
@@ -15344,7 +16825,7 @@ index 0000000..3f7f432
 +
 +int rsx_host_ui_visible(void)
 +{
-+    if (s_open || s_sv_active) return 1;
++    if (s_open || s_sv_active || s_tr.pop_n) return 1;
 +    LOCK(); const int f = s_opt.fps; UNLOCK();
 +    return f;
 +}
@@ -15417,9 +16898,53 @@ index 0000000..3f7f432
 +    return r;
 +}
 +
++/* One press, one step: the same controller button down again within 120 ms
++ * is the same press. Since v80 the owner's controller delivered 2-4 down
++ * events per press (the touchpad opened and closed the menu at once, and
++ * d-pad moves skipped 3-4 rows); the game reads the pad's state, only these
++ * screens read events. Until 0.9.7 only the Settings menu had this, and the
++ * save list skipped rows on a DualSense (owner, 0.9.7: "it will just skip
++ * over certain options"). The first repeats are logged with their spacing
++ * and device. */
++static int pad_repeat_press(const SDL_Event* e)
++{
++    static Uint64 s_last[SDL_CONTROLLER_BUTTON_MAX]; static SDL_JoystickID s_last_id[SDL_CONTROLLER_BUTTON_MAX];
++    static int s_logged;
++    const int b = e->cbutton.button;
++    if (b < 0 || b >= SDL_CONTROLLER_BUTTON_MAX) return 0;
++    const Uint64 t = SDL_GetTicks64();
++    if (s_last[b] && t - s_last[b] < 120) {
++        if (s_logged < 12) { s_logged++;
++            fprintf(stderr, "[settings] controller button %d down again after %llu ms (device %d, before %d): same press, ignored%c",
++                    b, (unsigned long long)(t - s_last[b]), (int)e->cbutton.which, (int)s_last_id[b], 10); }
++        return 1;
++    }
++    s_last[b] = t; s_last_id[b] = e->cbutton.which;
++    return 0;
++}
++
++/* The Trophies page: move the selection, scrolling with it. */
++static void tr_move(int d)
++{
++    LOCK();
++    if (s_tr.n > 0) {
++        s_tr.sel = clampi(s_tr.sel + d, 0, s_tr.n - 1);
++        const int vis = s_tr.vis > 0 ? s_tr.vis : 1;
++        if (s_tr.sel < s_tr.top) s_tr.top = s_tr.sel;
++        if (s_tr.sel >= s_tr.top + vis) s_tr.top = s_tr.sel - vis + 1;
++    }
++    UNLOCK();
++}
++static void tr_toggle_hidden(void)
++{
++    LOCK(); s_tr.show_hidden = !s_tr.show_hidden; const int on = s_tr.show_hidden; UNLOCK();
++    fprintf(stderr, "[settings] Trophies: hidden trophies' details %s%c", on ? "shown" : "hidden", 10);
++}
++
 +int rsx_host_ui_event(const SDL_Event* e)
 +{
 +    if (s_mcap && (s_sv_active || s_open)) mouse_capture(0);
++    if (e->type == SDL_CONTROLLERBUTTONDOWN && pad_repeat_press(e)) return 0;
 +    /* The save screen owns the input while it is up (F11 still works). */
 +    if (s_sv_active) {
 +        if (e->type == SDL_KEYDOWN && !e->key.repeat &&
@@ -15443,6 +16968,18 @@ index 0000000..3f7f432
 +            if (!e->key.repeat) { s_menu_src = k == SDLK_F1 ? "F1" : "Esc"; open_menu(!s_open); }
 +            return 0; }
 +        if (!s_open) return 0;
++        if (s_page == TR_PAGE) {
++            switch (k) {
++            case SDLK_UP: case SDLK_w: tr_move(-1); return 0;
++            case SDLK_DOWN: case SDLK_s: tr_move(+1); return 0;
++            case SDLK_HOME: tr_move(-1000); return 0;
++            case SDLK_END: tr_move(+1000); return 0;
++            case SDLK_RETURN: case SDLK_KP_ENTER: case SDLK_SPACE: case SDLK_h:
++                if (!e->key.repeat) tr_toggle_hidden();
++                return 0;
++            default: break;
++            }
++        }
 +        switch (k) {
 +        case SDLK_ESCAPE: case SDLK_BACKSPACE: open_menu(0); break;
 +        case SDLK_TAB: set_page(s_page + ((e->key.keysym.mod & KMOD_SHIFT) ? -1 : 1)); break;
@@ -15458,24 +16995,6 @@ index 0000000..3f7f432
 +        return 0; }
 +    case SDL_CONTROLLERBUTTONDOWN: {
 +        const int b = e->cbutton.button;
-+        /* One press, one step: the same button down again within 120 ms is
-+         * the same press. Since v80 the owner's controller delivered 2-4 down
-+         * events per press (the touchpad opened and closed the menu at once,
-+         * and d-pad moves skipped 3-4 rows); the game reads the pad's state,
-+         * only this menu reads events. The first repeats are logged with
-+         * their spacing and device. */
-+        { static Uint64 s_last[SDL_CONTROLLER_BUTTON_MAX]; static SDL_JoystickID s_last_id[SDL_CONTROLLER_BUTTON_MAX];
-+          static int s_logged;
-+          if (b >= 0 && b < SDL_CONTROLLER_BUTTON_MAX) {
-+              const Uint64 t = SDL_GetTicks64();
-+              if (s_last[b] && t - s_last[b] < 120) {
-+                  if (s_logged < 12) { s_logged++;
-+                      fprintf(stderr, "[settings] controller button %d down again after %llu ms (device %d, before %d): same press, ignored%c",
-+                              b, (unsigned long long)(t - s_last[b]), (int)e->cbutton.which, (int)s_last_id[b], 10); }
-+                  return 0;
-+              }
-+              s_last[b] = t; s_last_id[b] = e->cbutton.which;
-+          } }
 +        /* One press, one toggle: a second down event within 0.4 s is the same
 +         * press. The owner's DualSense (v81 log) sent two touchpad downs per
 +         * click, so the menu opened and closed at once. */
@@ -15493,6 +17012,14 @@ index 0000000..3f7f432
 +            if (gc && SDL_GameControllerGetButton(gc, (SDL_GameControllerButton)other)) { s_menu_src = "L3+R3"; open_menu(!s_open); return 0; }
 +        }
 +        if (!s_open) return 0;
++        if (s_page == TR_PAGE) {
++            switch (b) {
++            case SDL_CONTROLLER_BUTTON_DPAD_UP:   tr_move(-1); return 0;
++            case SDL_CONTROLLER_BUTTON_DPAD_DOWN: tr_move(+1); return 0;
++            case SDL_CONTROLLER_BUTTON_A: case SDL_CONTROLLER_BUTTON_Y: tr_toggle_hidden(); return 0;
++            default: break;
++            }
++        }
 +        switch (b) {
 +        case SDL_CONTROLLER_BUTTON_DPAD_UP:    move_sel(-1); break;
 +        case SDL_CONTROLLER_BUTTON_DPAD_DOWN:  move_sel(+1); break;
@@ -15514,6 +17041,7 @@ index 0000000..3f7f432
 +        if (abs(v) < 12000) held[a] = 0;
 +        if (!s_open || !dir || held[a]) return 0;
 +        held[a] = 1;
++        if (s_page == TR_PAGE) { if (a) tr_move(dir); return 0; }
 +        if (a) move_sel(dir);
 +        else if (k_rows[s_sel].kind == K_OPT) adjust(k_rows[s_sel].id, dir);
 +        return 0; }
@@ -15553,6 +17081,7 @@ index 0000000..3f7f432
 +        return activate(e->button.button == SDL_BUTTON_RIGHT ? -1 : +1); }
 +    case SDL_MOUSEWHEEL:
 +        if (s_mcap) { LOCK(); s_mwheel += e->wheel.y; UNLOCK(); return 0; }
++        if (s_open && s_page == TR_PAGE) { if (e->wheel.y) tr_move(e->wheel.y > 0 ? -3 : 3); return 0; }
 +        if (s_open && k_rows[s_sel].kind == K_OPT && e->wheel.y) adjust(k_rows[s_sel].id, e->wheel.y > 0 ? 1 : -1);
 +        return 0;
 +    case SDL_WINDOWEVENT:
@@ -15849,7 +17378,7 @@ index 0000000..3f7f432
 +#define SV_MAX 64
 +#define SV_ICON_W 240
 +#define SV_ICON_H 132
-+#define SV_ICONS ((RSX_UI_SHEET_W / SV_ICON_W) * (RSX_UI_SHEET_H / SV_ICON_H))
++#define SV_ICONS ((RSX_UI_SHEET_W / SV_ICON_W) * (RSX_UI_TROPHY_SHEET_Y / SV_ICON_H))   /* above the trophy cells */
 +static unsigned char s_sheet[RSX_UI_SHEET_W * RSX_UI_SHEET_H * 4];
 +static volatile unsigned s_sheet_gen = 1;
 +
@@ -16222,6 +17751,233 @@ index 0000000..3f7f432
 +    return r;
 +}
 +
++/* ---------------------------------------------------------------------------
++ * Trophies: the Settings menu's Trophies page and the notice when one unlocks
++ * -------------------------------------------------------------------------*/
++void rsx_host_ui_trophy_set(const char* title, const rsx_trophy* t, int n)
++{
++    if (n > RSX_UI_TROPHY_MAX) n = RSX_UI_TROPHY_MAX;
++    if (n < 0) n = 0;
++    LOCK();
++    snprintf(s_tr.title, sizeof s_tr.title, "%s", title ? title : "");
++    for (int i = 0; i < n; i++) s_tr.t[i] = t[i];
++    s_tr.n = n;
++    if (s_tr.sel >= n) s_tr.sel = n ? n - 1 : 0;
++    UNLOCK();
++}
++
++void rsx_host_ui_trophy_unlocked(int id, long long when, int notify)
++{
++    LOCK();
++    for (int i = 0; i < s_tr.n; i++)
++        if (s_tr.t[i].id == id) {
++            s_tr.t[i].when = when ? when : 1;
++            if (notify && s_tr.pop_n < N_OF(s_tr.pop)) { s_tr.pop[s_tr.pop_n] = i; s_tr.pop_n = s_tr.pop_n + 1; }
++            break;
++        }
++    UNLOCK();
++}
++
++void rsx_host_ui_trophy_icon(int id, const unsigned char* px, int w, int h)
++{
++    if (id < 0 || id >= RSX_UI_TROPHY_MAX || !px || w <= 0 || h <= 0) return;
++    const int C = RSX_UI_TROPHY_CELL, cols = RSX_UI_SHEET_W / C;
++    const int cx = (id % cols) * C, cy = RSX_UI_TROPHY_SHEET_Y + (id / cols) * C;
++    if (cy + C > RSX_UI_SHEET_H) return;
++    LOCK();
++    for (int y = 0; y < C; y++) {
++        const int sy0 = y * h / C, sy1 = (y + 1) * h / C > sy0 ? (y + 1) * h / C : sy0 + 1;
++        for (int x = 0; x < C; x++) {
++            const int sx0 = x * w / C, sx1 = (x + 1) * w / C > sx0 ? (x + 1) * w / C : sx0 + 1;
++            unsigned acc[4] = { 0, 0, 0, 0 }, cnt = 0;
++            for (int yy = sy0; yy < sy1 && yy < h; yy++)
++                for (int xx = sx0; xx < sx1 && xx < w; xx++) {
++                    const unsigned char* p = px + ((size_t)yy * w + xx) * 4;
++                    acc[0] += p[0]; acc[1] += p[1]; acc[2] += p[2]; acc[3] += p[3]; cnt++;
++                }
++            if (!cnt) cnt = 1;
++            unsigned char* d = s_sheet + ((size_t)(cy + y) * RSX_UI_SHEET_W + cx + x) * 4;
++            const unsigned a = acc[3] / cnt;   /* over the panel's colour */
++            d[0] = (unsigned char)((acc[0] / cnt) * a / 255 + 16 * (255 - a) / 255);
++            d[1] = (unsigned char)((acc[1] / cnt) * a / 255 + 18 * (255 - a) / 255);
++            d[2] = (unsigned char)((acc[2] / cnt) * a / 255 + 26 * (255 - a) / 255);
++            d[3] = 255;
++        }
++    }
++    s_tr.has_icon[id] = 1;
++    SDL_MemoryBarrierRelease();
++    s_sheet_gen++;
++    UNLOCK();
++}
++
++static uint32_t tr_grade_color(int g)
++{
++    return g == 1 ? rgba(186, 214, 240, 255) : g == 2 ? rgba(240, 192, 64, 255)
++         : g == 3 ? rgba(200, 204, 214, 255) : rgba(212, 132, 62, 255);
++}
++static const char* tr_grade_name(int g)
++{
++    return g == 1 ? "Platinum" : g == 2 ? "Gold" : g == 3 ? "Silver" : g == 4 ? "Bronze" : "";
++}
++
++/* A trophy's icon at (x, y), side s; dimmed while locked. Under the lock. */
++static void tr_icon(ui_out* o, int i, float x, float y, float s, int locked, int show)
++{
++    const rsx_ui_font* f = o->f;
++    const int id = s_tr.t[i].id;
++    if (show && id >= 0 && id < RSX_UI_TROPHY_MAX && s_tr.has_icon[id]) {
++        const int C = RSX_UI_TROPHY_CELL, cols = RSX_UI_SHEET_W / C;
++        const float ax = (float)((id % cols) * C), ay = (float)(f->atlas_h + RSX_UI_TROPHY_SHEET_Y + (id / cols) * C);
++        quad(o, x, y, x + s, y + s, (ax + 0.5f) / o->aw, (ay + 0.5f) / o->ah, (ax + C - 0.5f) / o->aw, (ay + C - 0.5f) / o->ah,
++             locked ? rgba(95, 95, 105, 255) : rgba(255, 255, 255, 255));
++    } else {
++        rect(o, x, y, x + s, y + s, rgba(34, 38, 52, 255));
++        const char* q = "?";
++        text(o, x + (s - text_w(f, q)) * 0.5f, y + (s - (float)f->line_h) * 0.5f, q, rgba(150, 150, 165, 255));
++    }
++    rect(o, x, y + s - (float)f->px * 0.14f, x + s, y + s, tr_grade_color(s_tr.t[i].grade));   /* the grade, as a stripe */
++}
++
++/* The notice: top right, slides in, stays 5 s, fades. */
++static void tr_popup(ui_out* o, int sw, int sh)
++{
++    (void)sh;
++    const rsx_ui_font* f = o->f;
++    const float px = (float)f->px, lh = (float)f->line_h;
++    LOCK();
++    if (!s_tr.pop_n) { UNLOCK(); return; }
++    const unsigned long long t = now_ms();
++    if (!s_tr.pop_t0) s_tr.pop_t0 = t;
++    const unsigned long long age = t - s_tr.pop_t0;
++    const unsigned long long life = 5600;
++    if (age >= life) {   /* the next one */
++        for (int k = 1; k < s_tr.pop_n; k++) s_tr.pop[k - 1] = s_tr.pop[k];
++        s_tr.pop_n = s_tr.pop_n - 1;
++        s_tr.pop_t0 = s_tr.pop_n ? t : 0;
++        UNLOCK();
++        return;
++    }
++    const int i = s_tr.pop[0];
++    const rsx_trophy* tr = &s_tr.t[i];
++    char head[64], name[160];
++    snprintf(head, sizeof head, "%s trophy unlocked", tr_grade_name(tr->grade));
++    const float isz = lh * 2.3f, pad = px * 0.6f;
++    float tw = text_w(f, head);
++    const float maxw = (float)sw * 0.42f;
++    fit_text(f, tr->name, maxw, name, sizeof name);
++    if (text_w(f, name) > tw) tw = text_w(f, name);
++    const float pw = pad + isz + pad + tw + pad * 1.4f, ph = isz + pad * 2.0f;
++    float slide = 0.0f, alpha = 1.0f;
++    if (age < 280) { const float k = 1.0f - (float)age / 280.0f; slide = k * k * (pw + px); }
++    if (age > life - 450) alpha = (float)(life - age) / 450.0f;
++    const float x1 = (float)sw - px * 0.8f + slide, x0 = x1 - pw, y0 = px * 0.8f;
++    const int a = (int)(alpha * 255.0f);
++    rect(o, x0, y0, x1, y0 + ph, rgba(16, 18, 26, (int)(alpha * 236.0f)));
++    rect(o, x0, y0, x0 + px * 0.16f, y0 + ph, (tr_grade_color(tr->grade) & 0x00FFFFFFu) | ((uint32_t)a << 24));
++    {   /* the icon, faded with the panel */
++        const int id = tr->id;
++        if (id >= 0 && id < RSX_UI_TROPHY_MAX && s_tr.has_icon[id]) {
++            const int C = RSX_UI_TROPHY_CELL, cols = RSX_UI_SHEET_W / C;
++            const float ax = (float)((id % cols) * C), ay = (float)(f->atlas_h + RSX_UI_TROPHY_SHEET_Y + (id / cols) * C);
++            quad(o, x0 + pad, y0 + pad, x0 + pad + isz, y0 + pad + isz, (ax + 0.5f) / o->aw, (ay + 0.5f) / o->ah,
++                 (ax + C - 0.5f) / o->aw, (ay + C - 0.5f) / o->ah, rgba(255, 255, 255, a));
++        } else rect(o, x0 + pad, y0 + pad, x0 + pad + isz, y0 + pad + isz, (tr_grade_color(tr->grade) & 0x00FFFFFFu) | ((uint32_t)a << 24));
++    }
++    const float tx = x0 + pad + isz + pad;
++    const float ty = y0 + pad + (isz - lh * 2.0f) * 0.5f;
++    text(o, tx, ty, head, (tr_grade_color(tr->grade) & 0x00FFFFFFu) | ((uint32_t)a << 24));
++    text(o, tx, ty + lh, name, rgba(240, 240, 245, a));
++    UNLOCK();
++}
++
++/* The Trophies page, in the menu's content area [x0, x1) x [y, y1). */
++static void tr_page(ui_out* o, float x0, float x1, float y, float y1, float pad)
++{
++    const rsx_ui_font* f = o->f;
++    const float px = (float)f->px, lh = (float)f->line_h;
++    const uint32_t white = rgba(235, 235, 240, 255), grey = rgba(150, 150, 160, 255), accent = rgba(242, 140, 40, 255);
++    LOCK();
++    const int n = s_tr.n;
++    if (!n) {
++        UNLOCK();
++        text(o, x0 + pad, y + lh * 0.5f, "No trophy set: the disc's PS3_GAME\\TROPDIR is missing from the game folder.", grey);
++        return;
++    }
++    int got = 0, all[5] = { 0 }, gotg[5] = { 0 }, pts = 0, pts_all = 0;
++    static const int k_pts[5] = { 0, 180, 90, 30, 15 };   /* the console's weights for the progress */
++    for (int i = 0; i < n; i++) {
++        const int g = s_tr.t[i].grade >= 1 && s_tr.t[i].grade <= 4 ? s_tr.t[i].grade : 0;
++        all[g]++; pts_all += g == 1 ? 0 : k_pts[g];
++        if (s_tr.t[i].when) { got++; gotg[g]++; pts += g == 1 ? 0 : k_pts[g]; }
++    }
++    const int pct = pts_all ? pts * 100 / pts_all : got * 100 / n;
++    char b[200];
++    /* Title, count and progress */
++    snprintf(b, sizeof b, "%d of %d unlocked   %d%%", got, n, pct);
++    const float bw = text_w(f, b);
++    char title[128]; fit_text(f, s_tr.title, x1 - x0 - pad * 3.0f - bw, title, sizeof title);
++    text(o, x0 + pad, y, title, white);
++    text(o, x1 - pad - bw, y, b, accent);
++    y += lh * 1.15f;
++    rect(o, x0 + pad, y, x1 - pad, y + px * 0.32f, rgba(40, 44, 58, 255));
++    rect(o, x0 + pad, y, x0 + pad + (x1 - x0 - pad * 2.0f) * (float)pct / 100.0f, y + px * 0.32f, accent);
++    y += px * 0.6f;
++    {   /* per grade */
++        float gx = x0 + pad;
++        for (int g = 1; g <= 4; g++) {
++            snprintf(b, sizeof b, "%s %d/%d", tr_grade_name(g), gotg[g], all[g]);
++            rect(o, gx, y + lh * 0.3f, gx + px * 0.5f, y + lh * 0.3f + px * 0.5f, tr_grade_color(g));
++            text(o, gx + px * 0.8f, y, b, grey);
++            gx += px * 0.8f + text_w(f, b) + px * 1.6f;
++        }
++    }
++    y += lh * 1.35f;
++    /* The list */
++    const float row_h = lh * 2.25f, isz = row_h - px * 0.45f;
++    int vis = (int)((y1 - y) / row_h);
++    if (vis < 1) vis = 1;
++    s_tr.vis = vis;
++    if (s_tr.sel >= n) s_tr.sel = n - 1;
++    if (s_tr.top > s_tr.sel) s_tr.top = s_tr.sel;
++    if (s_tr.sel >= s_tr.top + vis) s_tr.top = s_tr.sel - vis + 1;
++    if (s_tr.top > n - vis) s_tr.top = n - vis > 0 ? n - vis : 0;
++    for (int r = 0; r < vis && s_tr.top + r < n; r++) {
++        const int i = s_tr.top + r;
++        const rsx_trophy* t = &s_tr.t[i];
++        const float ry = y + r * row_h;
++        const int locked = !t->when, secret = locked && t->hidden && !s_tr.show_hidden;
++        if (i == s_tr.sel) rect(o, x0 + pad * 0.5f, ry, x1 - pad * 0.5f - px * 0.6f, ry + row_h - px * 0.1f, rgba(242, 140, 40, 60));
++        tr_icon(o, i, x0 + pad, ry + px * 0.18f, isz, locked, !secret);
++        const float tx = x0 + pad + isz + px * 0.8f, right = x1 - pad - px * 0.6f;
++        const char* gname = tr_grade_name(t->grade);
++        const float gw = text_w(f, gname);
++        char nm[160], dt[300], when[48];
++        fit_text(f, secret ? "Hidden trophy" : t->name, right - tx - gw - px, nm, sizeof nm);
++        text(o, tx, ry + px * 0.12f, nm, locked ? rgba(175, 175, 185, 255) : white);
++        text(o, right - gw, ry + px * 0.12f, gname, tr_grade_color(t->grade));
++        if (t->when > 1) {
++            const time_t tt = (time_t)t->when;
++            struct tm lt;
++#ifdef _WIN32
++            localtime_s(&lt, &tt);
++#else
++            localtime_r(&tt, &lt);
++#endif
++            strftime(when, sizeof when, "%Y-%m-%d", &lt);
++        } else snprintf(when, sizeof when, "%s", locked ? "Locked" : "Unlocked");
++        const float ww = text_w(f, when);
++        fit_text(f, secret ? "Its details show once it is unlocked." : t->detail, right - tx - ww - px, dt, sizeof dt);
++        text(o, tx, ry + px * 0.12f + lh, dt, grey);
++        text(o, right - ww, ry + px * 0.12f + lh, when, locked ? rgba(110, 110, 120, 255) : accent);
++    }
++    if (n > vis) {   /* scroll bar */
++        const float sx = x1 - pad * 0.5f - px * 0.35f, h = y1 - y;
++        rect(o, sx, y, sx + px * 0.25f, y1, rgba(40, 44, 58, 255));
++        rect(o, sx, y + h * (float)s_tr.top / (float)n, sx + px * 0.25f, y + h * (float)(s_tr.top + vis) / (float)n, accent);
++    }
++    UNLOCK();
++}
++
 +int rsx_host_ui_build(const rsx_ui_font* f, int sw, int sh, rsx_ui_vtx* out, int cap)
 +{
 +    if (!f || !f->pixels || sw <= 0 || sh <= 0) return 0;
@@ -16238,16 +17994,20 @@ index 0000000..3f7f432
 +        rect(&o, x - px * 0.4f, y - px * 0.15f, x + w + px * 0.4f, y + lh + px * 0.1f, rgba(0, 0, 0, 150));
 +        text(&o, x, y, b, rgba(255, 230, 120, 255));
 +    }
-+    if (!s_open) return o.n;
++    if (!s_open) { tr_popup(&o, sw, sh); return o.n; }
 +
 +    /* Dim the game, then a centred panel. */
 +    rect(&o, 0, 0, (float)sw, (float)sh, rgba(0, 0, 0, 120));
 +#ifdef __ANDROID__
-+    const char* l1 = "Up/Down  choose     Left/Right  change     Cross  select";
++    const char* l1 = s_page == TR_PAGE ? (s_tr.show_hidden ? "Up/Down  scroll     Cross  hide the hidden trophies' details"
++                                                           : "Up/Down  scroll     Cross  show the hidden trophies' details")
++                                       : "Up/Down  choose     Left/Right  change     Cross  select";
 +    const char* l2 = "L1 R1 / tap a tab  page     Circle  close";
 +#else
 +    const int kbm_row = s_sel >= 0 && s_sel < N_ROWS && (k_rows[s_sel].id == R_KBM || k_rows[s_sel].id == R_MSENS || k_rows[s_sel].id == R_MINV);
-+    const char* l1 = kbm_row ? "Click in the game to turn the camera with the mouse; F1 opens this menu"
++    const char* l1 = s_page == TR_PAGE ? (s_tr.show_hidden ? "Up/Down  scroll     Enter / Cross  hide the hidden trophies' details"
++                                                           : "Up/Down  scroll     Enter / Cross  show the hidden trophies' details")
++                   : kbm_row ? "Click in the game to turn the camera with the mouse; F1 opens this menu"
 +                             : "Up/Down  choose     Left/Right  change     Enter / Cross  select";
 +    const char* l2 = "Tab / L1 R1  page     Esc / Circle  close     F11  fullscreen";
 +#endif
@@ -16267,6 +18027,16 @@ index 0000000..3f7f432
 +    float pw = px * 30.0f;
 +    { const float need = (text_w(f, l1) > text_w(f, l2) ? text_w(f, l1) : text_w(f, l2)) + pad * 2.0f;
 +      if (pw < need) pw = need; }
++    if (s_page == TR_PAGE) {   /* both footers of the Trophies page: the panel stays put when it changes */
++        static const char* const both[2] = { "Up/Down  scroll     Enter / Cross  show the hidden trophies' details",
++                                             "Up/Down  scroll     Enter / Cross  hide the hidden trophies' details" };
++        for (int k = 0; k < 2; k++) if (pw < text_w(f, both[k]) + pad * 2.0f) pw = text_w(f, both[k]) + pad * 2.0f;
++    }
++    {   /* the title and every page tab */
++        float need = pad * 2.0f + text_w(f, "Settings") + px * 1.6f;
++        for (int k = 0; k < N_PAGES; k++) need += text_w(f, k_page_names[k]) + px * 1.4f;
++        if (pw < need) pw = need;
++    }
 +    if (pw > sw * 0.96f) pw = sw * 0.96f;
 +    const float ph = pad + title_h + content_h + foot_h + pad * 0.5f;
 +    const float x0 = ((float)sw - pw) * 0.5f, y0 = ((float)sh - ph) * 0.5f, x1 = x0 + pw;
@@ -16294,9 +18064,10 @@ index 0000000..3f7f432
 +
 +    float y = y0 + pad + title_h;
 +    const float foot_y = y + content_h;   /* the footer stays put on a shorter page */
-+    LOCK(); s_hit.x0 = (int)x0; s_hit.x1 = (int)x1; s_hit.n = N_ROWS; UNLOCK();
++    LOCK(); s_hit.x0 = (int)x0; s_hit.x1 = (int)x1; s_hit.n = s_page == TR_PAGE ? 0 : N_ROWS; UNLOCK();
++    if (s_page == TR_PAGE) tr_page(&o, x0, x1, y, foot_y - lh * 0.3f, pad);
 +    char val[96];
-+    for (int i = 0; i < N_ROWS; i++) {
++    for (int i = 0; i < N_ROWS && s_page != TR_PAGE; i++) {
 +        const int kind = k_rows[i].kind;
 +        const float h = kind == K_HEAD ? head_h : kind == K_GAP ? row_h * 0.5f : row_h;
 +        LOCK(); if (i < 32) { s_hit.y0[i] = (int)y; s_hit.y1[i] = (int)(y + h); } UNLOCK();
@@ -16337,6 +18108,7 @@ index 0000000..3f7f432
 +        s_hit.sy = wh > 0 ? (float)dh / (float)wh : 1.0f;
 +        UNLOCK();
 +    }
++    tr_popup(&o, sw, sh);
 +    return o.n;
 +}
 +
@@ -16458,6 +18230,8 @@ index 0000000..3f7f432
 +    { const char* v = getenv("RACACIT_KBM"); s_opt.kbm = !(v && *v == '0'); }
 +    { const char* v = getenv("RACACIT_MOUSE_SENS"); s_opt.mouse_sens = v && atof(v) > 0.0 ? (int)(atof(v) * 100.0 + 0.5) : 100; }
 +    { const char* v = getenv("RACACIT_MOUSE_INVERT_Y"); s_opt.mouse_invert = v && *v == '1'; }
++    { const char* v = getenv("RACACIT_FOV"); int p = v && *v ? atoi(v) : 100; s_opt.fov = p < 75 ? 75 : p > 150 ? 150 : p; }
++    { const char* v = getenv("RACACIT_CAM_DIST"); int p = v && *v ? atoi(v) : 100; s_opt.cam_dist = p < 50 ? 50 : p > 200 ? 200 : p; }
 +}
 +void rsx_host_ui_options(rsx_host_options* out)
 +{
@@ -16484,14 +18258,17 @@ index 0000000..3f7f432
 +int  rsx_host_ui_test_key(int key) { (void)key; return 0; }
 +unsigned rsx_host_ui_sheet(unsigned char* out) { (void)out; return 0; }
 +void rsx_host_ui_atlas_size(const rsx_ui_font* f, int* w, int* h) { *w = f->atlas_w; *h = f->atlas_h; }
++void rsx_host_ui_trophy_set(const char* t, const rsx_trophy* tr, int n) { (void)t; (void)tr; (void)n; }
++void rsx_host_ui_trophy_unlocked(int id, long long when, int notify) { (void)id; (void)when; (void)notify; }
++void rsx_host_ui_trophy_icon(int id, const unsigned char* px, int w, int h) { (void)id; (void)px; (void)w; (void)h; }
 +
 +#endif
 diff --git a/libs/video/rsx_host_ui.h b/libs/video/rsx_host_ui.h
 new file mode 100644
-index 0000000..7b3b190
+index 0000000..eb0f6d0
 --- /dev/null
 +++ b/libs/video/rsx_host_ui.h
-@@ -0,0 +1,210 @@
+@@ -0,0 +1,233 @@
 +/*
 + * ps3recomp - host settings menu and on-screen display (RaCACiT)
 + *
@@ -16568,6 +18345,10 @@ index 0000000..7b3b190
 +    int   kbm;            /* 1: keyboard and mouse play (cellPad.c)            */
 +    int   mouse_sens;     /* mouse camera speed, percent (100 = default)       */
 +    int   mouse_invert;   /* 1: mouse up looks down                            */
++    int   fov;            /* field of view, percent of the game's own (100 = as shipped, 75..150):
++                           * the follow camera's angle (game/stubs.cpp racacit_follow_fov) */
++    int   cam_dist;       /* the follow camera's distance behind Ratchet, percent of the
++                           * game's (100 = as shipped, 50..200; racacit_follow_dist) */
 +    unsigned gen;          /* bumped on every change                           */
 +    unsigned swap_gen;     /* bumped when the swapchain must be rebuilt        */
 +    unsigned sampler_gen;  /* bumped when texture filtering changed            */
@@ -16676,13 +18457,32 @@ index 0000000..7b3b190
 + * even if the game stops flipping. */
 +int rsx_host_ui_modal(void);
 +
++/* Trophies (sceNpTrophy.c sends them): the game's set as the Settings menu's
++ * Trophies page lists it, and a notice in the corner when one unlocks. Text
++ * is what the overlay's font can draw (ASCII; accents folded). */
++#define RSX_UI_TROPHY_MAX 60
++typedef struct rsx_trophy {
++    int id, grade, hidden;        /* grade: 1 platinum, 2 gold, 3 silver, 4 bronze */
++    long long when;               /* unlocked at (unix seconds), 0 = locked */
++    char name[128];
++    char detail[256];
++} rsx_trophy;
++void rsx_host_ui_trophy_set(const char* title, const rsx_trophy* t, int n);
++/* One trophy unlocked: the list updated; `notify` shows the notice. */
++void rsx_host_ui_trophy_unlocked(int id, long long when, int notify);
++/* A trophy's icon (RGBA8), scaled into the sheet's trophy cells. */
++void rsx_host_ui_trophy_icon(int id, const unsigned char* rgba, int w, int h);
++
 +/* The overlay's image sheet (RGBA8, RSX_UI_SHEET_W x RSX_UI_SHEET_H): the
-+ * save icons. The GPU atlas is the font (as white, coverage in alpha) with
++ * save icons (rows 0-791) and the trophy icons (96x96 cells from row 800,
++ * ten to a row). The GPU atlas is the font (as white, coverage in alpha) with
 + * this sheet below it; rsx_host_ui_atlas_size gives its size. Returns the
 + * sheet's generation (bumped when its pixels change) and copies the pixels
 + * into `out` when it is not NULL. */
 +#define RSX_UI_SHEET_W 1024
-+#define RSX_UI_SHEET_H 800
++#define RSX_UI_SHEET_H (800 + 6 * 96)
++#define RSX_UI_TROPHY_SHEET_Y 800
++#define RSX_UI_TROPHY_CELL 96
 +unsigned rsx_host_ui_sheet(unsigned char* out);
 +void rsx_host_ui_atlas_size(const rsx_ui_font* f, int* w, int* h);
 +
@@ -23868,7 +25668,7 @@ index 11a7480..2251ce0 100644
      for (unsigned i = 0; i < 8 * sizeof mask && i < CPU_SETSIZE; i++)
          if (mask & ((DWORD_PTR)1 << i)) CPU_SET(i, &set);
 diff --git a/runtime/ppu/ppu_fs.cpp b/runtime/ppu/ppu_fs.cpp
-index e8f6c2b..4b35933 100644
+index e8f6c2b..d66bcd0 100644
 --- a/runtime/ppu/ppu_fs.cpp
 +++ b/runtime/ppu/ppu_fs.cpp
 @@ -18,6 +18,9 @@
@@ -23979,7 +25779,7 @@ index e8f6c2b..4b35933 100644
      { char who[64] = "?";
        if (getenv("FS_CALLER")) { ppu_guest_caller(who, sizeof who);
            fprintf(stderr, "[fs] open '%s' -> fd %d  (opened by %s)\n", gpath, fd, who);
-@@ -371,6 +440,353 @@ static inline void fs_prefault(uint32_t buf, uint64_t len)
+@@ -371,6 +440,361 @@ static inline void fs_prefault(uint32_t buf, uint64_t len)
      p[len - 1] = p[len - 1];
  }
  
@@ -24008,8 +25808,14 @@ index e8f6c2b..4b35933 100644
 + * sectors everyone but Ratchet (speakers "ratc", "ratchet") talks through the
 + * controller -- the radio. Mr. Zurkon ("zurk") talks through it anywhere: he
 + * is a weapon. Not speech: "aph_*" (the Aphelion's boarding sounds) and
-+ * "mus_*" stored with the lines. RACACIT_DS_DIALOGUE: space (default), all
-+ * (on foot too), off. */
++ * "mus_*" stored with the lines -- but for mus_ryno_1812 (global table),
++ * the RYNO V's 1812 Overture: the game plays it as a line while the gun
++ * fires, a 5 s piece read again and again. It is the weapon's sound, so it
++ * goes to the controller anywhere, above the RYNO's rockets
++ * (fs_ds_line_level, game/stubs.cpp racacit_ds_level), and stays on the TV
++ * too (owner, 0.9.7: "the most iconic part of the weapon. It should be
++ * prominent and the center piece of the weapon sounds"). RACACIT_DS_DIALOGUE:
++ * space (default), all (on foot too), off. */
 +struct FsDlgTable { std::string key; std::vector<uint32_t> off; std::vector<std::string> name; };
 +static std::vector<FsDlgTable> g_dlg_tables;
 +static volatile long g_dlg_mu;
@@ -24087,7 +25893,8 @@ index e8f6c2b..4b35933 100644
 +    else {
 +        const size_t u1 = name.find('_'), u2 = u1 == std::string::npos ? u1 : name.find('_', u1 + 1);
 +        const std::string t0 = name.substr(0, u1), t1 = u2 == std::string::npos ? std::string() : name.substr(u1 + 1, u2 - u1 - 1);
-+        if (t0 == "aph" || t0 == "mus") { who = 0; why = "not speech"; }
++        if (!name.compare(0, 9, "mus_ryno_")) { who = 2; why = "the RYNO V's music, a weapon"; }
++        else if (t0 == "aph" || t0 == "mus") { who = 0; why = "not speech"; }
 +        else if (t1 == "ratc" || t1 == "ratchet") { who = 0; why = "Ratchet"; }
 +        else if (t1 == "zurk") { who = 2; why = "Mr. Zurkon, a weapon"; }   /* deployed, he talks like a gun: anywhere */
 +        else if (t1 == "zoni") { who = 2; why = "a Zoni"; }   /* their calls when caught (gen_zoni_*): anywhere (owner, v54) */
@@ -24255,7 +26062,7 @@ index e8f6c2b..4b35933 100644
 + * reads are zeroed in guest memory, so the TV plays silence where the
 + * controller plays the line -- moved, not doubled (owner, v59).
 + * RACACIT_DS_LINES_ON_TV=1 keeps them on both. */
-+static struct { uint64_t lo, hi; uint32_t token; } g_fd_mute[FS_MAX];
++static struct { uint64_t lo, hi; uint32_t token; int keep; } g_fd_mute[FS_MAX];   /* keep: followed, not muted */
 +static struct { uint32_t owner; float level; unsigned long long t; char name[48]; } g_ds_stream;
 +static volatile long g_ds_stream_mu;
 +extern "C" void racacit_ds_stream_expect(uint32_t owner, float level, const char* name)
@@ -24326,6 +26133,7 @@ index e8f6c2b..4b35933 100644
 +    if (lv < 0.0f) { const char* e = getenv("RACACIT_DS_LINE_LEVEL"); lv = e ? (float)atof(e) : 0.63f;
 +                     e = getenv("RACACIT_DS_RADIO_LEVEL"); radio = e ? (float)atof(e) : 0.35f; }
 +    if (strstr(line, "_zurk_")) return lv * 1.15f;
++    if (!strncmp(line, "mus_ryno_", 9)) return lv * 1.45f;   /* the RYNO V's overture: over its rockets (0.30) */
 +    if (!strncmp(line, "gen_zoni_misc001", 16)) return lv * 0.55f;   /* the spawn/collect "weee" (v77): present, not jarring */
 +    return !strncmp(line, "spc_", 4) ? lv * radio : lv;
 +}
@@ -24333,7 +26141,7 @@ index e8f6c2b..4b35933 100644
  static void cellFsRead(ppu_context* ctx)
  {
      int fd          = (int)(uint32_t)ctx->gpr[3];
-@@ -380,9 +796,69 @@ static void cellFsRead(ppu_context* ctx)
+@@ -380,9 +804,73 @@ static void cellFsRead(ppu_context* ctx)
      if (fd < 0 || fd >= FS_MAX || !g_files[fd]) { ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_EIO; return; }
      uint64_t raw_nbytes = ctx->gpr[5];
      long fpos_before = ftell(g_files[fd]);
@@ -24371,22 +26179,26 @@ index e8f6c2b..4b35933 100644
 +            uint64_t nx;
 +            t_dlg_line[0] = 0;
 +            const int cat = fs_dlg_category(known ? key.c_str() : "", at, space, &nx);
-+            g_fd_mute[fd].lo = g_fd_mute[fd].hi = 0; g_fd_mute[fd].token = 0;
++            g_fd_mute[fd].lo = g_fd_mute[fd].hi = 0; g_fd_mute[fd].token = 0; g_fd_mute[fd].keep = 0;
 +            uint32_t line_token = 0;
 +            if (cat && t_dlg_line[0] && fs_ds_play(fd, fpos_before, vm_base + buf, fs_ds_line_level(t_dlg_line), 0, t_dlg_line, &line_token)) {
 +                static int keep = -1; if (keep < 0) { const char* e = getenv("RACACIT_DS_LINES_ON_TV"); keep = e && *e == '1'; }
-+                if (!keep) {
++                /* Music (the RYNO V's overture) plays on both: its reads are
++                 * followed for the controller's copy, not zeroed. */
++                const int music = !strncmp(t_dlg_line, "mus_", 4);
++                if (!keep || music) {
 +                    const uint8_t* h = vm_base + buf;
 +                    g_fd_mute[fd].lo = (uint64_t)fpos_before + 48u;
 +                    g_fd_mute[fd].hi = g_fd_mute[fd].lo + (((uint32_t)h[12] << 24) | ((uint32_t)h[13] << 16) | ((uint32_t)h[14] << 8) | h[15]);
 +                    g_fd_mute[fd].token = line_token;
++                    g_fd_mute[fd].keep = music;
 +                }
 +            }
 +        } else if (g_fd_mute[fd].hi > g_fd_mute[fd].lo) {
 +            const uint64_t a = (uint64_t)fpos_before, b = a + n;
 +            const uint64_t lo = a > g_fd_mute[fd].lo ? a : g_fd_mute[fd].lo, hi = b < g_fd_mute[fd].hi ? b : g_fd_mute[fd].hi;
 +            if (lo < hi) {
-+                memset(vm_base + buf + (lo - a), 0, (size_t)(hi - lo));
++                if (!g_fd_mute[fd].keep) memset(vm_base + buf + (lo - a), 0, (size_t)(hi - lo));
 +                ds_player_line_read(g_fd_mute[fd].token, (uint32_t)(hi - g_fd_mute[fd].lo));
 +            }
 +        }
@@ -24403,7 +26215,7 @@ index e8f6c2b..4b35933 100644
      /* PS3_FSLOG_EOF=<fd>,<bytes>: report end-of-file past <bytes> on one descriptor.
       * The intro cinematic is 28 seconds and this port renders it at a few frames
       * a second, so it cannot be watched to its end -- truncating the stream makes
-@@ -406,9 +882,9 @@ static void cellFsRead(ppu_context* ctx)
+@@ -406,9 +894,9 @@ static void cellFsRead(ppu_context* ctx)
        if (wfd >= 0 && fd == wfd)
            fprintf(stderr, "[fsread] fd=%d want=%llu got=%zu pos=%ld\n",
                    fd, (unsigned long long)nbytes, n, fpos_before); }
@@ -24415,7 +26227,7 @@ index e8f6c2b..4b35933 100644
  #endif
      /* Per-fd totals, not just the first 50 lines. The flat cap made "this file is
       * opened and never read" unfalsifiable: reads on a later-opened fd fall off
-@@ -533,6 +1009,7 @@ static void cellFsLseek(ppu_context* ctx)
+@@ -533,6 +1021,7 @@ static void cellFsLseek(ppu_context* ctx)
      int worigin = (wh == CELL_FS_SEEK_END) ? SEEK_END : (wh == CELL_FS_SEEK_CUR) ? SEEK_CUR : SEEK_SET;
      fseek(g_files[fd], (long)off, worigin);
      long p = ftell(g_files[fd]);
@@ -24423,7 +26235,7 @@ index e8f6c2b..4b35933 100644
      if (pos_ptr) vm_write64(pos_ptr, (uint64_t)p);
      ctx->gpr[3] = CELL_OK;
  }
-@@ -600,7 +1077,7 @@ static void cellFsFstat(ppu_context* ctx)
+@@ -600,7 +1089,7 @@ static void cellFsFstat(ppu_context* ctx)
                fprintf(stderr, "[fs] fstat fd=%d size %ld -> capped %ld (FS_FSTAT_CAP)\n", fd, sz, c);
                sz = c; } } }
      if (sb) write_stat(sb, CELL_FS_S_IFREG | 0x1B6, (uint64_t)sz);

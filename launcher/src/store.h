@@ -106,6 +106,8 @@ public:
     // its game is played where it is. The old folder is not changed.
     std::vector<fs::path> find_old_launchers() const;
     std::string migrate_from_launcher(const fs::path& old, Progress* p, std::string* summary);
+    // An older install's per-build trophy files into this one's trophy import folder.
+    int import_old_trophies(const fs::path& dir, const std::string& from, bool single = false);
 
     // Builds: installed under builds\vNN, one is current.
     std::vector<BuildInfo> builds() const;

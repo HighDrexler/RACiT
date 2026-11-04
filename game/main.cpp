@@ -94,6 +94,7 @@ int      ppu_run(uint32_t entry_opd, uint32_t stack_top);
  * a game with no lifted PRX wants. */
 void     ps3_load_prx_modules(void);
 void     racacit_register_language(void);     /* stubs.cpp: RACACIT_LANGUAGE */
+void     racacit_register_trophies(void);     /* stubs.cpp: the bolt trophies' tiers */
 
 extern const char* ppu_vfs_root;              /* host dir the PS3 mount points map into */
 
@@ -1608,6 +1609,7 @@ int main(int argc, char** argv)
     ps3_load_prx_modules();  /* this game's lifted system PRX, if it has any */
     ppu_hle_init();          /* firmware import NID -> HLE handlers */
     racacit_register_language();   /* RACACIT_LANGUAGE: over the runtime's system-language answer */
+    racacit_register_trophies();   /* a higher bolt trophy brings the lower ones */
     ppu_sysprx_register();   /* boot-critical CRT */
     ppu_fs_register();       /* cellFs over the game directory */
     lv2_init_syscalls();     /* the lv2 syscall table */

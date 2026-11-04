@@ -449,6 +449,52 @@ def patch_file(path):
                 src = src[:i] + 'extern "C" uint32_t racacit_equip_skin(uint32_t skin);\n' + src[i:]
             changed = True
 
+    # 18. Field of view and camera distance (Settings > General > Camera; game/stubs.cpp),
+    #     both on the follow camera (Ratchet's gameplay camera), so cutscenes and other
+    #     cameras keep the game's own. Its target angle (+0x1D4) where its angle (+0x90)
+    #     eases toward it (func_0003E874), and get_follow_cam_fov (func_0022CDC0, after its
+    #     call to func_0003E874 at 0x0022CE60) handing the angle back to the scripts. (The
+    #     view setups that copy the current camera's +0x90 into a view -- func_00201A34,
+    #     func_003309B0, func_004AB328, func_004E5498 -- run once or never in play.)
+    #     The follow camera's target distance
+    #     (+0x1D0) where its distance (+0x1CC) eases toward it (func_00042558 inline,
+    #     before func_00624DBC at 0x000426D4, and func_0003E9F0); and get_follow_cam_dist
+    #     (func_0022D058) reading +0x1CC back for the scripts.
+    hooks18 = (
+        ('func_0003E874', 'racacit_follow_fov',
+         '        { uint32_t tmp = vm_read32(ctx->gpr[3] + 0x1D4); float ftmp; memcpy(&ftmp, &tmp, 4); ctx->fpr[13] = ftmp; }\n',
+         '        ctx->fpr[13] = racacit_follow_fov(ctx->fpr[13]);   /* racacit */\n'),
+        ('func_0022CDC0', 'racacit_follow_fov_unscale',
+         '        ctx->lr = 0x0022CE60; func_0003E874(ctx); DRAIN_TRAMPOLINE(ctx);\n',
+         '        ctx->fpr[1] = racacit_follow_fov_unscale(ctx->fpr[1]);   /* racacit */\n'),
+        ('func_00042558', 'racacit_follow_dist',
+         '        { uint32_t tmp = vm_read32(ctx->gpr[31] + 0x1D0); float ftmp; memcpy(&ftmp, &tmp, 4); ctx->fpr[2] = ftmp; }\n'
+         '        { uint32_t tmp = vm_read32(ctx->gpr[31] + 0x1CC); float ftmp; memcpy(&ftmp, &tmp, 4); ctx->fpr[1] = ftmp; }\n',
+         '        ctx->fpr[2] = racacit_follow_dist(ctx->fpr[2]);   /* racacit */\n'),
+        ('func_0003E9F0', 'racacit_follow_dist',
+         '        { uint32_t tmp = vm_read32(ctx->gpr[3] + 0x1D0); float ftmp; memcpy(&ftmp, &tmp, 4); ctx->fpr[2] = ftmp; }\n',
+         '        ctx->fpr[2] = racacit_follow_dist(ctx->fpr[2]);   /* racacit */\n'),
+        ('func_0022D058', 'racacit_follow_dist_unscale',
+         '        { uint32_t tmp = vm_read32(ctx->gpr[3] + 0x1CC); float ftmp; memcpy(&ftmp, &tmp, 4); ctx->fpr[1] = ftmp; }\n',
+         '        ctx->fpr[1] = racacit_follow_dist_unscale(ctx->fpr[1]);   /* racacit */\n'),
+    )
+    for name, hook, anchor, add in hooks18:
+        sp = func_span(src, name)
+        if not sp or hook + '(' in src[sp[0]:sp[2]]:
+            continue
+        a_, body_, end_ = sp
+        fn = src[a_:end_]
+        if fn.count(anchor) != 1:
+            print('patch_lift #18: %s: anchor not found once (%d)' % (name, fn.count(anchor)))
+            continue
+        fn = fn.replace(anchor, anchor + add, 1)
+        src = src[:a_] + fn + src[end_:]
+        if 'double ' + hook + '(' not in src:
+            i = src.index('\n', src.index('#include')) + 1
+            decl = 'extern "C" double %s(double d);\n' % hook
+            src = src[:i] + decl + src[i:]
+        changed = True
+
     if (('racacit_jb_push(' in src or 'racacit_longjmp(' in src)
             and 'racacit: guest setjmp' not in src):
         # declarations after the first include
