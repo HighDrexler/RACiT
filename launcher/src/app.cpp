@@ -17,7 +17,7 @@
 #include "gfx.h"
 #include "store.h"
 
-static const char* kLauncherVersion = "0.9.5";
+static const char* kLauncherVersion = "0.9.7";
 enum { WM_APP_TASK = WM_APP + 1, WM_APP_GAME_EXIT, WM_APP_UPDATE, TIMER_TICK = 1 };
 
 // ---- screen model ------------------------------------------------------------------------
@@ -226,7 +226,7 @@ static const std::vector<Opt>& opts()
         { "Keyboard and mouse", "RACACIT_MOUSE_INVERT_Y", "Invert mouse Y", "0", { { "0", "Off" }, { "1", "On" } } },
         // The disc's own translations: the game picks its language from the PS3's system
         // language, which the build answers from this (game/stubs.cpp). Unset = English.
-        { "Game", "RACACIT_LANGUAGE", "Language", "", { { "", "English" }, { "fr", "Français (French)" }, { "es", "Español (Spanish)" } } },
+        { "Game", "RACACIT_LANGUAGE", "Language", "", { { "", "English" }, { "fr", "Français (French)" }, { "es", "Español (Spanish)" }, { "de", "Deutsch (German)" }, { "it", "Italiano (Italian)" }, { "nl", "Nederlands (Dutch)" } } },
         { "Game", "RACACIT_START_SKIPS_MOVIES", "START skips movies", "1", { { "1", "Yes" }, { "0", "No" } } },
         { "Game", "RACACIT_ALL_CUTSCENES_SKIPPABLE", "Every cutscene skippable", "1", { { "1", "Yes" }, { "0", "No (as the game)" } } },
         { "Game", "RACACIT_SPACE_FREE_LANDING", "Land anywhere in space", "1", { { "1", "Yes" }, { "0", "No (as the game)" } } },

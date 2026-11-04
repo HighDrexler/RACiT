@@ -385,6 +385,70 @@ def patch_file(path):
                                  'extern "C" void racacit_wait_end(void);\n') + src[i:]
             changed = True
 
+    # 15. The game's per-title language list (func_0066C518): a BCUS disc allows only
+    #     English, French and Spanish and falls back to English, though it holds the
+    #     full German, Italian and Dutch text and speech (RACACIT_LANGUAGE, game/stubs.cpp).
+    sp = func_span(src, 'func_0066C518')
+    if sp and 'racacit: on the disc' not in src[sp[0]:sp[2]]:
+        a_, body_, end_ = sp
+        fn = src[a_:end_]
+        read = 'ctx->gpr[10] = vm_read8(ctx->gpr[9] + 0x70);\n'
+        fn = fn.replace(read, read + '        if ((uint32_t)ctx->gpr[11] - 4 <= 2) ctx->gpr[10] = 1;   /* racacit: on the disc */\n', 1)
+        src = src[:a_] + fn + src[end_:]
+        changed = True
+
+    # 16. Ratchet's armor look (game/stubs.cpp racacit_armor_look): func_001709B4 builds
+    #     the hero's part mask from the equipped skin, or with none from the armor level
+    #     (player record +0x5BC; 1 Holoflux .. 4 Hyperflux). Its one read of the level
+    #     goes through the setting; the damage taken stays the real armor's (hero
+    #     +0x17F8, set with the armor by func_0016AECC).
+    sp = func_span(src, 'func_001709B4')
+    if sp and 'racacit_armor_look' not in src[sp[0]:sp[2]]:
+        a_, body_, end_ = sp
+        fn = src[a_:end_]
+        read = 'ctx->gpr[8] = vm_read32(ctx->gpr[12] + 0x5BC);\n'
+        if fn.count(read) == 1:
+            fn = fn.replace(read, 'ctx->gpr[8] = racacit_armor_look(vm_read32(ctx->gpr[12] + 0x5BC));   /* racacit */\n', 1)
+            src = src[:a_] + fn + src[end_:]
+            if 'uint32_t racacit_armor_look' not in src:
+                i = src.index('\n', src.index('#include')) + 1
+                src = src[:i] + 'extern "C" uint32_t racacit_armor_look(uint32_t armor);\n' + src[i:]
+            changed = True
+
+    # 17. The armor looks in the game's Extras > Skins menu (game/stubs.cpp): the skin
+    #     list builder func_004A3DB4 marks the look as equipped (its skinSelected value,
+    #     sp+0x80, set after the list's loop at loc_004A4DB4) and appends four entries
+    #     after its own six arrays (after the last, skinValues); the EquipSkin command
+    #     (func_004A27F8, the value parsed by func_00906828) turns an armor entry into
+    #     the look and equips "None".
+    sp = func_span(src, 'func_004A3DB4')
+    if sp and 'racacit_skin_armor_rows' not in src[sp[0]:sp[2]]:
+        a_, body_, end_ = sp
+        fn = src[a_:end_]
+        lab = '\nloc_004A4DB4:\n'
+        last = '        ctx->lr = 0x004A4EE8; func_0095D30C(ctx); DRAIN_TRAMPOLINE(ctx);\n'
+        if fn.count(lab) == 1 and fn.count(last) == 1:
+            fn = fn.replace(lab, lab + '        racacit_skin_armor_selected(ctx);   /* racacit */\n', 1)
+            fn = fn.replace(last, last + '        racacit_skin_armor_rows(ctx);   /* racacit */\n', 1)
+            src = src[:a_] + fn + src[end_:]
+            if 'void racacit_skin_armor_rows' not in src:
+                i = src.index('\n', src.index('#include')) + 1
+                src = src[:i] + ('extern "C" void racacit_skin_armor_selected(ppu_context* ctx);\n'
+                                 'extern "C" void racacit_skin_armor_rows(ppu_context* ctx);\n') + src[i:]
+            changed = True
+    sp = func_span(src, 'func_004A27F8')
+    if sp and 'racacit_equip_skin' not in src[sp[0]:sp[2]]:
+        a_, body_, end_ = sp
+        fn = src[a_:end_]
+        parse = '        ctx->lr = 0x004A2B54; func_00906828(ctx); DRAIN_TRAMPOLINE(ctx);\n'
+        if fn.count(parse) == 1:
+            fn = fn.replace(parse, parse + '        ctx->gpr[3] = racacit_equip_skin((uint32_t)ctx->gpr[3]);   /* racacit */\n', 1)
+            src = src[:a_] + fn + src[end_:]
+            if 'uint32_t racacit_equip_skin' not in src:
+                i = src.index('\n', src.index('#include')) + 1
+                src = src[:i] + 'extern "C" uint32_t racacit_equip_skin(uint32_t skin);\n' + src[i:]
+            changed = True
+
     if (('racacit_jb_push(' in src or 'racacit_longjmp(' in src)
             and 'racacit: guest setjmp' not in src):
         # declarations after the first include
