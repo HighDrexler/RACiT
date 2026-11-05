@@ -33181,7 +33181,7 @@ index bfbaac5..8cedf25 100644
      }
      uint32_t addr = g_sys_mem_bump_ptr;
 diff --git a/runtime/syscalls/sys_ppu_thread.c b/runtime/syscalls/sys_ppu_thread.c
-index fb3906a..bbadf8f 100644
+index fb3906a..b89c4c9 100644
 --- a/runtime/syscalls/sys_ppu_thread.c
 +++ b/runtime/syscalls/sys_ppu_thread.c
 @@ -2,14 +2,14 @@
@@ -33201,7 +33201,7 @@ index fb3906a..bbadf8f 100644
  #  define PPU_TLS __declspec(thread)
  #else
  #  define PPU_TLS __thread
-@@ -75,13 +75,90 @@ static void table_unlock(void)
+@@ -75,12 +75,112 @@ static void table_unlock(void)
  #endif
  }
  
@@ -33268,32 +33268,56 @@ index fb3906a..bbadf8f 100644
 + * than failing the create: A Crack in Time starts an "Auto Save Thread" and a
 + * "Scaleform Async Load" for every checkpoint and menu, and once the 64 slots
 + * were full of finished ones the next create failed and the game waited for a
-+ * thread that never came -- the freeze ten to twenty minutes into play. */
++ * thread that never came -- the freeze ten to twenty minutes into play.
++ *
++ * Slots are handed out round-robin, starting after the last one given, so an
++ * id comes back only after the other 63 have been used. The id is the slot,
++ * and lv2 never reissues an id this soon. A Crack in Time polls a finished
++ * save thread's id with sys_ppu_thread_get_priority until ESRCH. Save threads
++ * are never joined, so their slots stay FINISHED and are taken back only when
++ * no slot is free (the second and third loops). After long play the table is
++ * full, and the old lowest-first search then gave the slot of the autosave
++ * that had just ended to the next thread. When that was the session's first
++ * movie, its "Bink Audio Thread" (alive until the game quits) kept the poll
++ * answering OK. The save manager stayed busy, so autosaves stopped and the
++ * Save menu dimmed the screen and waited with the save icon flashing. */
++static int s_next_slot;
++
++static int take_slot(int i)
++{
++    s_next_slot = (i + 1) % PPU_THREAD_MAX;
++    return i;
++}
++
  static int find_free_slot(void)
  {
-     for (int i = 0; i < PPU_THREAD_MAX; i++) {
+-    for (int i = 0; i < PPU_THREAD_MAX; i++) {
++    for (int n = 0; n < PPU_THREAD_MAX; n++) {
++        const int i = (s_next_slot + n) % PPU_THREAD_MAX;
          if (g_ppu_threads[i].state == PPU_THREAD_STATE_FREE)
-             return i;
-     }
-+    for (int i = 0; i < PPU_THREAD_MAX; i++) {
+-            return i;
++            return take_slot(i);
++    }
++    for (int n = 0; n < PPU_THREAD_MAX; n++) {
++        const int i = (s_next_slot + n) % PPU_THREAD_MAX;
 +        ppu_thread_info* t = &g_ppu_threads[i];
 +        if (t->state == PPU_THREAD_STATE_FINISHED && !t->joinable && thread_host_done(t)) {
 +            thread_slot_reclaim(t);
-+            return i;
++            return take_slot(i);
 +        }
 +    }
-+    for (int i = 0; i < PPU_THREAD_MAX; i++) {
++    for (int n = 0; n < PPU_THREAD_MAX; n++) {
++        const int i = (s_next_slot + n) % PPU_THREAD_MAX;
 +        ppu_thread_info* t = &g_ppu_threads[i];
 +        if (t->state == PPU_THREAD_STATE_FINISHED && thread_host_done(t)) {
 +            fprintf(stderr, "[SYS] thread table full: reclaiming tid %d \"%s\" (finished, never joined)\n", i + 1, t->name);
 +            thread_slot_reclaim(t);
-+            return i;
++            return take_slot(i);
 +        }
-+    }
+     }
      return -1;
  }
- 
-@@ -120,9 +197,10 @@ static void* ppu_host_thread_proc(void* param)
+@@ -120,9 +220,10 @@ static void* ppu_host_thread_proc(void* param)
       * reservation and prevents ABA corruption of the guest's lock-free lists. */
      { extern void ppu_resv_register(ppu_context*); ppu_resv_register(&info->ctx); }
  
@@ -33305,7 +33329,7 @@ index fb3906a..bbadf8f 100644
  
      /* Invoke the recompiled entry point */
      if (g_ppu_thread_entry_trampoline) {
-@@ -222,6 +300,23 @@ void ydkj_release_pending_threads(void) {}
+@@ -222,6 +323,23 @@ void ydkj_release_pending_threads(void) {}
   * for main before any sys_ppu_thread_create so every thread has a unique
   * nonzero id and the special cases die.
   * -----------------------------------------------------------------------*/
@@ -33329,7 +33353,7 @@ index fb3906a..bbadf8f 100644
  uint64_t ppu_thread_register_main(void)
  {
      table_lock();
-@@ -243,6 +338,21 @@ uint64_t ppu_thread_register_main(void)
+@@ -243,6 +361,21 @@ uint64_t ppu_thread_register_main(void)
      return 1;
  }
  
@@ -33351,7 +33375,7 @@ index fb3906a..bbadf8f 100644
  /* ---------------------------------------------------------------------------
   * sys_ppu_thread_create
   *
-@@ -314,7 +424,7 @@ void ppu_prof_stamp(void* vctx, unsigned lr)
+@@ -314,7 +447,7 @@ void ppu_prof_stamp(void* vctx, unsigned lr)
      ppu_thread_info* t = (ppu_thread_info*)p;
      int in_range = (t >= g_ppu_threads && t < g_ppu_threads + PPU_THREAD_MAX);
      if (!in_range) { s_prof_main_pc = lr; return; }
@@ -33360,7 +33384,7 @@ index fb3906a..bbadf8f 100644
          fprintf(stderr, "[prof-stamp] ctx=%p base=%p in_range=%d lr=0x%X\n",
                  vctx, (void*)g_ppu_threads, in_range, lr); }
      if (in_range)
-@@ -328,7 +438,7 @@ int64_t sys_ppu_thread_create(ppu_context* ctx)
+@@ -328,7 +461,7 @@ int64_t sys_ppu_thread_create(ppu_context* ctx)
      uint64_t arg          = LV2_ARG_U64(ctx, 2);
      int32_t  priority     = LV2_ARG_S32(ctx, 3);
      uint32_t stack_size   = LV2_ARG_U32(ctx, 4);
@@ -33369,7 +33393,7 @@ index fb3906a..bbadf8f 100644
      uint32_t name_addr    = LV2_ARG_PTR(ctx, 6);
  
      if (stack_size == 0) stack_size = VM_PPU_STACK_SIZE;
-@@ -345,8 +455,8 @@ int64_t sys_ppu_thread_create(ppu_context* ctx)
+@@ -345,8 +478,8 @@ int64_t sys_ppu_thread_create(ppu_context* ctx)
      ppu_thread_info* t = &g_ppu_threads[slot];
      memset(t, 0, sizeof(*t));
  
@@ -33380,7 +33404,7 @@ index fb3906a..bbadf8f 100644
      if (stack_addr == 0) {
          table_unlock();
          return (int64_t)(int32_t)CELL_ENOMEM;
-@@ -365,7 +475,10 @@ int64_t sys_ppu_thread_create(ppu_context* ctx)
+@@ -365,7 +498,10 @@ int64_t sys_ppu_thread_create(ppu_context* ctx)
  
      t->state      = PPU_THREAD_STATE_RUNNING;
      t->priority   = priority;
@@ -33392,7 +33416,7 @@ index fb3906a..bbadf8f 100644
      t->stack_addr = stack_addr;
      t->stack_size = stack_size;
      t->entry_addr = entry;
-@@ -404,9 +517,9 @@ int64_t sys_ppu_thread_create(ppu_context* ctx)
+@@ -404,9 +540,9 @@ int64_t sys_ppu_thread_create(ppu_context* ctx)
          *out = be_id;
      }
  
@@ -33404,7 +33428,7 @@ index fb3906a..bbadf8f 100644
      /* YDKJ: dump the worker arg-object: func_000750A8 (thread body) does
       * this=[arg+0x8], vtable=[arg+0xC], method=[vtable+0]. If this(+0x8) is null
       * the worker dispatches its job on a null object -> construction never runs. */
-@@ -457,8 +570,11 @@ int64_t sys_ppu_thread_create(ppu_context* ctx)
+@@ -457,8 +593,11 @@ int64_t sys_ppu_thread_create(ppu_context* ctx)
       * index every 2.5 ms and misses a 5.3 ms block whenever it is delayed, and
       * each miss is an audible gap. A mild boost, not TIME_CRITICAL: these
       * threads sleep between polls.
@@ -33417,7 +33441,7 @@ index fb3906a..bbadf8f 100644
          SetThreadPriority(t->host_thread, THREAD_PRIORITY_ABOVE_NORMAL);
  #else
      /* Same reservation, for the same reason. This is the HOST stack the
-@@ -555,7 +671,7 @@ int64_t sys_ppu_thread_join(ppu_context* ctx)
+@@ -555,7 +694,7 @@ int64_t sys_ppu_thread_join(ppu_context* ctx)
  {
      uint64_t tid          = LV2_ARG_U64(ctx, 0);
      uint32_t status_addr  = LV2_ARG_PTR(ctx, 1);
@@ -33426,7 +33450,7 @@ index fb3906a..bbadf8f 100644
  
      table_lock();
      ppu_thread_info* t = find_thread(tid);
-@@ -1098,6 +1214,17 @@ int64_t sys_ppu_thread_get_priority(ppu_context* ctx)
+@@ -1098,6 +1237,17 @@ int64_t sys_ppu_thread_get_priority(ppu_context* ctx)
  
      table_lock();
      ppu_thread_info* t = find_thread(tid);
@@ -33444,7 +33468,7 @@ index fb3906a..bbadf8f 100644
      if (!t) {
          /* The main thread (and any thread we didn't spawn via sys_ppu_thread_create)
           * isn't in our table. Returning ESRCH here is fatal for engines that query
-@@ -1237,8 +1364,8 @@ int64_t sys_ppu_thread_get_stack_information(ppu_context* ctx)
+@@ -1237,8 +1387,8 @@ int64_t sys_ppu_thread_get_stack_information(ppu_context* ctx)
              uint32_t* out = (uint32_t*)vm_to_host(out_addr);
  #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__ || defined(_WIN32)
              /* byteswap both fields */
