@@ -1538,6 +1538,19 @@ static void racacit_dsw_event(const char* name)
 
 extern "C" volatile int g_racacit_ctx_hoverboots;   /* cellPad.c */
 static uint32_t s_hb_inst[8]; static volatile long s_hb_mu;
+/* One of the hoverboots' running loops (gad_hb_super_new_idle / _moving /
+ * _thrusting): only these say Ratchet is on them. Not every gad_hb_ sound:
+ * the game plays gad_hb_super_new_end_cro a few ms after EVERY weapon shot
+ * (hoverboots or not), and counting it put L2 on the game's R2 (the wrench
+ * throw) after each shot -- strafing on L2 kept turning into Ratchet raising
+ * his wrench (owner, 0.9.8 v111). */
+static int racacit_hb_loop_desc(uint32_t desc)
+{
+    if (!desc || desc >= 0x40000000u || memcmp(vm_base + desc, "gad_hb_", 7)) return 0;
+    char nm[64] = { 0 };
+    for (int k = 0; k < 63 && vm_base[desc + k]; k++) nm[k] = (char)vm_base[desc + k];
+    return strstr(nm, "_idle") || strstr(nm, "_moving") || strstr(nm, "_thrusting");
+}
 static void racacit_hb_add(uint32_t inst)
 {
     while (__sync_lock_test_and_set(&s_hb_mu, 1)) { }
@@ -1557,11 +1570,12 @@ static void racacit_hb_remove(uint32_t inst)
         if (s_hb_inst[i] == inst) s_hb_inst[i] = 0;
         if (s_hb_inst[i]) {   /* reused for another sound, or stopped without our hook: gone */
             const uint32_t d = vm_read32(s_hb_inst[i] + 0xC);
-            if (!d || d >= 0x40000000u || memcmp(vm_base + d, "gad_hb_", 7) || !vm_read32(s_hb_inst[i] + 0x14)) s_hb_inst[i] = 0;
+            if (!racacit_hb_loop_desc(d) || !vm_read32(s_hb_inst[i] + 0x14)) s_hb_inst[i] = 0;
         }
         n += s_hb_inst[i] != 0;
     }
     __sync_lock_release(&s_hb_mu);
+    if (g_racacit_ctx_hoverboots && !n) fprintf(stderr, "[cellPad] hoverboots off: L2 strafes%c", 10);
     g_racacit_ctx_hoverboots = n > 0;
 }
 extern "C" void racacit_snd_play_hook(ppu_context* ctx, int tag)
@@ -1580,7 +1594,7 @@ extern "C" void racacit_snd_play_hook(ppu_context* ctx, int tag)
      * "hoverboot l2", owner). Ended in racacit_snd_stop_hook. */
     if (tag == 2) {
         const uint32_t inst = (uint32_t)ctx->gpr[3], desc = vm_read32(inst + 0xC);
-        if (desc && desc < 0x40000000u && !memcmp(vm_base + desc, "gad_hb_", 7)) racacit_hb_add(inst);
+        if (racacit_hb_loop_desc(desc)) racacit_hb_add(inst);
         else if (g_racacit_ctx_hoverboots) racacit_hb_remove(0);   /* re-check the ones held */
     }
     /* RACACIT_FRAMELOG_ON_SOUND=<substring> (test hook): a sound with that in
