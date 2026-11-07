@@ -3,7 +3,7 @@ RACiT Launcher 0.9.8 -- Ratchet & Clank Future: A Crack in Time (PC), Windows
 
 Everything the game needs comes in this folder: the launcher, the game build
 (builds\vNN) and its shader caches. The only thing you add is your own copy of
-A Crack in Time (USA, BCUS98124):
+A Crack in Time (USA BCUS98124, or Europe BCES00511):
   1. the game: its disc image (.iso), or the dumped game's folder (USRDIR)
   2. EBOOT.elf, the game's main program, unlocked with RPCS3
 

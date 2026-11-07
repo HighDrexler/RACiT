@@ -90,7 +90,7 @@ public:
     std::string import_iso(const fs::path& iso, Progress* p, std::string* summary);
     // EBOOT.elf, the game's main program unlocked with RPCS3: checked, then put in
     // PS3_GAME\USRDIR -- or kept in data\ until the game is imported.
-    // check_elf: "" = a PS3 program; *known = the USA disc's own (the one the build is made from).
+    // check_elf: "" = a PS3 program; *known = the program of a disc the build is made from.
     static std::string check_elf(const fs::path& elf, bool* known);
     std::string add_elf(const fs::path& elf);
     fs::path pending_elf() const { return data() / L"EBOOT.elf"; }
