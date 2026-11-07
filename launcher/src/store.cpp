@@ -13,6 +13,17 @@
 #include <unordered_set>
 
 // ---- settings files ------------------------------------------------------------
+// The discs this launcher knows. The lifted code is made from one disc's program,
+// so a build folder holds one game program per disc.
+static bool supported_title(const std::string& id) { return id == "BCUS98124" || id == "BCES00511"; }
+static bool is_save_folder(const std::string& n) { return n.rfind("BCUS98124", 0) == 0 || n.rfind("BCES00511", 0) == 0; }
+static const wchar_t* game_program(const std::string& id) { return id == "BCES00511" ? L"RaCACiT_BCES00511.exe" : L"RaCACiT.exe"; }
+static bool has_game_program(const fs::path& dir)
+{
+    std::error_code ec;
+    return fs::exists(dir / L"RaCACiT.exe", ec) || fs::exists(dir / L"RaCACiT_BCES00511.exe", ec);
+}
+
 static bool line_key(const std::string& line, std::string* key, std::string* val, bool* commented)
 {
     std::string l = trim(line);
@@ -162,8 +173,8 @@ GameInfo Store::game() const
     }
     auto sfo = read_sfo(g.root / L"PS3_GAME" / L"PARAM.SFO");
     g.title = sfo["TITLE"]; g.title_id = sfo["TITLE_ID"]; g.app_ver = sfo["APP_VER"];
-    if (!g.title_id.empty() && g.title_id != "BCUS98124") {
-        g.status = "This is " + g.title_id + " (" + g.title + "), not A Crack in Time USA (BCUS98124)";
+    if (!g.title_id.empty() && !supported_title(g.title_id)) {
+        g.status = "This is " + g.title_id + " (" + g.title + "), not A Crack in Time (BCUS98124 or BCES00511)";
         return g;
     }
     const fs::path eb = g.root / L"PS3_GAME" / L"USRDIR" / L"EBOOT.elf";
@@ -230,9 +241,9 @@ std::string Store::import_iso(const fs::path& iso, Progress* p, std::string* sum
     }
     const auto info = parse_sfo(d);
     const std::string id = info.count("TITLE_ID") ? info.at("TITLE_ID") : "";
-    if (id != "BCUS98124")
+    if (!supported_title(id))
         return "This is " + (id.empty() ? std::string("an unknown game") : id + " (" + (info.count("TITLE") ? info.at("TITLE") : "") + ")") +
-               ", not A Crack in Time USA (BCUS98124).";
+               ", not A Crack in Time (BCUS98124 or BCES00511).";
     // PS3_GAME and the disc's PS3_DISC.SFB; not PS3_UPDATE (system software for a console).
     std::vector<const IsoFile*> want; uint64_t need = 0;
     for (auto& f : img.files())
@@ -283,7 +294,9 @@ std::string Store::check_elf(const fs::path& elf, bool* known)
         return "This is the locked EBOOT.BIN (or a copy of it). Unlock it with RPCS3 first: Utilities > Decrypt PS3 Binaries.";
     if (h.size() < 20 || h.compare(0, 4, "\x7F" "ELF") != 0) return u8(elf.filename()) + " is not an ELF program.";
     if (h[4] != 2 || h[5] != 2 || (unsigned char)h[18] != 0 || (unsigned char)h[19] != 0x15) return u8(elf.filename()) + " is not a PS3 program.";
-    *known = sha256_file(elf) == "406bded328d9dbdfa9684ed392554ca34c76f4ed95aa21685f622d3ab2b04592";
+    const std::string sum = sha256_file(elf);
+    *known = sum == "406bded328d9dbdfa9684ed392554ca34c76f4ed95aa21685f622d3ab2b04592"     // BCUS98124
+          || sum == "6debdca0f181f35d98ebe23faabe2531b697c558b4e3384b06630173400674c1";   // BCES00511
     return {};
 }
 
@@ -334,7 +347,7 @@ std::vector<fs::path> Store::find_old_installs() const
     const fs::path parent = root.parent_path();
     for (auto& d : fs::directory_iterator(parent, ec)) {
         if (!d.is_directory(ec) || fs::equivalent(d.path(), root, ec)) continue;
-        if (fs::exists(d.path() / L"RaCACiT.exe", ec) && fs::exists(d.path() / L"settings.txt", ec))
+        if (has_game_program(d.path()) && fs::exists(d.path() / L"settings.txt", ec))
             v.push_back({ version_of_name(u8(d.path().filename())), d.path() });
     }
     std::sort(v.begin(), v.end(), [](auto& a, auto& b) { return a.first > b.first; });
@@ -394,7 +407,7 @@ std::string Store::migrate_from(const fs::path& old, Progress* p, std::string* s
     bool installed = false;
     for (auto& b : builds()) if (b.version == have) installed = true;
     if (installed) s += " Build v" + std::to_string(have) + " is installed already (kept).";
-    else if (fs::exists(old / L"RaCACiT.exe", ec) && install_build_folder(old, &ver, builds().empty()).empty())
+    else if (has_game_program(old) && install_build_folder(old, &ver, builds().empty()).empty())
         s += " Build v" + std::to_string(ver) + " installed.";
     refresh_art();
     if (summary) *summary = s;
@@ -562,7 +575,7 @@ std::vector<BuildInfo> Store::builds() const
     for (auto& d : fs::directory_iterator(builds_dir(), ec)) {
         if (!d.is_directory(ec)) continue;
         const std::string n = u8(d.path().filename());
-        if (n.size() < 2 || n[0] != 'v' || !fs::exists(d.path() / L"RaCACiT.exe", ec)) continue;
+        if (n.size() < 2 || n[0] != 'v' || !has_game_program(d.path())) continue;
         BuildInfo b; b.version = atoi(n.c_str() + 1); b.dir = d.path();
         std::string rd = read_text(d.path() / L"README.txt", 400);
         b.notes_first_line = trim(rd.substr(0, rd.find('\n')));
@@ -576,7 +589,12 @@ BuildInfo Store::current_build() const
 {
     // The newest build that ships with the launcher, always.
     const auto all = builds();
-    return all.empty() ? BuildInfo{} : all.front();
+    if (all.empty()) return BuildInfo{};
+    // ...that has this disc's program; a build may hold only one of them.
+    std::error_code ec;
+    const wchar_t* program = game_program(game().title_id);
+    for (const auto& b : all) if (fs::exists(b.dir / program, ec)) return b;
+    return all.front();
 }
 
 bool Store::set_current(int version) { return write_text_atomic(builds_dir() / L"current.txt", std::to_string(version) + "\r\n"); }
@@ -584,7 +602,7 @@ bool Store::set_current(int version) { return write_text_atomic(builds_dir() / L
 std::string Store::install_build_folder(const fs::path& from, int* version, bool make_current)
 {
     std::error_code ec;
-    if (!fs::exists(from / L"RaCACiT.exe", ec)) return "No RaCACiT.exe in " + u8(from);
+    if (!has_game_program(from)) return "No RaCACiT.exe in " + u8(from);
     int v = atoi(trim(read_text(from / L"version.txt", 64)).c_str());
     if (!v) v = version_of_name(u8(from.filename()));
     if (!v) {   // "... Windows build v65 ..." in the README
@@ -597,7 +615,7 @@ std::string Store::install_build_folder(const fs::path& from, int* version, bool
     const fs::path tmp = builds_dir() / (L".v" + std::to_wstring(v) + L".new");
     delete_tree(tmp);
     fs::create_directories(tmp, ec);
-    for (const wchar_t* f : { L"RaCACiT.exe", L"README.txt", L"version.txt", L"RaCACiT.map" })
+    for (const wchar_t* f : { L"RaCACiT.exe", L"RaCACiT_BCES00511.exe", L"README.txt", L"version.txt", L"RaCACiT.map" })
         if (fs::exists(from / f, ec)) {
             fs::copy_file(from / f, tmp / f, fs::copy_options::overwrite_existing, ec);
             if (ec) { delete_tree(tmp); return "Copying " + narrow(f) + " failed: " + ec.message(); }
@@ -857,7 +875,7 @@ std::string Store::install_release(const ReleaseInfo& rel, Progress* p, std::str
         top_build = std::max(top_build, v);
     }
     for (const auto& b : new_builds)
-        if (!looks_like_program(b / L"RaCACiT.exe")) return stop("The release's build " + u8(b.filename()) + " has no game program. Nothing was changed.");
+        if (!looks_like_program(b / L"RaCACiT.exe") && !looks_like_program(b / L"RaCACiT_BCES00511.exe")) return stop("The release's build " + u8(b.filename()) + " has no game program. Nothing was changed.");
     fs::path new_launcher;
     for (auto& f : fs::directory_iterator(fresh, ec))
         if (f.is_regular_file(ec) && lower(u8(f.path().extension())) == ".exe") new_launcher = f.path();
@@ -929,7 +947,15 @@ std::string Store::install_release(const ReleaseInfo& rel, Progress* p, std::str
         set_current(top_build);
         int before = 0;
         for (const auto& b : builds()) if (b.version < top_build) before = std::max(before, b.version);
-        for (const auto& b : builds()) if (b.version != top_build && b.version != before) delete_tree(b.dir);
+        // And the newest with each disc's program, or an update could leave a disc with none.
+        int newest_usa = 0, newest_eu = 0;
+        for (const auto& b : builds()) {
+            if (fs::exists(b.dir / L"RaCACiT.exe", ec)) newest_usa = std::max(newest_usa, b.version);
+            if (fs::exists(b.dir / L"RaCACiT_BCES00511.exe", ec)) newest_eu = std::max(newest_eu, b.version);
+        }
+        for (const auto& b : builds())
+            if (b.version != top_build && b.version != before && b.version != newest_usa && b.version != newest_eu)
+                delete_tree(b.dir);
     }
     write_text_atomic(builds_dir() / L"release.txt", rel.tag + "\r\n");
     *restart = !new_launcher.empty();
@@ -1085,7 +1111,7 @@ std::vector<fs::path> Store::save_slots() const
     std::vector<fs::path> out;
     std::error_code ec;
     for (auto& d : fs::directory_iterator(saves(), ec))
-        if (d.is_directory(ec) && u8(d.path().filename()).rfind("BCUS98124", 0) == 0) out.push_back(d.path());
+        if (d.is_directory(ec) && is_save_folder(u8(d.path().filename()))) out.push_back(d.path());
     std::sort(out.begin(), out.end());
     return out;
 }
@@ -1140,7 +1166,7 @@ static std::vector<fs::path> find_slots(const fs::path& dir)
     std::error_code ec;
     for (auto it = fs::recursive_directory_iterator(dir, ec); !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
         if (it.depth() > 3) { it.disable_recursion_pending(); continue; }
-        if (it->is_directory(ec) && u8(it->path().filename()).rfind("BCUS98124", 0) == 0) { out.push_back(it->path()); it.disable_recursion_pending(); }
+        if (it->is_directory(ec) && is_save_folder(u8(it->path().filename()))) { out.push_back(it->path()); it.disable_recursion_pending(); }
     }
     return out;
 }
@@ -1150,7 +1176,7 @@ std::string Store::import_saves(const fs::path& zip)
     std::error_code dec;
     if (fs::is_directory(zip, dec)) {               /* a folder backup (tar.exe failed when it was made) */
         const auto slots = find_slots(zip);
-        if (slots.empty()) return "No A Crack in Time saves (BCUS98124...) in that backup.";
+        if (slots.empty()) return "No A Crack in Time saves in that backup.";
         std::string r = backup_saves("before-import", nullptr);
         if (!r.empty()) return "Backing up the current saves failed: " + r;
         fs::create_directories(saves(), dec);
@@ -1168,7 +1194,7 @@ std::string Store::import_saves(const fs::path& zip)
     std::string r = zip_extract(zip, tmp);
     if (!r.empty()) { delete_tree(tmp); return r; }
     const auto slots = find_slots(tmp);
-    if (slots.empty()) { delete_tree(tmp); return "No A Crack in Time saves (BCUS98124...) in that zip."; }
+    if (slots.empty()) { delete_tree(tmp); return "No A Crack in Time saves in that zip."; }
     r = backup_saves("before-import", nullptr);
     if (!r.empty()) { delete_tree(tmp); return "Backing up the current saves failed: " + r; }
     std::error_code ec;
@@ -1386,7 +1412,9 @@ std::string Store::launch(void** process)
     for (auto& kv : set) { env += kv.first + L"=" + kv.second; env += L'\0'; }
     env += L'\0';
 
-    const fs::path exe = b.dir / L"RaCACiT.exe";
+    const fs::path exe = b.dir / game_program(g.title_id);
+    if (!fs::exists(exe, ec))
+        return "Build v" + std::to_string(b.version) + " has no program for " + g.title_id + ".";
     const fs::path eboot = g.root / L"PS3_GAME" / L"USRDIR" / L"EBOOT.elf";
     std::wstring cl = L"\"" + exe.wstring() + L"\" \"" + eboot.wstring() + L"\"";
     // An older build writes log.txt beside itself: clear the last one so a stale

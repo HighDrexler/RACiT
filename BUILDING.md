@@ -38,6 +38,33 @@ bash launcher/build.sh
 
 This gives you `game/build-win/game/RaCACiT.exe` and `launcher/build/RaCACiT Launcher.exe`.
 
+## The European disc (`BCES00511`)
+
+The sources stay written for `BCUS98124`. For the European disc the build makes a converted
+copy of them in `build/BCES00511/`, using the address map in `versions/BCES00511/addr_map.tsv`.
+Steps 1 to 4 above are not affected, and the two builds do not share generated code.
+
+You need, from your own console and disc, in `input/BCES00511/`:
+
+- `EBOOT.ELF`: the decrypted game executable of `BCES00511`, version 1.00
+- `libsre.prx`: the same file as for the USA build
+
+```bash
+bash scripts/setup_windows.sh                 # if you have not built yet
+bash scripts/build_version.sh BCES00511
+```
+
+This gives you `build/BCES00511/RaCACiT_BCES00511.exe`. The launcher starts the program of the
+disc it finds, so put that exe in the same `builds\v<number>\` folder as `RaCACiT.exe`.
+A build folder may hold one or both.
+
+To run it without the launcher, use `run_bces00511.bat`, which also sets the language.
+
+**Changing the game code:** keep writing `BCUS98124` addresses. `scripts/retarget.py` converts
+them when it copies the sources, and warns about any address the map does not have. In the copy,
+`patch_lift.py` stops the build if a hook does not land. The map only covers what the sources
+use today, so check that warning after adding new addresses.
+
 ## Run your build
 
 Put the exe in a launcher's `builds\v<number>\` folder, next to a `version.txt` holding that
