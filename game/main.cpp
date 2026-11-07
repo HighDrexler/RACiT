@@ -832,6 +832,11 @@ static void map_cellfs_devices(void)
         cellfs_add_path_mapping("/dev_bdvd/", m);
         cellfs_add_path_mapping("/dev_hdd1/", m);
     }
+    const char* hdd1 = getenv("PS3_HDD1_ROOT");
+    if (hdd1 && *hdd1 && _fullpath(abs, hdd1, sizeof abs)) {
+        snprintf(m, sizeof m, "%s/", abs);
+        cellfs_add_path_mapping("/dev_hdd1/", m);
+    }
     const char* hdd0 = getenv("PS3_HDD0_ROOT");
     if (hdd0 && *hdd0 && _fullpath(abs, hdd0, sizeof abs)) {
         snprintf(m, sizeof m, "%s/", abs);

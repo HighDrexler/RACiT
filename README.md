@@ -35,6 +35,9 @@ Game data isn't included. You'll need your own decrypted dump of the **North Ame
 -  After downloading the launcher, extract and run the .exe, which will take you through the setup process, which is importing your .iso directly or directing the launcher to your PS3GAME folder.
  The game will also check for a decrypted EBOOT.elf, if your dumps .elf is showing as encrypted, the easier way to fix is with RPSC3.
 
+The European disc version (`BCES00511`) is supported too, and has more languages. It needs its own
+build: see [BUILDING.md](BUILDING.md).
+
 ## Current status
 
 This is a work in progress.

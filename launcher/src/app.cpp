@@ -299,8 +299,8 @@ static void add_elf_picked(const fs::path& p)
         else set_screen(import_screen);
     };
     if (known) put();
-    else confirm("A different EBOOT.elf", "This is a PS3 program, but not the EBOOT.elf of the USA disc this build is made "
-                 "from (BCUS98124, version 1.00 -- not an update's). The game may not start with it.", "Use it anyway", put);
+    else confirm("A different EBOOT.elf", "This is a PS3 program, but not the EBOOT.elf of a disc this build is made "
+                 "from (BCUS98124 or BCES00511, version 1.00 -- not an update's). The game may not start with it.", "Use it anyway", put);
 }
 
 // An earlier launcher's folder (Store::migrate_from_launcher).
@@ -339,7 +339,7 @@ static void import_screen()
     if (gi.ok) scr.info.push_back({ "Ready", u8(gi.root), col::TEXT_GOOD });
     else if (wrong) scr.info.push_back({ "Problem", gi.status, col::TEXT_BAD });
     else if (have_game) scr.info.push_back({ "Game found", (gi.title.empty() ? std::string() : gi.title + " " + gi.app_ver + "\n") + u8(gi.root), col::TEXT_GOOD });
-    scr.info.push_back({ "What you need", "Your own copy of A Crack in Time (USA, BCUS98124):\n"
+    scr.info.push_back({ "What you need", "Your own copy of A Crack in Time (USA BCUS98124, or Europe BCES00511):\n"
                                           "1. The game: its disc image (.iso), or the dumped game's folder -- pick "
                                           "its USRDIR. A Redump .iso is encrypted: keep its .dkey file beside it, "
                                           "with the same name, and the launcher unlocks it.\n"
