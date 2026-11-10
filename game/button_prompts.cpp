@@ -202,7 +202,7 @@ const int kHudRows = (kKeyH + 3) / 4, kKeyBytes = kHudRows * kKeyCols * 16;
  * texture header the game loads right after the font's records: section
  * 0x5200, 32-byte entries, RSX local offset at +0, format at +6, width
  * at +0x18). Host pointer to a DXT5 page and its pitch, or NULL. */
-const uint8_t* font_page_at(uint32_t rec, int page, uint32_t* pitch)
+const uint8_t* font_page_at(uint32_t rec, int page, uint32_t* pitch, int* width=nullptr, int* height=nullptr)
 {
     /* Explicit page permits face, stick and keyboard glyphs too. */   /* the E00B record's page */
     const uint32_t a0 = (rec + 255u) & ~255u, re = readable_end(a0);
@@ -218,6 +218,7 @@ const uint8_t* font_page_at(uint32_t rec, int page, uint32_t* pitch)
         const uint32_t ea = cellGcmResolveLocated(1, be32(t));
         *pitch = (uint32_t)w / 4u * 16u;
         if (!ea || !readable(ea, *pitch * (uint32_t)(hh / 4))) return nullptr;
+        if (width) *width=w; if (height) *height=hh;
         return vm_base + ea;
     }
     return nullptr;

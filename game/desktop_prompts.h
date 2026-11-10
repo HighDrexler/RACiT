@@ -28,9 +28,13 @@ static uint8_t desktop_letter(char ch, int row)
         {'Y',{17,17,10,4,4,4,4}}, {'1',{4,12,4,4,4,4,14}},
         {'2',{14,17,1,2,4,8,31}}, {'3',{30,1,1,14,1,1,30}},
         {'4',{2,6,10,18,31,2,2}},
+        {'0',{14,17,19,21,25,17,14}}, {'5',{31,16,16,30,1,1,30}},
+        {'6',{14,16,16,30,17,17,14}}, {'7',{31,1,2,4,8,8,8}},
+        {'8',{14,17,17,14,17,17,14}}, {'9',{14,17,17,15,1,1,14}},
     };
     for (const auto& letter : font) if (letter.ch == ch) return letter.rows[row];
-    return 0;
+    static const uint8_t unknown[7]={14,17,1,2,4,0,4};
+    return unknown[row];
 }
 static void desktop_blocks(const DesktopGlyph& g, uint8_t* blocks, bool write)
 {
@@ -80,13 +84,16 @@ static void desktop_prompts(bool keyboard)
     for (int font = 0; font < s_nfont; ++font) for (unsigned key = 0; key < 14; ++key) {
         const uint32_t rec = s_font[font] - 6 * 16 + key * 16;
         if (!readable(rec, 16) || be16(vm_base + rec) != 0xE001 + key) continue;
-        uint32_t pitch = 0;
-        const uint8_t* page = font_page_at(s_font[font], be16(vm_base + rec + 6), &pitch);
+        uint32_t pitch = 0; int width=0,height=0;
+        const uint8_t* page = font_page_at(s_font[font], be16(vm_base + rec + 6), &pitch,&width,&height);
         if (!page) continue;
+        const int x=be16(vm_base+rec+2),y=be16(vm_base+rec+4),w=vm_base[rec+10],h=vm_base[rec+11];
+        if (w<12 || h<12 || x+w>width || y+h>height) continue;
         const uint32_t ea = (uint32_t)(page - vm_base);
         DesktopGlyph* glyph = nullptr;
         for (unsigned i = 0; i < desktop_count; ++i)
-            if (desktop_glyphs[i].rec == rec && desktop_glyphs[i].page == ea) { glyph = &desktop_glyphs[i]; break; }
+            if (desktop_glyphs[i].rec == rec && desktop_glyphs[i].page == ea && desktop_glyphs[i].pitch==pitch &&
+                desktop_glyphs[i].x==x && desktop_glyphs[i].y==y && desktop_glyphs[i].w==w && desktop_glyphs[i].h==h) { glyph = &desktop_glyphs[i]; break; }
         if (!glyph) {
             if (!keyboard || desktop_count == sizeof desktop_glyphs / sizeof *desktop_glyphs) continue;
             glyph = &desktop_glyphs[desktop_count++];
@@ -109,6 +116,8 @@ static void desktop_prompts(bool keyboard)
                 if (!strncmp(custom,"Mouse1",6)) snprintf(label,sizeof label,"LMB");
                 else if (!strncmp(custom,"Mouse2",6)) snprintf(label,sizeof label,"MMB");
                 else if (!strncmp(custom,"Mouse3",6)) snprintf(label,sizeof label,"RMB");
+                else if (!strncmp(custom,"Mouse4",6)) snprintf(label,sizeof label,"M4");
+                else if (!strncmp(custom,"Mouse5",6)) snprintf(label,sizeof label,"M5");
                 else if (!strncmp(custom,"Space",5)) snprintf(label,sizeof label,"SPC");
                 else if (!strncmp(custom,"Return",6)) snprintf(label,sizeof label,"ENT");
                 else if (!strncmp(custom,"Left Ctrl",9)) snprintf(label,sizeof label,"CTRL");
