@@ -2219,7 +2219,7 @@ index 5166a47..8c83b67 100644
                     (uint32_t)(uintptr_t)buf,
                     (unsigned long long)nbytes, (unsigned long long)bytes_read);
 diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
-index f2b4c11..d7e93a5 100644
+index f2b4c11..3fc07e6 100644
 --- a/libs/input/cellPad.c
 +++ b/libs/input/cellPad.c
 @@ -12,11 +12,13 @@
@@ -2860,7 +2860,7 @@ index f2b4c11..d7e93a5 100644
  
          s_host_state[i].buttons = btns;
  
-@@ -356,26 +915,258 @@ static void pad_poll_sdl2(void)
+@@ -356,26 +915,259 @@ static void pad_poll_sdl2(void)
          s_host_state[i].press_square   = (btns & CELL_PAD_CTRL_SQUARE)   ? 255 : 0;
          s_host_state[i].press_l1       = (btns & CELL_PAD_CTRL_L1)       ? 255 : 0;
          s_host_state[i].press_r1       = (btns & CELL_PAD_CTRL_R1)       ? 255 : 0;
@@ -2924,7 +2924,8 @@ index f2b4c11..d7e93a5 100644
 +/* An input: a scancode (< 512), or 512 + mouse button 1-5, or 520/521 the wheel. */
 +#define KB_MAX_KEYS 4
 +static int s_kb_keys[KB_N][KB_MAX_KEYS];
-+volatile int g_racit_keyboard_prompts = 1;
++static SDL_atomic_t s_racit_keyboard_prompts = {1};
++int racit_keyboard_prompts_active(void) { return SDL_AtomicGet(&s_racit_keyboard_prompts); }
 +static int s_kbm_on = -1;             /* allowed this run (PAD_NO_KEYBOARD) */
 +extern volatile int g_racacit_kbm_on;   /* rsx_host_ui.c: capture the mouse on a click */
 +
@@ -2991,7 +2992,7 @@ index f2b4c11..d7e93a5 100644
 +    hs->connected = 1;   /* with no controller the keyboard is the pad (pad_poll_sdl2 left it neutral) */
 +    u16 btns = 0;
 +    for (int k = 0; k < KB_N; k++) if (held[k] && k_kb[k].btn) btns |= k_kb[k].btn;
-+    if (btns || dx || dy || wheel || mb || held[KB_LS_UP] || held[KB_LS_DOWN] || held[KB_LS_LEFT] || held[KB_LS_RIGHT]) g_racit_keyboard_prompts = 1;
++    if (btns || dx || dy || wheel || mb || held[KB_LS_UP] || held[KB_LS_DOWN] || held[KB_LS_LEFT] || held[KB_LS_RIGHT]) SDL_AtomicSet(&s_racit_keyboard_prompts,1);
 +    hs->buttons |= btns;
 +    if (btns & CELL_PAD_CTRL_L2) hs->trigger_l2 = 255;
 +    if (btns & CELL_PAD_CTRL_R2) hs->trigger_r2 = 255;
@@ -3127,7 +3128,7 @@ index f2b4c11..d7e93a5 100644
  }
  
  static void pad_shutdown_backend(void)
-@@ -421,6 +1212,62 @@ static unsigned long long pad_now_ms(void)
+@@ -421,6 +1213,62 @@ static unsigned long long pad_now_ms(void)
  #endif
  }
  
@@ -3190,7 +3191,7 @@ index f2b4c11..d7e93a5 100644
  static void pad_poll_backend(void)
  {
      /* Benign race: two threads may poll in the same tick. That costs one extra
-@@ -439,9 +1286,33 @@ static void pad_poll_backend(void)
+@@ -439,9 +1287,33 @@ static void pad_poll_backend(void)
  #elif PAD_BACKEND_SDL2
      pad_poll_sdl2();
  #endif
@@ -3216,7 +3217,7 @@ index f2b4c11..d7e93a5 100644
 +        const PadHostState* h = &s_host_state[0];
 +        if (h->connected && (h->buttons || h->analog_lx < 100 || h->analog_lx > 156 ||
 +            h->analog_ly < 100 || h->analog_ly > 156 || h->analog_rx < 100 || h->analog_rx > 156 ||
-+            h->analog_ry < 100 || h->analog_ry > 156)) g_racit_keyboard_prompts = 0;
++            h->analog_ry < 100 || h->analog_ry > 156)) SDL_AtomicSet(&s_racit_keyboard_prompts,0);
 +    }
 +    pad_poll_kbm(ign);
 +#endif
@@ -3225,7 +3226,7 @@ index f2b4c11..d7e93a5 100644
  }
  
  /* ---------------------------------------------------------------------------
-@@ -466,6 +1337,14 @@ s32 cellPadInit(u32 max_connect)
+@@ -466,6 +1338,14 @@ s32 cellPadInit(u32 max_connect)
      s_max_connect = max_connect > CELL_PAD_MAX_PORT_NUM ? CELL_PAD_MAX_PORT_NUM : max_connect;
      memset(s_port_setting, 0, sizeof(s_port_setting));
      memset(s_host_state, 0, sizeof(s_host_state));
@@ -3240,7 +3241,7 @@ index f2b4c11..d7e93a5 100644
  
      pad_init_backend();
  
-@@ -502,6 +1381,103 @@ void cellPad_poll(void)
+@@ -502,6 +1382,103 @@ void cellPad_poll(void)
   * were fixed.) These used to be redeclared here with a 64-bit address
   * parameter, which conflicts with the header now that it is included. */
  
@@ -3344,7 +3345,7 @@ index f2b4c11..d7e93a5 100644
  s32 cellPadGetData(u32 port_no, CellPadData* data_guest)
  {
      { static int _once = 0;
-@@ -518,6 +1494,7 @@ s32 cellPadGetData(u32 port_no, CellPadData* data_guest)
+@@ -518,6 +1495,7 @@ s32 cellPadGetData(u32 port_no, CellPadData* data_guest)
  
      /* Poll fresh state */
      pad_poll_backend();
@@ -3352,7 +3353,7 @@ index f2b4c11..d7e93a5 100644
  
      /* YDKJ_INJECT_PAD: the game's wait loop polls the pad (cellPadSetActDirect /
       * GetData) -- if it's parked on a "press button" prompt after loading, no
-@@ -601,7 +1578,7 @@ skip_inject: ;
+@@ -601,7 +1579,7 @@ skip_inject: ;
       * human at the pad. Env-gated test scaffolding, off by default. */
      { static int s_ap = -1; static unsigned s_apn = 0;
        if (s_ap < 0) s_ap = getenv("PAD_AUTOPRESS") ? 1 : 0;
@@ -3361,7 +3362,7 @@ index f2b4c11..d7e93a5 100644
            unsigned ph = s_apn++ % 240;
            if (ph < 12)
                data->button[CELL_PAD_BTN_OFFSET_DIGITAL2] |= 0x40;   /* CROSS */
-@@ -636,7 +1613,7 @@ skip_inject: ;
+@@ -636,7 +1614,7 @@ skip_inject: ;
                printf("[cellPad] PAD_SCRIPT: %d event(s)\n", n_ev);
            }
        }
@@ -3370,7 +3371,7 @@ index f2b4c11..d7e93a5 100644
            double now = (double)(GetTickCount64() - t0) / 1000.0;
            /* Latch, do not window. A fixed time window is missed whenever the
             * title stops polling the pad for longer than the window (it does
-@@ -672,30 +1649,87 @@ skip_inject: ;
+@@ -672,30 +1650,87 @@ skip_inject: ;
       */
      { static int s_pf = -1; static char pf_path[512];
        static unsigned held_mask = 0; static int held_n = 0;
@@ -3469,7 +3470,7 @@ index f2b4c11..d7e93a5 100644
      /* Analog sticks */
      /* PAD_STICK="lx,ly,rx,ry" (0-255, 128 = centred): hold the analog sticks at
       * fixed positions. Rubber Ducky drives its camera from the sticks and never
-@@ -714,7 +1748,7 @@ skip_inject: ;
+@@ -714,7 +1749,7 @@ skip_inject: ;
                   sscanf(e, "%d,%d,%d,%d,%lf,%lf", &a,&b,&c,&d,&s_from,&s_until);
                   s_v[0]=(unsigned char)a; s_v[1]=(unsigned char)b;
                   s_v[2]=(unsigned char)c; s_v[3]=(unsigned char)d; } }
@@ -3478,7 +3479,7 @@ index f2b4c11..d7e93a5 100644
                    hs->analog_rx = s_v[2]; hs->analog_ry = s_v[3];
                    hs->connected = 1; }
        /* PAD_SWEEP=<seconds per step>: walk the sticks through a fixed set of
-@@ -725,7 +1759,7 @@ skip_inject: ;
+@@ -725,7 +1760,7 @@ skip_inject: ;
        { static int sw = -1; static clock_t t0 = 0;
          if (sw < 0) { const char* e = getenv("PAD_SWEEP");
                        sw = e ? atoi(e) : 0; if (sw < 0) sw = 0; }
@@ -3487,7 +3488,7 @@ index f2b4c11..d7e93a5 100644
              static const unsigned char steps[9][4] = {
                  {128,128,128,128},
                  {128,  0,128,128}, {128,255,128,128},
-@@ -793,10 +1827,40 @@ skip_inject: ;
+@@ -793,10 +1828,40 @@ skip_inject: ;
          data->button[CELL_PAD_BTN_OFFSET_SENSOR_Y] = 399; /* gravity */
          data->button[CELL_PAD_BTN_OFFSET_SENSOR_Z] = 512;
          data->button[CELL_PAD_BTN_OFFSET_SENSOR_G] = 512;
@@ -3528,7 +3529,7 @@ index f2b4c11..d7e93a5 100644
      /* A non-zero len means "here is a CHANGE packet" -- the constant is literally
       * named CELL_PAD_LEN_CHANGE_DEFAULT. Hardware reports len = 0 once the port
       * has nothing new, and titles DRAIN on that: The Simpsons Arcade Game's
-@@ -985,7 +2049,7 @@ s32 cellPadPeriphGetInfo(CellPadPeriphInfo* info_guest)
+@@ -985,7 +2050,7 @@ s32 cellPadPeriphGetInfo(CellPadPeriphInfo* info_guest)
            vm_write32((unsigned long long)ea + _o, *(u32*)((char*)info + _o)); }
  
      { static int _n = 0;
@@ -3537,7 +3538,7 @@ index f2b4c11..d7e93a5 100644
            printf("[cellPad] PeriphGetInfo(max=%u now=%u) -> STANDARD class\n",
                   info->max_connect, connected); }
      return CELL_OK;
-@@ -1082,13 +2146,61 @@ s32 cellPadSetActDirect(u32 port_no, CellPadActParam* param)
+@@ -1082,13 +2147,61 @@ s32 cellPadSetActDirect(u32 port_no, CellPadActParam* param)
  #endif
  
  #if PAD_BACKEND_SDL2

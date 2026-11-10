@@ -56,7 +56,7 @@ extern "C" uint32_t cellGcmResolveLocated(int local, uint32_t offset);   /* cell
 extern "C" volatile int g_racacit_ctx_quickselect;   /* cellPad.c: the quick select ring is open (TRIANGLE held) */
 extern "C" volatile unsigned g_racacit_level_changes;   /* stubs.cpp: level loads so far */
 
-extern "C" volatile int g_racit_keyboard_prompts;
+extern "C" int racit_keyboard_prompts_active(void);
 namespace {
 
 const uint16_t kL1x = 0x003C, kL2x = 0x0097, kR1x = 0x00F2, kR2x = 0x014D, kRowY = 0x0074;
@@ -584,7 +584,7 @@ DWORD WINAPI prompts_thread(LPVOID)
             if (next < sizeof kScanAt / sizeof kScanAt[0] && t == kScanAt[next]) { scan(); next++; } }
         static int force = -2;   /* RACACIT_PROMPT_LAYOUT=<0|1|2>: a layout for tests */
         if (force == -2) { const char* e = getenv("RACACIT_PROMPT_LAYOUT"); force = e && *e ? atoi(e) : -1; }
-        const bool keyboard = g_racit_keyboard_prompts != 0;
+        const bool keyboard = racit_keyboard_prompts_active() != 0;
         const int layout = keyboard ? 0 : force >= 0 ? force : g_racacit_pad_layout;
         /* R1 <-> R2 with the layout swapped (R2 fires); L1 <-> L2 only while
          * the quick select ring is open, where L2 / R2 page (cellPad.c). */
