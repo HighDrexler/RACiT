@@ -6224,7 +6224,7 @@ index 071b9ec..a241354 100644
  static int  s_boot_checked = 0;
  static u32  s_game_type = CELL_GAME_GAMETYPE_DISC;
 diff --git a/libs/system/cellSaveData.c b/libs/system/cellSaveData.c
-index 79ea8ca..0a73c04 100644
+index 79ea8ca..e237e75 100644
 --- a/libs/system/cellSaveData.c
 +++ b/libs/system/cellSaveData.c
 @@ -29,6 +29,17 @@
@@ -16277,10 +16277,10 @@ index cbec250..41829d8 100644
   * PSO identity should use rsx_fp_structural_hash in buffered mode. */
 diff --git a/libs/video/rsx_host_ui.c b/libs/video/rsx_host_ui.c
 new file mode 100644
-index 0000000..b2a2271
+index 0000000..81976d3
 --- /dev/null
 +++ b/libs/video/rsx_host_ui.c
-@@ -0,0 +1,2192 @@
+@@ -0,0 +1,2188 @@
 +/*
 + * ps3recomp - host settings menu and on-screen display. See rsx_host_ui.h.
 + */
@@ -18188,6 +18188,8 @@ index 0000000..b2a2271
 +    UNLOCK();
 +}
 +
++#include "rsx_perf_graph.h"
++
 +int rsx_host_ui_build(const rsx_ui_font* f, int sw, int sh, rsx_ui_vtx* out, int cap)
 +{
 +    if (!f || !f->pixels || sw <= 0 || sh <= 0) return 0;
@@ -18197,13 +18199,7 @@ index 0000000..b2a2271
 +    const float px = (float)f->px, lh = (float)f->line_h;
 +
 +    if (s_sv_active) { sv_build(&o, sw, sh); return o.n; }
-+    if (opt.fps && !s_open) {
-+        char b[64]; LOCK(); memcpy(b, s_fps_text, sizeof b); UNLOCK();
-+        if (!b[0]) snprintf(b, sizeof b, "-- FPS");
-+        const float x = px * 0.6f, y = px * 0.5f, w = text_w(f, b);
-+        rect(&o, x - px * 0.4f, y - px * 0.15f, x + w + px * 0.4f, y + lh + px * 0.1f, rgba(0, 0, 0, 150));
-+        text(&o, x, y, b, rgba(255, 230, 120, 255));
-+    }
++    if (opt.fps && !s_open) racit_perf_overlay(&o, f);
 +    if (!s_open) { tr_popup(&o, sw, sh); return o.n; }
 +
 +    /* Dim the game, then a centred panel. */
@@ -18713,7 +18709,7 @@ index 0000000..eb0f6d0
 +
 +#endif /* PS3RECOMP_RSX_HOST_UI_H */
 diff --git a/libs/video/rsx_live_draw.c b/libs/video/rsx_live_draw.c
-index ef661c0..57bc5b8 100644
+index ef661c0..7729bd6 100644
 --- a/libs/video/rsx_live_draw.c
 +++ b/libs/video/rsx_live_draw.c
 @@ -1368,6 +1368,7 @@ static void decode_render_state(render_state_t* rs)
@@ -18888,6 +18884,51 @@ index d04b34e..5fef4f7 100644
  }
  
  static const rsx_draw_backend s_engine_backend = {
+diff --git a/libs/video/rsx_perf_graph.h b/libs/video/rsx_perf_graph.h
+new file mode 100644
+index 0000000..809a855
+--- /dev/null
++++ b/libs/video/rsx_perf_graph.h
+@@ -0,0 +1,39 @@
++/* Uses the existing present-interval ring; no sampling thread or file output. */
++static void racit_perf_overlay(ui_out* out, const rsx_ui_font* font)
++{
++    double frames[128]; unsigned count;
++    char summary[64];
++    LOCK();
++    memcpy(summary, s_fps_text, sizeof summary);
++    count = s_ft_n < N_OF(s_ft) ? s_ft_n : N_OF(s_ft);
++    for (unsigned i = 0; i < count; ++i)
++        frames[i] = s_ft[(s_ft_n - count + i) % N_OF(s_ft)];
++    UNLOCK();
++    if (!summary[0]) snprintf(summary, sizeof summary, "-- FPS / -- ms");
++    const float px = (float)font->px, x = px * .6f, y = px * .5f;
++    const float width = px * 21, height = px * 2.4f, line = (float)font->line_h;
++    rect(out, 0, 0, x + width + px, y + line * 3 + height * 2 + px,
++         rgba(0, 0, 0, 180));
++    text(out, x, y, summary, rgba(255, 230, 120, 255));
++    for (int graph = 0; graph < 2; ++graph) {
++        const float top = y + line * (graph ? 3 : 2) + height * graph;
++        double maximum = graph ? 33.333 : 120.0;
++        for (unsigned i = 0; i < count; ++i) {
++            double value = graph ? frames[i] : frames[i] > 0 ? 1000.0 / frames[i] : 0;
++            if (value > maximum) maximum = value;
++        }
++        char label[64];
++        snprintf(label, sizeof label, graph ? "Frametime: 0 - %.1f ms" : "FPS: 0 - %.0f", maximum);
++        text(out, x, top - line, label, rgba(210, 220, 235, 255));
++        rect(out, x, top, x + width, top + height, rgba(35, 42, 52, 210));
++        const float guide = top + height * (1.f - (float)((graph ? 16.666667 : 60.0) / maximum));
++        rect(out, x, guide, x + width, guide + 1, rgba(125, 130, 140, 180));
++        for (unsigned i = 0; i < count; ++i) {
++            const double value = graph ? frames[i] : frames[i] > 0 ? 1000.0 / frames[i] : 0;
++            const float left = x + width * (float)(128 - count + i) / 128.f;
++            rect(out, left, top + height * (1.f - (float)(value / maximum)),
++                 left + width / 128.f, top + height,
++                 graph ? rgba(100, 190, 255, 240) : rgba(120, 230, 160, 240));
++        }
++    }
++}
 diff --git a/libs/video/rsx_shader_spirv.cpp b/libs/video/rsx_shader_spirv.cpp
 index f9725b8..a92a63a 100644
 --- a/libs/video/rsx_shader_spirv.cpp
@@ -26645,7 +26686,7 @@ index acbaf12..6ca46a3 100644
  }
  
 diff --git a/runtime/ppu/ppu_loader.cpp b/runtime/ppu/ppu_loader.cpp
-index e73a151..cc6c8e2 100644
+index e73a151..bc83b9d 100644
 --- a/runtime/ppu/ppu_loader.cpp
 +++ b/runtime/ppu/ppu_loader.cpp
 @@ -377,8 +377,9 @@ static void sc_trace(uint64_t num, ppu_context* ctx, uint64_t a3, uint64_t a4,
@@ -28425,7 +28466,7 @@ index d857f30..48278e7 100644
                          "[spinlock] STUCK on 0x%08X after 200k spins: guest lr=0x%08X, "
                          "held by tid %lu, this is tid %lu%s\n",
 diff --git a/runtime/spu/spu_channels.c b/runtime/spu/spu_channels.c
-index 0b235d0..d0d21c1 100644
+index 0b235d0..1cbaf69 100644
 --- a/runtime/spu/spu_channels.c
 +++ b/runtime/spu/spu_channels.c
 @@ -13,6 +13,25 @@
@@ -29891,11 +29932,13 @@ index 0b235d0..d0d21c1 100644
          fprintf(stderr, "[SPU] branch-to-0 lr=0x%05X r1=0x%05X\n",
                  ctx->gpr[0]._u32[0] & SPU_LS_MASK, ctx->gpr[1]._u32[0] & SPU_LS_MASK);
  #ifdef _WIN32
-@@ -2769,3 +3667,43 @@ void spu_trace_rt(spu_context* ctx, uint32_t rt)
+@@ -2768,4 +3666,43 @@ void spu_trace_rt(spu_context* ctx, uint32_t rt)
+ 
  #ifdef __cplusplus
  }
- #endif
-+/* racacit: see spu_ls_write128. Names the lifted function (by its LS entry
+-#endif
+\ No newline at end of file
++#endif/* racacit: see spu_ls_write128. Names the lifted function (by its LS entry
 + * and image) whose code issued the store, from the caller's host address:
 + * the registry entry with the nearest host start at or below it. */
 +__attribute__((noinline)) void spu_ls_fill_guard(spu_context* ctx, uint32_t lsa)
@@ -30185,7 +30228,7 @@ index 7ac619f..f2a694a 100644
  }
  #endif
 diff --git a/runtime/spu/spu_coherency.h b/runtime/spu/spu_coherency.h
-index ca76ccd..381d0dd 100644
+index ca76ccd..37f0004 100644
 --- a/runtime/spu/spu_coherency.h
 +++ b/runtime/spu/spu_coherency.h
 @@ -53,7 +53,17 @@ void spu_coh_reserve(spu_context* ctx, uint32_t ea);
@@ -30207,7 +30250,7 @@ index ca76ccd..381d0dd 100644
  /* A store by the PPU landed on `ea`'s line. Raise SPU_EVENT_LR on every SPU
   * whose live reservation covers it, drop that reservation, and wake the host
 diff --git a/runtime/spu/spu_context.h b/runtime/spu/spu_context.h
-index 8d8e4aa..1d883ab 100644
+index 8d8e4aa..8de0b2c 100644
 --- a/runtime/spu/spu_context.h
 +++ b/runtime/spu/spu_context.h
 @@ -13,6 +13,9 @@
@@ -30859,7 +30902,7 @@ index 90f3221..82b413d 100644
      }
      case MFC_RdAtomicStat:
 diff --git a/runtime/spu/spu_drain.c b/runtime/spu/spu_drain.c
-index 931d3b3..a195b22 100644
+index 931d3b3..86e94a3 100644
 --- a/runtime/spu/spu_drain.c
 +++ b/runtime/spu/spu_drain.c
 @@ -6,7 +6,7 @@
@@ -31236,7 +31279,7 @@ index 931d3b3..a195b22 100644
 +#undef SPU_DRAIN_AT_RETURN
  }
 diff --git a/runtime/spu/spu_helpers.h b/runtime/spu/spu_helpers.h
-index 0fca7f5..90e0a7f 100644
+index 0fca7f5..a1b2905 100644
 --- a/runtime/spu/spu_helpers.h
 +++ b/runtime/spu/spu_helpers.h
 @@ -117,24 +117,98 @@ static inline u128 spu_mpy(u128 a, u128 b)  { u128 r; for(int i=0;i<4;i++) r._s3
@@ -32234,7 +32277,7 @@ index 0fca7f5..90e0a7f 100644
  /* ---- Phase 3: halfword/byte immediate logic ---- */
  static inline u128 spu_andhi(u128 a, int32_t imm) { u128 r; uint16_t v=(uint16_t)imm; for(int i=0;i<8;i++) r._u16[i]=a._u16[i]&v; return r; }
 diff --git a/runtime/spu/spu_interp.c b/runtime/spu/spu_interp.c
-index e9f59de..b8a7559 100644
+index e9f59de..081e940 100644
 --- a/runtime/spu/spu_interp.c
 +++ b/runtime/spu/spu_interp.c
 @@ -116,7 +116,8 @@ static int spu_step(spu_context* ctx) {
@@ -32553,7 +32596,7 @@ index 9e58833..3f1f664 100644
                    ctx.gpr[3]._u32[0], ctx.gpr[4]._u32[0], ctx.gpr[1]._u32[0],
                    image_id); }
 diff --git a/runtime/spu/spurs_policy.c b/runtime/spu/spurs_policy.c
-index 4f82063..0e00c85 100644
+index 4f82063..c4ad7ee 100644
 --- a/runtime/spu/spurs_policy.c
 +++ b/runtime/spu/spurs_policy.c
 @@ -32,10 +32,30 @@ extern int spu_run_with_halt(void (*)(spu_context*), spu_context*);
@@ -33026,7 +33069,7 @@ index 45235ea..693c7f7 100644
      if (timeout > ((1ull << 48) - 1)) timeout = (1ull << 48) - 1;
      sys_cond_info* c = acquire_cond(LV2_ARG_U32(ctx, 0));
 diff --git a/runtime/syscalls/sys_event.c b/runtime/syscalls/sys_event.c
-index 4240edf..101ec75 100644
+index 4240edf..7be5df0 100644
 --- a/runtime/syscalls/sys_event.c
 +++ b/runtime/syscalls/sys_event.c
 @@ -437,7 +437,7 @@ int64_t sys_event_queue_receive(ppu_context* ctx)
