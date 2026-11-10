@@ -65,3 +65,18 @@ git -C tools/ps3recomp add -N .
 They can go stale after big changes without breaking anything. `scripts/dev/hot_funcs.py` regenerates them.
 
 **Mods:** see `launcher/mods/dualsense_plus/mod.json` for the format.
+
+## Game versions and updates
+
+Generation fingerprints the decrypted `EBOOT.ELF` before creating output or applying address-specific hooks. `versions/profiles.json` identifies a region and executable version separately. A title ID alone does not identify the update's address layout.
+
+```bash
+# Identify and validate the input without generating code.
+python3 -I scripts/patch_lift.py --check-profile input/EBOOT.ELF
+# Optionally require an exact version during the normal pipeline.
+RACACIT_GAME_PROFILE=BCUS98124-1.00 PY="$PWD/tools/venv/Scripts/python -I" SKIP_DESKTOP=1 bash scripts/pipeline.sh
+```
+
+This branch builds the existing **BCUS98124 disc 1.00** layout. It also recognizes **BCES00511 disc 1.00** and **BCUS98124 update 1.20**, and stops with an explanation because their ports are not included here. Unknown executables and explicit profile mismatches stop before generation. There is no force option that applies another version's hooks.
+
+This is the identity and preflight prerequisite, not a completed multiple-version port. European-disc generation is proposed separately in [PR #26](https://github.com/HighDrexler/RACiT/pull/26); its fingerprint comes from that proposal and has not been checked against a local PAL dump. Both NA fingerprints were measured on decrypted original executables. Enabling another profile requires its own complete hook/data/SPU mappings, separate generated/build outputs, launcher selection, and runtime/save checks. Keep saves separate until cross-version compatibility has been checked. Do not infer an address offset from a neighbouring function: updates can change function bodies and data layouts.

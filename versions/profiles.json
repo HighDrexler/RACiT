@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "profiles": [
+    {
+      "id": "BCUS98124-1.00",
+      "title_id": "BCUS98124",
+      "app_version": "1.00",
+      "elf_sha256": "406bded328d9dbdfa9684ed392554ca34c76f4ed95aa21685f622d3ab2b04592",
+      "buildable": true,
+      "status": "Current source address layout"
+    },
+    {
+      "id": "BCES00511-1.00",
+      "title_id": "BCES00511",
+      "app_version": "1.00",
+      "elf_sha256": "6debdca0f181f35d98ebe23faabe2531b697c558b4e3384b06630173400674c1",
+      "buildable": false,
+      "status": "PAL port is proposed separately in https://github.com/HighDrexler/RACiT/pull/26"
+    },
+    {
+      "id": "BCUS98124-1.20",
+      "title_id": "BCUS98124",
+      "app_version": "1.20",
+      "elf_sha256": "dd304912f85cb9afc344f4a0d4e071d05a08b2af8de216d458b26060417549ad",
+      "buildable": false,
+      "status": "Update hook and SPU port is not included in this branch"
+    }
+  ]
+}
