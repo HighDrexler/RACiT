@@ -56,6 +56,7 @@ extern "C" uint32_t cellGcmResolveLocated(int local, uint32_t offset);   /* cell
 extern "C" volatile int g_racacit_ctx_quickselect;   /* cellPad.c: the quick select ring is open (TRIANGLE held) */
 extern "C" volatile unsigned g_racacit_level_changes;   /* stubs.cpp: level loads so far */
 
+extern "C" volatile int g_racit_keyboard_prompts;
 namespace {
 
 const uint16_t kL1x = 0x003C, kL2x = 0x0097, kR1x = 0x00F2, kR2x = 0x014D, kRowY = 0x0074;
@@ -201,9 +202,9 @@ const int kHudRows = (kKeyH + 3) / 4, kKeyBytes = kHudRows * kKeyCols * 16;
  * texture header the game loads right after the font's records: section
  * 0x5200, 32-byte entries, RSX local offset at +0, format at +6, width
  * at +0x18). Host pointer to a DXT5 page and its pitch, or NULL. */
-const uint8_t* font_page(uint32_t rec, uint32_t* pitch)
+const uint8_t* font_page_at(uint32_t rec, int page, uint32_t* pitch)
 {
-    const int page = be16(vm_base + rec + 64 + 6);   /* the E00B record's page */
+    /* Explicit page permits face, stick and keyboard glyphs too. */   /* the E00B record's page */
     const uint32_t a0 = (rec + 255u) & ~255u, re = readable_end(a0);
     for (uint32_t a = a0, end = rec + 0x10000u; a < end; a += 16) {
         if (a + 0x30u > re) return nullptr;
@@ -221,6 +222,8 @@ const uint8_t* font_page(uint32_t rec, uint32_t* pitch)
     }
     return nullptr;
 }
+
+const uint8_t* font_page(uint32_t rec, uint32_t* pitch) { return font_page_at(rec, be16(vm_base + rec + 70), pitch); }
 
 struct {
     uint32_t entry, ea;                 /* the table entry; the picture's guest address */
@@ -519,6 +522,8 @@ void badge_sync(int want)
 
 /* Every committed page of guest memory, 16-byte steps: the records sit at
  * 16-byte offsets in a font.dat that the game loads 16-byte aligned. */
+#include "desktop_prompts.h"
+
 void scan(void)
 {
     const unsigned long long t0 = GetTickCount64(); s_lf_calls = 0;
@@ -578,12 +583,14 @@ DWORD WINAPI prompts_thread(LPVOID)
             if (next < sizeof kScanAt / sizeof kScanAt[0] && t == kScanAt[next]) { scan(); next++; } }
         static int force = -2;   /* RACACIT_PROMPT_LAYOUT=<0|1|2>: a layout for tests */
         if (force == -2) { const char* e = getenv("RACACIT_PROMPT_LAYOUT"); force = e && *e ? atoi(e) : -1; }
-        const int layout = force >= 0 ? force : g_racacit_pad_layout;
+        const bool keyboard = g_racit_keyboard_prompts != 0;
+        const int layout = keyboard ? 0 : force >= 0 ? force : g_racacit_pad_layout;
         /* R1 <-> R2 with the layout swapped (R2 fires); L1 <-> L2 only while
          * the quick select ring is open, where L2 / R2 page (cellPad.c). */
         static int force_qs = -1;   /* RACACIT_PROMPT_QS=1: the quick select state on (tests: scripted input bypasses cellPad's check) */
         if (force_qs < 0) { const char* e = getenv("RACACIT_PROMPT_QS"); force_qs = e && *e == '1'; }
         const int want_r = layout != 0, want_l = layout != 0 && (g_racacit_ctx_quickselect || force_qs);
+        if (!keyboard) desktop_prompts(false);
         int changed = 0;
         for (int i = 0; i < s_nfont; i++) {
             const int st = font_state(s_font[i]);
@@ -592,6 +599,7 @@ DWORD WINAPI prompts_thread(LPVOID)
             if (has_l != want_l) { swap_records(s_font[i], s_font[i] + 16); changed = 1; }        /* L1 <-> L2 */
             if (has_r != want_r) { swap_records(s_font[i] + 64, s_font[i] + 80); changed = 1; }   /* R1 <-> R2 */
         }
+        if (keyboard) desktop_prompts(true);
         if (!ms) { hud_sync(want_r); badge_sync(want_r); }
         if ((changed && !want_l) || (unsigned)layout != last_layout)
             if (s_nfont) fprintf(stderr, "[prompts] controller layout %d: shoulder buttons in the text %s%c", layout,

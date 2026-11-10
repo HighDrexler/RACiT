@@ -2219,7 +2219,7 @@ index 5166a47..8c83b67 100644
                     (uint32_t)(uintptr_t)buf,
                     (unsigned long long)nbytes, (unsigned long long)bytes_read);
 diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
-index f2b4c11..3c7aa36 100644
+index f2b4c11..d7e93a5 100644
 --- a/libs/input/cellPad.c
 +++ b/libs/input/cellPad.c
 @@ -12,11 +12,13 @@
@@ -2860,7 +2860,7 @@ index f2b4c11..3c7aa36 100644
  
          s_host_state[i].buttons = btns;
  
-@@ -356,26 +915,264 @@ static void pad_poll_sdl2(void)
+@@ -356,26 +915,258 @@ static void pad_poll_sdl2(void)
          s_host_state[i].press_square   = (btns & CELL_PAD_CTRL_SQUARE)   ? 255 : 0;
          s_host_state[i].press_l1       = (btns & CELL_PAD_CTRL_L1)       ? 255 : 0;
          s_host_state[i].press_r1       = (btns & CELL_PAD_CTRL_R1)       ? 255 : 0;
@@ -2899,9 +2899,9 @@ index f2b4c11..3c7aa36 100644
 +    { "CIRCLE",   CELL_PAD_CTRL_CIRCLE,   "E,Backspace" },
 +    { "SQUARE",   CELL_PAD_CTRL_SQUARE,   "F" },
 +    { "TRIANGLE", CELL_PAD_CTRL_TRIANGLE, "Q" },
-+    { "L1",       CELL_PAD_CTRL_L1,       "Mouse3" },          /* strafe / aim (right mouse button) */
++    { "L1",       CELL_PAD_CTRL_L1,       "Left Ctrl" },          /* strafe / aim (right mouse button) */
 +    { "R1",       CELL_PAD_CTRL_R1,       "Mouse1" },          /* fire (left mouse button) */
-+    { "L2",       CELL_PAD_CTRL_L2,       "Left Ctrl" },
++    { "L2",       CELL_PAD_CTRL_L2,       "Mouse3" },
 +    { "R2",       CELL_PAD_CTRL_R2,       "Left Shift" },
 +    { "L3",       CELL_PAD_CTRL_L3,       "V" },
 +    { "R3",       CELL_PAD_CTRL_R3,       "Mouse2,B" },        /* middle mouse button */
@@ -2924,6 +2924,7 @@ index f2b4c11..3c7aa36 100644
 +/* An input: a scancode (< 512), or 512 + mouse button 1-5, or 520/521 the wheel. */
 +#define KB_MAX_KEYS 4
 +static int s_kb_keys[KB_N][KB_MAX_KEYS];
++volatile int g_racit_keyboard_prompts = 1;
 +static int s_kbm_on = -1;             /* allowed this run (PAD_NO_KEYBOARD) */
 +extern volatile int g_racacit_kbm_on;   /* rsx_host_ui.c: capture the mouse on a click */
 +
@@ -2990,6 +2991,7 @@ index f2b4c11..3c7aa36 100644
 +    hs->connected = 1;   /* with no controller the keyboard is the pad (pad_poll_sdl2 left it neutral) */
 +    u16 btns = 0;
 +    for (int k = 0; k < KB_N; k++) if (held[k] && k_kb[k].btn) btns |= k_kb[k].btn;
++    if (btns || dx || dy || wheel || mb || held[KB_LS_UP] || held[KB_LS_DOWN] || held[KB_LS_LEFT] || held[KB_LS_RIGHT]) g_racit_keyboard_prompts = 1;
 +    hs->buttons |= btns;
 +    if (btns & CELL_PAD_CTRL_L2) hs->trigger_l2 = 255;
 +    if (btns & CELL_PAD_CTRL_R2) hs->trigger_r2 = 255;
@@ -3014,34 +3016,26 @@ index f2b4c11..3c7aa36 100644
 +     * a slow move still turns; smoothed over a few polls (mouse reports come
 +     * in bursts). */
 +    {
-+        static Uint64 last; static float sx, sy;
-+        const Uint64 now = SDL_GetPerformanceCounter();
-+        float dt = last ? (float)((double)(now - last) * 1000.0 / (double)SDL_GetPerformanceFrequency()) : 16.0f;   /* ms */
-+        last = now;
-+        if (dt < 1.0f) dt = 1.0f;
-+        if (dt > 50.0f) dt = 50.0f;
-+        float vx = 0.0f, vy = 0.0f;
-+        if (captured && (dx || dy)) {
-+            const float k = 0.11f * (float)opt.mouse_sens / 100.0f, dz = 0.22f;
-+            float ax = fabsf((float)dx) / dt * k, ay = fabsf((float)dy) / dt * k;
-+            if (ax > 0.0f) ax = dz + (1.0f - dz) * (ax > 1.0f ? 1.0f : ax);
-+            if (ay > 0.0f) ay = dz + (1.0f - dz) * (ay > 1.0f ? 1.0f : ay);
-+            vx = dx < 0 ? -ax : ax; vy = dy < 0 ? -ay : ay;
-+            if (opt.mouse_invert) vy = -vy;
-+        }
-+        sx += (vx - sx) * 0.6f; sy += (vy - sy) * 0.6f;
-+        if (fabsf(sx) < 0.02f) sx = 0.0f;
-+        if (fabsf(sy) < 0.02f) sy = 0.0f;
-+        float rx = sx, ry = sy;
++        struct RacitMouseState { uint64_t epoch_ns; int64_t dx,dy; float x,y; };
++        extern void racit_mouse_step(struct RacitMouseState*,uint64_t,int,int,int,float,int);
++        extern void racit_camera_feed(uint64_t,int,int,int,float,int);
++        extern int racit_camera_follow_active(uint64_t);
++        static struct RacitMouseState motion;
++        const uint64_t now_ns=(uint64_t)((double)SDL_GetPerformanceCounter()*1000000000.0/(double)SDL_GetPerformanceFrequency());
++        racit_mouse_step(&motion,now_ns,dx,dy,captured,(float)opt.mouse_sens,opt.mouse_invert);
++        racit_camera_feed(now_ns,dx,dy,captured,(float)opt.mouse_sens,opt.mouse_invert);
++        const int direct_follow=racit_camera_follow_active(now_ns);
++        float rx=direct_follow ? 0.0f : motion.x, ry=direct_follow ? 0.0f : motion.y;
 +        const float kx = (float)(held[KB_RS_RIGHT] - held[KB_RS_LEFT]), ky = (float)(held[KB_RS_DOWN] - held[KB_RS_UP]);
++        if (kx || ky) racit_camera_feed(now_ns,0,0,0,(float)opt.mouse_sens,opt.mouse_invert);
 +        if (!rx && !ry && (kx || ky)) { rx = kx * 0.8f; ry = ky * 0.8f; }
 +        if (rx || ry) {
 +            hs->analog_rx = (u8)(128.0f + 127.0f * (rx > 1.0f ? 1.0f : rx < -1.0f ? -1.0f : rx));
 +            hs->analog_ry = (u8)(128.0f + 127.0f * (ry > 1.0f ? 1.0f : ry < -1.0f ? -1.0f : ry));
 +        }
-     }
- }
- 
++    }
++}
++
 +static void pad_poll_sdl_fallbacks(void)
 +{
 +    /* On-screen touch controls drive port 0 while no gamepad is attached. */
@@ -3069,9 +3063,9 @@ index f2b4c11..3c7aa36 100644
 +        hs->press_up = (b & CELL_PAD_CTRL_UP) ? 255 : 0;  hs->press_down  = (b & CELL_PAD_CTRL_DOWN)  ? 255 : 0;
 +        hs->press_left = (b & CELL_PAD_CTRL_LEFT) ? 255 : 0; hs->press_right = (b & CELL_PAD_CTRL_RIGHT) ? 255 : 0;
 +        hs->press_l1 = (b & CELL_PAD_CTRL_L1) ? 255 : 0;  hs->press_r1 = (b & CELL_PAD_CTRL_R1) ? 255 : 0;
-+    }
-+}
-+
+     }
+ }
+ 
 +/* Extra controller mappings: gamecontrollerdb.txt (SDL's format, e.g. the
 + * community SDL_GameControllerDB file) next to the exe, in the working folder,
 + * or RACACIT_CONTROLLER_DB=<file>. SDL_GAMECONTROLLERCONFIG works too. SDL
@@ -3133,7 +3127,7 @@ index f2b4c11..3c7aa36 100644
  }
  
  static void pad_shutdown_backend(void)
-@@ -421,6 +1218,62 @@ static unsigned long long pad_now_ms(void)
+@@ -421,6 +1212,62 @@ static unsigned long long pad_now_ms(void)
  #endif
  }
  
@@ -3196,7 +3190,7 @@ index f2b4c11..3c7aa36 100644
  static void pad_poll_backend(void)
  {
      /* Benign race: two threads may poll in the same tick. That costs one extra
-@@ -439,9 +1292,27 @@ static void pad_poll_backend(void)
+@@ -439,9 +1286,33 @@ static void pad_poll_backend(void)
  #elif PAD_BACKEND_SDL2
      pad_poll_sdl2();
  #endif
@@ -3218,6 +3212,12 @@ index f2b4c11..3c7aa36 100644
 +          s_host_state[i].sensor_x = s_host_state[i].sensor_y = s_host_state[i].sensor_z = s_host_state[i].sensor_g = 512;
 +      } }
 +#if PAD_BACKEND_SDL2
++    if (!ign) {
++        const PadHostState* h = &s_host_state[0];
++        if (h->connected && (h->buttons || h->analog_lx < 100 || h->analog_lx > 156 ||
++            h->analog_ly < 100 || h->analog_ly > 156 || h->analog_rx < 100 || h->analog_rx > 156 ||
++            h->analog_ry < 100 || h->analog_ry > 156)) g_racit_keyboard_prompts = 0;
++    }
 +    pad_poll_kbm(ign);
 +#endif
 +    pad_note_human();
@@ -6224,7 +6224,7 @@ index 071b9ec..a241354 100644
  static int  s_boot_checked = 0;
  static u32  s_game_type = CELL_GAME_GAMETYPE_DISC;
 diff --git a/libs/system/cellSaveData.c b/libs/system/cellSaveData.c
-index 79ea8ca..0a73c04 100644
+index 79ea8ca..e237e75 100644
 --- a/libs/system/cellSaveData.c
 +++ b/libs/system/cellSaveData.c
 @@ -29,6 +29,17 @@
@@ -18713,7 +18713,7 @@ index 0000000..eb0f6d0
 +
 +#endif /* PS3RECOMP_RSX_HOST_UI_H */
 diff --git a/libs/video/rsx_live_draw.c b/libs/video/rsx_live_draw.c
-index ef661c0..57bc5b8 100644
+index ef661c0..7729bd6 100644
 --- a/libs/video/rsx_live_draw.c
 +++ b/libs/video/rsx_live_draw.c
 @@ -1368,6 +1368,7 @@ static void decode_render_state(render_state_t* rs)
@@ -26645,7 +26645,7 @@ index acbaf12..6ca46a3 100644
  }
  
 diff --git a/runtime/ppu/ppu_loader.cpp b/runtime/ppu/ppu_loader.cpp
-index e73a151..cc6c8e2 100644
+index e73a151..bc83b9d 100644
 --- a/runtime/ppu/ppu_loader.cpp
 +++ b/runtime/ppu/ppu_loader.cpp
 @@ -377,8 +377,9 @@ static void sc_trace(uint64_t num, ppu_context* ctx, uint64_t a3, uint64_t a4,
@@ -28425,7 +28425,7 @@ index d857f30..48278e7 100644
                          "[spinlock] STUCK on 0x%08X after 200k spins: guest lr=0x%08X, "
                          "held by tid %lu, this is tid %lu%s\n",
 diff --git a/runtime/spu/spu_channels.c b/runtime/spu/spu_channels.c
-index 0b235d0..d0d21c1 100644
+index 0b235d0..1cbaf69 100644
 --- a/runtime/spu/spu_channels.c
 +++ b/runtime/spu/spu_channels.c
 @@ -13,6 +13,25 @@
@@ -29891,11 +29891,13 @@ index 0b235d0..d0d21c1 100644
          fprintf(stderr, "[SPU] branch-to-0 lr=0x%05X r1=0x%05X\n",
                  ctx->gpr[0]._u32[0] & SPU_LS_MASK, ctx->gpr[1]._u32[0] & SPU_LS_MASK);
  #ifdef _WIN32
-@@ -2769,3 +3667,43 @@ void spu_trace_rt(spu_context* ctx, uint32_t rt)
+@@ -2768,4 +3666,43 @@ void spu_trace_rt(spu_context* ctx, uint32_t rt)
+ 
  #ifdef __cplusplus
  }
- #endif
-+/* racacit: see spu_ls_write128. Names the lifted function (by its LS entry
+-#endif
+\ No newline at end of file
++#endif/* racacit: see spu_ls_write128. Names the lifted function (by its LS entry
 + * and image) whose code issued the store, from the caller's host address:
 + * the registry entry with the nearest host start at or below it. */
 +__attribute__((noinline)) void spu_ls_fill_guard(spu_context* ctx, uint32_t lsa)
@@ -30185,7 +30187,7 @@ index 7ac619f..f2a694a 100644
  }
  #endif
 diff --git a/runtime/spu/spu_coherency.h b/runtime/spu/spu_coherency.h
-index ca76ccd..381d0dd 100644
+index ca76ccd..37f0004 100644
 --- a/runtime/spu/spu_coherency.h
 +++ b/runtime/spu/spu_coherency.h
 @@ -53,7 +53,17 @@ void spu_coh_reserve(spu_context* ctx, uint32_t ea);
@@ -30207,7 +30209,7 @@ index ca76ccd..381d0dd 100644
  /* A store by the PPU landed on `ea`'s line. Raise SPU_EVENT_LR on every SPU
   * whose live reservation covers it, drop that reservation, and wake the host
 diff --git a/runtime/spu/spu_context.h b/runtime/spu/spu_context.h
-index 8d8e4aa..1d883ab 100644
+index 8d8e4aa..8de0b2c 100644
 --- a/runtime/spu/spu_context.h
 +++ b/runtime/spu/spu_context.h
 @@ -13,6 +13,9 @@
@@ -30859,7 +30861,7 @@ index 90f3221..82b413d 100644
      }
      case MFC_RdAtomicStat:
 diff --git a/runtime/spu/spu_drain.c b/runtime/spu/spu_drain.c
-index 931d3b3..a195b22 100644
+index 931d3b3..86e94a3 100644
 --- a/runtime/spu/spu_drain.c
 +++ b/runtime/spu/spu_drain.c
 @@ -6,7 +6,7 @@
@@ -31236,7 +31238,7 @@ index 931d3b3..a195b22 100644
 +#undef SPU_DRAIN_AT_RETURN
  }
 diff --git a/runtime/spu/spu_helpers.h b/runtime/spu/spu_helpers.h
-index 0fca7f5..90e0a7f 100644
+index 0fca7f5..a1b2905 100644
 --- a/runtime/spu/spu_helpers.h
 +++ b/runtime/spu/spu_helpers.h
 @@ -117,24 +117,98 @@ static inline u128 spu_mpy(u128 a, u128 b)  { u128 r; for(int i=0;i<4;i++) r._s3
@@ -32234,7 +32236,7 @@ index 0fca7f5..90e0a7f 100644
  /* ---- Phase 3: halfword/byte immediate logic ---- */
  static inline u128 spu_andhi(u128 a, int32_t imm) { u128 r; uint16_t v=(uint16_t)imm; for(int i=0;i<8;i++) r._u16[i]=a._u16[i]&v; return r; }
 diff --git a/runtime/spu/spu_interp.c b/runtime/spu/spu_interp.c
-index e9f59de..b8a7559 100644
+index e9f59de..081e940 100644
 --- a/runtime/spu/spu_interp.c
 +++ b/runtime/spu/spu_interp.c
 @@ -116,7 +116,8 @@ static int spu_step(spu_context* ctx) {
@@ -32553,7 +32555,7 @@ index 9e58833..3f1f664 100644
                    ctx.gpr[3]._u32[0], ctx.gpr[4]._u32[0], ctx.gpr[1]._u32[0],
                    image_id); }
 diff --git a/runtime/spu/spurs_policy.c b/runtime/spu/spurs_policy.c
-index 4f82063..0e00c85 100644
+index 4f82063..c4ad7ee 100644
 --- a/runtime/spu/spurs_policy.c
 +++ b/runtime/spu/spurs_policy.c
 @@ -32,10 +32,30 @@ extern int spu_run_with_halt(void (*)(spu_context*), spu_context*);
@@ -33026,7 +33028,7 @@ index 45235ea..693c7f7 100644
      if (timeout > ((1ull << 48) - 1)) timeout = (1ull << 48) - 1;
      sys_cond_info* c = acquire_cond(LV2_ARG_U32(ctx, 0));
 diff --git a/runtime/syscalls/sys_event.c b/runtime/syscalls/sys_event.c
-index 4240edf..101ec75 100644
+index 4240edf..7be5df0 100644
 --- a/runtime/syscalls/sys_event.c
 +++ b/runtime/syscalls/sys_event.c
 @@ -437,7 +437,7 @@ int64_t sys_event_queue_receive(ppu_context* ctx)
