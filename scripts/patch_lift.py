@@ -502,7 +502,7 @@ def patch_file(path):
         fn = src[a:end]
         changes = (
             ('void func_000459D4(ppu_context* ctx) {',
-             'void func_000459D4(ppu_context* ctx) {\n        double mouse_angles[2] = {};\n        const int mouse_direct = racit_camera_take(mouse_angles, SDL_GetPerformanceCounter() * (1000000000.0 / SDL_GetPerformanceFrequency()));'),
+             'void func_000459D4(ppu_context* ctx) {\n        double mouse_angles[2] = {};\n        const int mouse_direct = racit_camera_take(mouse_angles,(uint64_t)((double)SDL_GetPerformanceCounter()*1000000000.0/(double)SDL_GetPerformanceFrequency()));'),
             ('        ctx->lr = 0x00045D6C; func_00633C34(ctx); DRAIN_TRAMPOLINE(ctx);',
              '        if (mouse_direct) ctx->fpr[1] = -mouse_angles[0];\n        ctx->lr = 0x00045D6C; func_00633C34(ctx); DRAIN_TRAMPOLINE(ctx);'),
             ('        ctx->fpr[3] = ppu_fp_single(ppu_fsub(ctx->fpr[31], ctx->fpr[1]));',
