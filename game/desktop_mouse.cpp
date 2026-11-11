@@ -1,4 +1,4 @@
-/* Desktop mouse runtime for RACiT. C ABI; C++11 atomics, no Rust dependency.
+/* Desktop mouse runtime for RACiT. C ABI and C++11 atomics.
  * Camera displacement is consumed once per follow-camera update. */
 #include <atomic>
 #include <cmath>
