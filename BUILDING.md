@@ -44,6 +44,59 @@ Put the exe in a launcher's `builds\v<number>\` folder, next to a `version.txt` 
 number. Play starts the newest build. Settings, saves and `log.txt` live in the launcher's
 `data\` folder.
 
+## macOS Apple Silicon build
+
+Use Xcode Command Line Tools, Python 3.12 or later, CMake, Ninja, SDL2, zlib,
+Vulkan headers, the Vulkan loader, MoltenVK, glslang and SPIRV-Cross. The Vulkan
+SDK and package-manager installations can supply these libraries. Pass their
+installation prefixes through `CMAKE_PREFIX_PATH` when CMake needs help finding
+them. CMake discovers the loader library and SDL uses that same library.
+
+The ordinary pipeline lifts the NA disc executable and builds the game for the
+host architecture. Supply the same private `input/EBOOT.ELF` and
+`input/libsre.prx` described above, plus the complete decrypted disc directory
+containing `PS3_GAME` for play. The graphical launcher currently targets Windows.
+
+```bash
+# Create a local Python environment and install the generator dependencies.
+python3 -m venv tools/venv-macos
+tools/venv-macos/bin/python -m pip install \
+  capstone==5.0.9 construct==2.10.70 pycryptodome==3.24.1 \
+  tabulate==0.10.0 tqdm==4.70.1
+
+# Prepare the pinned ps3recomp runtime with this repository's runtime patch.
+bash scripts/setup_macos.sh
+
+# Build through the normal pipeline. Two workers limit peak memory use.
+PY="$PWD/tools/venv-macos/bin/python -I" CMAKE_BUILD_PARALLEL_LEVEL=2 \
+  bash scripts/pipeline.sh
+```
+
+`BUILD_DIR` selects an external build directory. `PS3RECOMP_VULKAN_INCLUDE_DIR`
+selects Vulkan headers explicitly. `PS3RECOMP_VULKAN_LIBRARY` overrides the
+discovered loader at run time. The loader's normal `VK_DRIVER_FILES` setting can
+select an installed MoltenVK ICD when needed.
+
+Run from the repository root with the disc directory and a persistent data
+directory selected explicitly.
+
+```bash
+mkdir -p user-data
+export PS3_VFS_ROOT="/path/to/decrypted-disc-directory"
+export PS3_HDD0_ROOT="$PWD/user-data/hdd0"
+export RACACIT_SETTINGS_FILE="$PWD/user-data/settings.txt"
+export RSX_SHADER_CACHE="$PWD/user-data/shaders.bin"
+export RSX_PIPELINE_CACHE="$PWD/user-data/pipelines.bin"
+export RSX_PIPELINE_LIST="$PWD/user-data/pipeline-list.bin"
+game/build/RaCACiTRecomp "$PWD/input/EBOOT.ELF"
+```
+
+The Apple Vulkan entry point starts the window on the process main thread and
+runs guest code on its own large-stack thread. It defaults to safe MoltenVK
+shader math and synchronous pipelines to preserve complete rendering passes.
+`PS3RECOMP_VK_WINDOW=0` selects the existing offscreen mode. Save progress through
+the game's normal save/checkpoint system before closing the window.
+
 ## Where things are
 
 | Path | What it is |
