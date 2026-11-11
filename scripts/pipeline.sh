@@ -27,7 +27,7 @@ RECOMP="$OUT/recomp"
 SPU="$OUT/spu"
 PRX="$OUT/prx"
 HOST="$OUT/host"
-BUILD="$OUT/build"
+BUILD="${BUILD_DIR:-$OUT/build}"
 export RACACIT_GAME_PROFILE="$PROFILE" RACACIT_OUT="$OUT" RACACIT_SPU_DIR="$SPU" RACACIT_PRX_DIR="$PRX"
 export RACACIT_ELF="$ELF"
 mkdir -p "$OUT" "$RECOMP" "$SPU" "$PRX" "$HOST"
@@ -92,9 +92,18 @@ $PY "$ROOT/scripts/patch_lift.py" "$RECOMP" --elf "$ELF" --profile "$PROFILE"
 [ "${SKIP_DESKTOP:-0}" = 1 ] && { echo "Lifted: $RECOMP and $SPU"; exit 0; }
 
 echo "== 5/5 Desktop build"
-cmake -S "$ROOT/game" -B "$BUILD" -G "${CMAKE_GENERATOR:-Ninja}" -DCMAKE_BUILD_TYPE=Release \
-  -DPS3RECOMP_DIR="$PS3R" -DRECOMP_DIR="$RECOMP" -DSPU_DIR="$SPU" -DPRX_DIR="$PRX" -DHOST_DIR="$HOST" \
-  -DPS3RECOMP_VULKAN_INCLUDE_DIR="$ROOT/tools/Vulkan-Headers/include" -DPS3RECOMP_RSX_VULKAN=ON \
-  -DCMAKE_PREFIX_PATH="$ROOT/tools/sdl2"
+CMAKE_ARGS=(-DPS3RECOMP_DIR="$PS3R" -DRECOMP_DIR="$RECOMP" -DSPU_DIR="$SPU"
+            -DPRX_DIR="$PRX" -DHOST_DIR="$HOST" -DPS3RECOMP_RSX_VULKAN=ON)
+if [ -n "${PS3RECOMP_VULKAN_INCLUDE_DIR:-}" ]; then
+  CMAKE_ARGS+=(-DPS3RECOMP_VULKAN_INCLUDE_DIR="$PS3RECOMP_VULKAN_INCLUDE_DIR")
+elif [ -d "$ROOT/tools/Vulkan-Headers/include" ]; then
+  CMAKE_ARGS+=(-DPS3RECOMP_VULKAN_INCLUDE_DIR="$ROOT/tools/Vulkan-Headers/include")
+fi
+if [ -n "${CMAKE_PREFIX_PATH:-}" ]; then
+  CMAKE_ARGS+=(-DCMAKE_PREFIX_PATH="$CMAKE_PREFIX_PATH")
+elif [ -d "$ROOT/tools/sdl2" ]; then
+  CMAKE_ARGS+=(-DCMAKE_PREFIX_PATH="$ROOT/tools/sdl2")
+fi
+cmake -S "$ROOT/game" -B "$BUILD" -G "${CMAKE_GENERATOR:-Ninja}" -DCMAKE_BUILD_TYPE=Release "${CMAKE_ARGS[@]}"
 cmake --build "$BUILD" --parallel "$JOBS"
 echo "Done: $BUILD/RaCACiTRecomp"

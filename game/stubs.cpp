@@ -1148,7 +1148,7 @@ extern "C" volatile int g_racacit_watch_img;
 extern "C" volatile unsigned long long g_racacit_watch_t;
 static thread_local uint32_t t_watch_obj;
 /* The wait the main thread is in (its key), 0 = none: PS3_SAMPLE_INWAIT. */
-#ifdef __ANDROID__
+#ifndef _WIN32
 /* Defined by the Windows sampler (ppu_loader.cpp); here only this file uses it. */
 extern "C" { volatile uint32_t g_racacit_main_wait_lr = 0; }
 #else
