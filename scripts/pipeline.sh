@@ -97,6 +97,6 @@ if [ -n "${CMAKE_PREFIX_PATH:-}" ]; then
 elif [ -d "$ROOT/tools/sdl2" ]; then
   CMAKE_ARGS+=(-DCMAKE_PREFIX_PATH="$ROOT/tools/sdl2")
 fi
-cmake -S "$ROOT/game" -B "$BUILD_DIR" -G Ninja -DCMAKE_BUILD_TYPE=Release "${CMAKE_ARGS[@]}"
+cmake -S "$ROOT/game" -B "$BUILD_DIR" -G "${CMAKE_GENERATOR:-Ninja}" -DCMAKE_BUILD_TYPE=Release "${CMAKE_ARGS[@]}"
 cmake --build "$BUILD_DIR" --parallel "$JOBS"
 echo "Done: $BUILD_DIR/RaCACiTRecomp"

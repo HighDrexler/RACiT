@@ -46,7 +46,7 @@ number. Play starts the newest build. Settings, saves and `log.txt` live in the 
 
 ## macOS Apple Silicon build
 
-Use Xcode Command Line Tools, Python 3.12 or later, CMake, Ninja, SDL2, zlib,
+Use Xcode Command Line Tools, Python 3.12 or later, CMake with Make or Ninja, SDL2, zlib,
 Vulkan headers, the Vulkan loader, MoltenVK, glslang and SPIRV-Cross. The Vulkan
 SDK and package-manager installations can supply these libraries. Pass their
 installation prefixes through `CMAKE_PREFIX_PATH` when CMake needs help finding
@@ -58,21 +58,17 @@ host architecture. Supply the same private `input/EBOOT.ELF` and
 containing `PS3_GAME` for play. The graphical launcher currently targets Windows.
 
 ```bash
-# Create a local Python environment and install the generator dependencies.
-python3 -m venv tools/venv-macos
-tools/venv-macos/bin/python -m pip install \
-  capstone==5.0.9 construct==2.10.70 pycryptodome==3.24.1 \
-  tabulate==0.10.0 tqdm==4.70.1
-
 # Prepare the pinned ps3recomp runtime with this repository's runtime patch.
 bash scripts/setup_macos.sh
 
 # Build through the normal pipeline. Two workers limit peak memory use.
-PY="$PWD/tools/venv-macos/bin/python -I" CMAKE_BUILD_PARALLEL_LEVEL=2 \
+PY="python3 -I" CMAKE_BUILD_PARALLEL_LEVEL=2 CMAKE_GENERATOR="Unix Makefiles" \
   bash scripts/pipeline.sh
 ```
 
-`BUILD_DIR` selects an external build directory. `PS3RECOMP_VULKAN_INCLUDE_DIR`
+`BUILD_DIR` selects an external build directory. `CMAKE_GENERATOR` selects Make
+or Ninja, whose default is retained when the variable is unset.
+`PS3RECOMP_VULKAN_INCLUDE_DIR`
 selects Vulkan headers explicitly. `PS3RECOMP_VULKAN_LIBRARY` overrides the
 discovered loader at run time. The loader's normal `VK_DRIVER_FILES` setting can
 select an installed MoltenVK ICD when needed.
