@@ -23,7 +23,7 @@
       "app_version": "1.20",
       "elf_sha256": "dd304912f85cb9afc344f4a0d4e071d05a08b2af8de216d458b26060417549ad",
       "buildable": false,
-      "status": "Update hook and SPU port is not included in this branch"
+      "status": "PPU hooks are available; version-specific host and SPU generation remain pending"
     }
   ]
 }

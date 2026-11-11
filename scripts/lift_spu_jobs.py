@@ -15,6 +15,8 @@ Usage: scripts/lift_spu_jobs.py [input/EBOOT.ELF] [--only 0xB9B580,0xB8A980,...]
 import os, struct, subprocess, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+OUT_ROOT = os.environ.get('RACACIT_OUT', os.path.join(ROOT, 'out'))
+SPU_ROOT = os.environ.get('RACACIT_SPU_DIR', os.path.join(ROOT, 'game', 'spu'))
 PS3R = os.path.join(ROOT, "tools", "ps3recomp", "tools")
 JOB_BASE = 0x100
 IMAGE_ID_BASE = 200
@@ -135,8 +137,8 @@ def patch_igpm_clear(path):
 
 
 def main_extra(d, sg):
-    out_raw = os.path.join(ROOT, "out", "spu_jobs")
-    spu_dir = os.path.join(ROOT, "game", "spu")
+    out_raw = os.path.join(OUT_ROOT, "spu_jobs")
+    spu_dir = SPU_ROOT
     os.makedirs(out_raw, exist_ok=True)
     decls, regs = [], []
     for name, ea, size, base, img in EXTRA_BLOCKS:
@@ -215,8 +217,8 @@ def all_headers(d, sg):
 def main_sub(d, sg):
     """Job modules loaded above a parent job (scripts/spu_submodules.txt), each
     lifted at the LS base it was seen at -> game/spu/spu_sub.c."""
-    out_raw = os.path.join(ROOT, "out", "spu_jobs")
-    spu_dir = os.path.join(ROOT, "game", "spu")
+    out_raw = os.path.join(OUT_ROOT, "spu_jobs")
+    spu_dir = SPU_ROOT
     os.makedirs(out_raw, exist_ok=True)
     heads = all_headers(d, sg)
     starts = read_starts()
@@ -308,8 +310,8 @@ def main():
     d = open(elf, "rb").read()
     sg = segs(d)
     heads = find_headers(d, sg)
-    out_raw = os.path.join(ROOT, "out", "spu_jobs")
-    spu_dir = os.path.join(ROOT, "game", "spu")
+    out_raw = os.path.join(OUT_ROOT, "spu_jobs")
+    spu_dir = SPU_ROOT
     os.makedirs(out_raw, exist_ok=True)
     decls, regs, blobs = [], [], []
     starts = read_starts()

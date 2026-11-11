@@ -17,6 +17,8 @@ Usage: scripts/lift_policy_modules.py input/EBOOT.ELF
 import json, os, struct, subprocess, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+OUT_ROOT = os.environ.get('RACACIT_OUT', os.path.join(ROOT, 'out'))
+SPU_ROOT = os.environ.get('RACACIT_SPU_DIR', os.path.join(ROOT, 'game', 'spu'))
 PS3R = os.path.join(ROOT, "tools", "ps3recomp", "tools")
 PM_BASE = 0xA00
 IMAGE_ID_BASE = 100   # clear of build_spu_workloads' 1..N
@@ -52,8 +54,8 @@ def read_guest(elf_path, addr, size):
 
 def main():
     elf = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "input", "EBOOT.ELF")
-    out_raw = os.path.join(ROOT, "out", "policy_modules")
-    spu_dir = os.path.join(ROOT, "game", "spu")
+    out_raw = os.path.join(OUT_ROOT, "policy_modules")
+    spu_dir = SPU_ROOT
     os.makedirs(out_raw, exist_ok=True)
     regs, decls, manifest = [], [], []
     for n, (name, addr, size) in enumerate(MODULES):

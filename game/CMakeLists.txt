@@ -175,9 +175,11 @@ if(PORT_ENABLE_SPU)
 endif()
 
 # Real libsre (cellSpurs) LLE -- present only after scripts/lift_libsre.py.
+set(PRX_DIR "${CMAKE_CURRENT_SOURCE_DIR}/prx" CACHE PATH
+    "Directory holding firmware-derived PPU sources for this game build")
 file(GLOB LIBSRE_SOURCES CONFIGURE_DEPENDS
-    "${CMAKE_CURRENT_SOURCE_DIR}/prx/libsre/*.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/prx/libsre_module.c")
+    "${PRX_DIR}/libsre/*.cpp"
+    "${PRX_DIR}/libsre_module.c")
 if(LIBSRE_SOURCES)
     message(STATUS "libsre LLE:      enabled")
 endif()
