@@ -205,10 +205,12 @@ if(RACACIT_DISCORD_APP_ID)
     set_source_files_properties(discord_rpc.cpp PROPERTIES
         COMPILE_DEFINITIONS "RACACIT_DISCORD_APP_ID=${RACACIT_DISCORD_APP_ID}")
 endif()
+set(HOST_DIR "${CMAKE_CURRENT_SOURCE_DIR}" CACHE PATH
+    "Directory holding version-selected main.cpp and stubs.cpp")
 target_sources(${PROJECT_NAME} PRIVATE
-    main.cpp
+    "${HOST_DIR}/main.cpp"
     ${ZLIB_SOURCES}
-    stubs.cpp
+    "${HOST_DIR}/stubs.cpp"
     button_prompts.cpp
     desktop_mouse.cpp
     discord_rpc.cpp
@@ -357,7 +359,7 @@ endif()
 if(PS3RECOMP_RSX_VULKAN)
     # On main.cpp alone: a target-wide define would change the command line of
     # every lifted translation unit and rebuild hours of generated code.
-    set_property(SOURCE main.cpp APPEND PROPERTY COMPILE_DEFINITIONS RACACIT_HAVE_VULKAN=1)
+    set_property(SOURCE "${HOST_DIR}/main.cpp" APPEND PROPERTY COMPILE_DEFINITIONS RACACIT_HAVE_VULKAN=1)
 endif()
 
 # The lifted translation units are machine-generated and can run to hundreds of

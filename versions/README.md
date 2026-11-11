@@ -17,13 +17,16 @@ python3 -I scripts/patch_lift.py /path/to/update/recomp \
   --elf /path/to/update/EBOOT.ELF --profile BCUS98124-1.20
 ```
 
-Full update generation remains disabled while version-specific host and SPU integration is pending. PAL support is coordinated through PR #26.
+Update host sources use explicit per-function and per-address maps. SPU producers use the selected executable's mapped payload locations, and derive the changed module's relocatable entry from its original header. All generated code and extracted bytes stay under the selected profile's output directory. Building requires the selected game ELF and decrypted firmware `libsre.prx`. The 1.20 source port consumes the update ELF directly. The original disc assets remain required for play.
 
-The standalone game CMake project accepts `RECOMP_DIR`, `SPU_DIR` and `PRX_DIR`. The Windows CMake project also accepts these paths, allowing an isolated generated profile to be selected explicitly.
+Full update generation remains disabled while clean generation, build and runtime qualification is pending. PAL support is coordinated through PR #26.
+
+The standalone game CMake project accepts `RECOMP_DIR`, `SPU_DIR`, `PRX_DIR` and `HOST_DIR`. The Windows CMake project also accepts these paths, allowing an isolated generated profile to be selected explicitly.
 
 ```sh
 cmake -S windows -B out/BCUS98124-1.00/windows-build \
   -DRECOMP_DIR="$PWD/out/BCUS98124-1.00/recomp" \
   -DSPU_DIR="$PWD/out/BCUS98124-1.00/spu" \
-  -DPRX_DIR="$PWD/out/BCUS98124-1.00/prx"
+  -DPRX_DIR="$PWD/out/BCUS98124-1.00/prx" \
+  -DHOST_DIR="$PWD/out/BCUS98124-1.00/host"
 ```

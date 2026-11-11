@@ -33,28 +33,19 @@ Usage: scripts/patch_lift.py [game/src/recomp]
 import glob, os, re, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, 'scripts'))
+from game_version import identify_profile
 
 
 # An update of the same title can have a different code and data layout.
 # Check the decrypted executable before any generated source is touched.
 def check_game_profile(elf, selected='auto', require_buildable=True, quiet=False):
-    import hashlib, json
-    with open(os.path.join(ROOT, 'versions', 'profiles.json'), encoding='utf-8') as f:
-        profiles = json.load(f)['profiles']
-    digest = hashlib.sha256()
-    with open(elf, 'rb') as f:
-        for block in iter(lambda: f.read(1024 * 1024), b''):
-            digest.update(block)
-    checksum = digest.hexdigest()
-    actual = next((p for p in profiles if p['elf_sha256'] == checksum), None)
-    if actual is None:
-        sys.exit('Unrecognized EBOOT.ELF (SHA-256 ' + checksum + '). No matching game profile; generation stopped.')
-    if selected != 'auto' and selected != actual['id']:
-        sys.exit('Selected ' + selected + ' but the executable is ' + actual['id'] + '. Generation stopped.')
-    if require_buildable and not actual['buildable']:
-        sys.exit('Recognized ' + actual['id'] + ', but this source tree cannot build it: ' + actual['status'])
+    try:
+        actual = identify_profile(elf, selected, require_buildable=require_buildable)
+    except ValueError as error:
+        sys.exit(str(error) + '. Generation stopped.')
     if not quiet:
-        print('Game profile: ' + actual['id'] + ' (SHA-256 ' + checksum + ')')
+        print('Game profile: ' + actual['id'] + ' (SHA-256 ' + actual['elf_sha256'] + ')')
     return actual
 
 if len(sys.argv) > 1 and sys.argv[1] == '--check-profile':

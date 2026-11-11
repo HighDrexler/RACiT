@@ -16,6 +16,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PS3R="$ROOT/tools/ps3recomp"
 ELF="${1:-$ROOT/input/EBOOT.ELF}"
 PY="${PY:-python3 -I}"
+JOBS="${JOBS:-${CMAKE_BUILD_PARALLEL_LEVEL:-2}}"
 
 [ -f "$ELF" ] || { echo "No ELF at $ELF — put your decrypted EBOOT.ELF in input/"; exit 1; }
 # Profiles identify both the disc region and the executable update.
@@ -25,10 +26,12 @@ OUT="$ROOT/out/$PROFILE"
 RECOMP="$OUT/recomp"
 SPU="$OUT/spu"
 PRX="$OUT/prx"
+HOST="$OUT/host"
 BUILD="$OUT/build"
 export RACACIT_GAME_PROFILE="$PROFILE" RACACIT_OUT="$OUT" RACACIT_SPU_DIR="$SPU" RACACIT_PRX_DIR="$PRX"
 export RACACIT_ELF="$ELF"
-mkdir -p "$OUT" "$RECOMP" "$SPU" "$PRX"
+mkdir -p "$OUT" "$RECOMP" "$SPU" "$PRX" "$HOST"
+$PY "$ROOT/scripts/prepare_game_host.py" "$ELF" "$HOST" --profile "$PROFILE"
 
 echo "== 1/5 Loader"
 $PY "$PS3R/tools/ppu_loader.py" "$ELF" --output "$OUT"
@@ -53,13 +56,11 @@ fi
 
 echo "== 3/5 PPU lift"
 # names.json (name_pass.py) only adds comments above lifted functions.
-NAMES=()
-[ -f "$OUT/names.json" ] && NAMES=(--names "$OUT/names.json")
-PS3RECOMP_CHUNK_LINES=${PS3RECOMP_CHUNK_LINES:-100000} $PY "$PS3R/tools/ppu_lifter.py" "$ELF" \
-  --functions "$FUNCS" \
-  --hle-stubs "$OUT/$BASE.imports.json" \
-  "${NAMES[@]}" \
-  --output "$RECOMP"
+LIFT_ARGS=("$ELF" --jobs "$JOBS" --functions "$FUNCS" --hle-stubs "$OUT/$BASE.imports.json" --output "$RECOMP")
+if [ -f "$OUT/names.json" ]; then
+  LIFT_ARGS+=(--names "$OUT/names.json")
+fi
+PS3RECOMP_CHUNK_LINES=${PS3RECOMP_CHUNK_LINES:-100000} $PY "$PS3R/tools/ppu_lifter.py" "${LIFT_ARGS[@]}"
 
 $PY "$ROOT/scripts/patch_lift.py" "$RECOMP" --elf "$ELF" --profile "$PROFILE"
 
@@ -91,9 +92,9 @@ $PY "$ROOT/scripts/patch_lift.py" "$RECOMP" --elf "$ELF" --profile "$PROFILE"
 [ "${SKIP_DESKTOP:-0}" = 1 ] && { echo "Lifted: $RECOMP and $SPU"; exit 0; }
 
 echo "== 5/5 Desktop build"
-cmake -S "$ROOT/game" -B "$BUILD" -G Ninja -DCMAKE_BUILD_TYPE=Release \
-  -DPS3RECOMP_DIR="$PS3R" -DRECOMP_DIR="$RECOMP" -DSPU_DIR="$SPU" -DPRX_DIR="$PRX" \
+cmake -S "$ROOT/game" -B "$BUILD" -G "${CMAKE_GENERATOR:-Ninja}" -DCMAKE_BUILD_TYPE=Release \
+  -DPS3RECOMP_DIR="$PS3R" -DRECOMP_DIR="$RECOMP" -DSPU_DIR="$SPU" -DPRX_DIR="$PRX" -DHOST_DIR="$HOST" \
   -DPS3RECOMP_VULKAN_INCLUDE_DIR="$ROOT/tools/Vulkan-Headers/include" -DPS3RECOMP_RSX_VULKAN=ON \
   -DCMAKE_PREFIX_PATH="$ROOT/tools/sdl2"
-cmake --build "$BUILD" -j"${JOBS:-2}"
+cmake --build "$BUILD" --parallel "$JOBS"
 echo "Done: $BUILD/RaCACiTRecomp"

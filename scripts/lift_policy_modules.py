@@ -17,6 +17,8 @@ Usage: scripts/lift_policy_modules.py input/EBOOT.ELF
 import json, os, struct, subprocess, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, 'scripts'))
+from game_version import update_inputs
 OUT_ROOT = os.environ.get('RACACIT_OUT', os.path.join(ROOT, 'out'))
 SPU_ROOT = os.environ.get('RACACIT_SPU_DIR', os.path.join(ROOT, 'game', 'spu'))
 PS3R = os.path.join(ROOT, "tools", "ps3recomp", "tools")
@@ -54,11 +56,16 @@ def read_guest(elf_path, addr, size):
 
 def main():
     elf = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "input", "EBOOT.ELF")
+    version = update_inputs(elf)
     out_raw = os.path.join(OUT_ROOT, "policy_modules")
     spu_dir = SPU_ROOT
     os.makedirs(out_raw, exist_ok=True)
     regs, decls, manifest = [], [], []
     for n, (name, addr, size) in enumerate(MODULES):
+        if version:
+            addr, mapped_size = version['payloads'][name]
+            if mapped_size != size:
+                raise ValueError('Policy payload size differs for ' + name)
         raw = read_guest(elf, addr, size)
         fp = fnv1a64(raw)
         bin_p = os.path.join(out_raw, name + ".bin")
