@@ -33,6 +33,33 @@ Usage: scripts/patch_lift.py [game/src/recomp]
 import glob, os, re, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+# An update of the same title can have a different code and data layout.
+# Check the decrypted executable before any generated source is touched.
+def check_game_profile(elf, selected='auto'):
+    import hashlib, json
+    with open(os.path.join(ROOT, 'versions', 'profiles.json'), encoding='utf-8') as f:
+        profiles = json.load(f)['profiles']
+    digest = hashlib.sha256()
+    with open(elf, 'rb') as f:
+        for block in iter(lambda: f.read(1024 * 1024), b''):
+            digest.update(block)
+    checksum = digest.hexdigest()
+    actual = next((p for p in profiles if p['elf_sha256'] == checksum), None)
+    if actual is None:
+        sys.exit('Unrecognized EBOOT.ELF (SHA-256 ' + checksum + '). No matching game profile; generation stopped.')
+    if selected != 'auto' and selected != actual['id']:
+        sys.exit('Selected ' + selected + ' but the executable is ' + actual['id'] + '. Generation stopped.')
+    if not actual['buildable']:
+        sys.exit('Recognized ' + actual['id'] + ', but this source tree cannot build it: ' + actual['status'])
+    print('Game profile: ' + actual['id'] + ' (SHA-256 ' + checksum + ')')
+
+if len(sys.argv) > 1 and sys.argv[1] == '--check-profile':
+    if len(sys.argv) not in (3, 4):
+        sys.exit('usage: patch_lift.py --check-profile EBOOT.ELF [PROFILE_ID|auto]')
+    check_game_profile(sys.argv[2], sys.argv[3] if len(sys.argv) == 4 else 'auto')
+    sys.exit(0)
 RECOMP = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "game", "src", "recomp")
 
 DECLS = '''
