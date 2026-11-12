@@ -19,7 +19,7 @@ OUT="$ROOT/out"
 RECOMP="$ROOT/game/src/recomp"
 SPU="$ROOT/game/spu"
 PY="${PY:-python3 -I}"
-JOBS="${CMAKE_BUILD_PARALLEL_LEVEL:-2}"
+JOBS="${CMAKE_BUILD_PARALLEL_LEVEL:-}"
 BUILD_DIR="${BUILD_DIR:-$ROOT/game/build}"
 
 [ -f "$ELF" ] || { echo "No ELF at $ELF — put your decrypted EBOOT.ELF in input/"; exit 1; }
@@ -47,8 +47,11 @@ fi
 
 echo "== 3/5 PPU lift"
 # names.json (name_pass.py) only adds comments above lifted functions.
-LIFT_ARGS=("$ELF" --jobs "$JOBS" --functions "$FUNCS"
+LIFT_ARGS=("$ELF" --functions "$FUNCS"
            --hle-stubs "$OUT/$BASE.imports.json" --output "$RECOMP")
+if [ -n "$JOBS" ]; then
+  LIFT_ARGS+=(--jobs "$JOBS")
+fi
 if [ -f "$OUT/names.json" ]; then
   LIFT_ARGS+=(--names "$OUT/names.json")
 fi
@@ -96,5 +99,5 @@ elif [ -d "$ROOT/tools/sdl2" ]; then
   CMAKE_ARGS+=(-DCMAKE_PREFIX_PATH="$ROOT/tools/sdl2")
 fi
 cmake -S "$ROOT/game" -B "$BUILD_DIR" -G "${CMAKE_GENERATOR:-Ninja}" -DCMAKE_BUILD_TYPE=Release "${CMAKE_ARGS[@]}"
-cmake --build "$BUILD_DIR" --parallel "$JOBS"
+cmake --build "$BUILD_DIR" --parallel "${JOBS:-$(getconf _NPROCESSORS_ONLN)}"
 echo "Done: $BUILD_DIR/RaCACiTRecomp"
