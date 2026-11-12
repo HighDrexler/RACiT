@@ -19619,7 +19619,7 @@ index ecc53fc..e8d4ad6 100644
      const u8* ucode, u32 max_bytes, u32 vtex_mask, u32 input_mask,
      char* out, u32 out_size);
 diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
-index e2687b7..594ba74 100644
+index e2687b7..e000e28 100644
 --- a/libs/video/rsx_vulkan_backend.c
 +++ b/libs/video/rsx_vulkan_backend.c
 @@ -38,10 +38,13 @@
@@ -19637,7 +19637,7 @@ index e2687b7..594ba74 100644
  
  #include "rsx_vulkan_backend.h"
  #include "rsx_vertex_fetch.h"
-@@ -52,13 +55,41 @@
+@@ -52,16 +55,44 @@
  #include "rsx_draw_engine.h"
  #include "vulkan/rsx_vk_fallback_vert.spv.h"
  #include "vulkan/rsx_vk_fallback_frag.spv.h"
@@ -19646,6 +19646,7 @@ index e2687b7..594ba74 100644
 +#include "../input/touch_controls.h"
 +#include "rsx_host_ui.h"
 +#include <math.h>
++#include <stdio.h>
 +
 +/* register(t48) -> the cube-array binding (see rsx_fp_cube_array_style). */
 +#define VK_CUBE_BINDING (RSX_SPIRV_TEXTURE_BINDING + 48u)
@@ -19679,7 +19680,10 @@ index e2687b7..594ba74 100644
 +#endif
  #include <stddef.h>
  #include <stdint.h>
- #include <stdio.h>
+-#include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+ 
 @@ -89,22 +120,24 @@
      X(vkCreateShaderModule) X(vkDestroyShaderModule) \
      X(vkCreateDescriptorSetLayout) X(vkDestroyDescriptorSetLayout) \
@@ -20467,8 +20471,7 @@ index e2687b7..594ba74 100644
 +/* The slot whose completion a just-destroyed object must wait for: the one
 + * recording, else the most recently submitted; none -> destroy now. */
 +static vk_bt_slot* vk_bt_owner(void)
- {
--    VK_CHECK(pvkResetCommandBuffer(s_vk.cmd, 0), "vkResetCommandBuffer");
++{
 +    if (!s_bt.ready || s_bt.shutting_down) return NULL;
 +    if (s_bt.recording) return &s_bt.s[s_bt.cur];
 +    vk_bt_slot* prev = &s_bt.s[(s_bt.cur + VK_BT_SLOTS - 1) % VK_BT_SLOTS];
@@ -20570,7 +20573,8 @@ index e2687b7..594ba74 100644
 +
 +/* Open the current slot for recording (waiting out its previous use). */
 +static int vk_bt_open(void)
-+{
+ {
+-    VK_CHECK(pvkResetCommandBuffer(s_vk.cmd, 0), "vkResetCommandBuffer");
 +    if (s_bt.recording) return 0;
 +    vk_bt_slot* sl = &s_bt.s[s_bt.cur];
 +    if (vk_bt_wait_slot(sl)) return -1;
@@ -21178,7 +21182,7 @@ index e2687b7..594ba74 100644
          .clipped = VK_TRUE, .oldSwapchain = old,
      };
      VkSwapchainKHR sc = VK_NULL_HANDLE;
-@@ -1736,23 +2791,605 @@ static int vk_create_swapchain(void)
+@@ -1736,26 +2791,608 @@ static int vk_create_swapchain(void)
      return 0;
  }
  
@@ -21216,6 +21220,13 @@ index e2687b7..594ba74 100644
 +static void vk_surface_lost(void)
  {
 -    if (!s_vk.windowed || !s_vk.swapchain) return;
+-
+-    u32 idx = 0;
+-    VkResult r = pvkAcquireNextImageKHR(s_vk.device, s_vk.swapchain, UINT64_MAX,
+-                                        s_vk.sem_acquire, VK_NULL_HANDLE, &idx);
+-    if (r == VK_ERROR_OUT_OF_DATE_KHR) { vk_swapchain_lost(); return; }
+-    if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) {
+-        VK_LOG("vkAcquireNextImageKHR failed (VkResult %d)\n", (int)r); return;
 +    pvkDeviceWaitIdle(s_vk.device);
 +    if (s_vk.swapchain) { pvkDestroySwapchainKHR(s_vk.device, s_vk.swapchain, NULL); s_vk.swapchain = VK_NULL_HANDLE; }
 +    if (s_vk.surface) { pvkDestroySurfaceKHR(s_vk.instance, s_vk.surface, NULL); s_vk.surface = VK_NULL_HANDLE; }
@@ -21224,7 +21235,7 @@ index e2687b7..594ba74 100644
 +        snprintf(why, sizeof why, "SDL_Vulkan_CreateSurface (after surface loss) failed: %s", SDL_GetError());
 +        vk_window_drop(why);
 +        return;
-+    }
+     }
 +    VkBool32 ok = VK_FALSE;
 +    if (pvkGetPhysicalDeviceSurfaceSupportKHR(s_vk.phys, s_vk.queue_family, s_vk.surface, &ok) != VK_SUCCESS || !ok) {
 +        vk_window_drop("the recreated surface cannot be presented from the graphics queue");
@@ -21234,12 +21245,7 @@ index e2687b7..594ba74 100644
 +    vk_swapchain_rebuild();
 +}
  
--    u32 idx = 0;
--    VkResult r = pvkAcquireNextImageKHR(s_vk.device, s_vk.swapchain, UINT64_MAX,
--                                        s_vk.sem_acquire, VK_NULL_HANDLE, &idx);
--    if (r == VK_ERROR_OUT_OF_DATE_KHR) { vk_swapchain_lost(); return; }
--    if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) {
--        VK_LOG("vkAcquireNextImageKHR failed (VkResult %d)\n", (int)r); return;
+-    if (vk_begin()) return;
 +/* SUBOPTIMAL also comes back every frame when we deliberately present with
 + * an IDENTITY transform on a rotated panel (see vk_create_swapchain), so only
 + * rebuild when the surface size really changed. */
@@ -21791,9 +21797,12 @@ index e2687b7..594ba74 100644
 +    if (r == VK_ERROR_SURFACE_LOST_KHR) { vk_surface_lost(); return; }
 +    if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) {
 +        VK_LOG("vkAcquireNextImageKHR failed (VkResult %d)\n", (int)r); return;
-     }
- 
-     if (vk_begin()) return;
++    }
++
++    if (vk_begin()) return;
+     vk_barrier_image(s_vk.color.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
+     VkImageMemoryBarrier b = {
+         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
 @@ -1766,62 +3403,354 @@ static void vk_present_window(void)
      };
      pvkCmdPipelineBarrier(s_vk.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
@@ -22681,7 +22690,7 @@ index e2687b7..594ba74 100644
      if (vk_create_host_buffer(&st, (VkDeviceSize)tight * h, VK_BUFFER_USAGE_TRANSFER_DST_BIT)) {
 -        vk_destroy_buffer(&st); return;
 +        vk_destroy_buffer(&st); return -1;
-+    }
+     }
 +    /* A scaled image goes back to the guest's size first: the region is
 +     * stretched into a temporary of w x h (averaged for colour; depth is
 +     * point-sampled, as an average of depths is no depth at all). */
@@ -22690,7 +22699,7 @@ index e2687b7..594ba74 100644
 +    if (scaled && vk_create_image(&down, o->fmt, w, h, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
 +                                  VK_IMAGE_ASPECT_COLOR_BIT)) {
 +        vk_destroy_image(&down); vk_destroy_buffer(&st); return -1;
-     }
++    }
 +    int rc = -1;
      if (!vk_begin()) {
          vk_barrier_image(o->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
@@ -22849,7 +22858,7 @@ index e2687b7..594ba74 100644
 + * Reading the target itself is undefined; reading guest memory instead (the
 + * old fallback) read black and blacked out every frame of gameplay. */
 +static u32 vk_eng_color_snapshot(void* user, u32 color, u32 w, u32 h)
-+{
+ {
 +    s_sync_calls[6]++;
 +    vk_eng_obj* c = vk_eng_get(color, VK_ENG_COLOR);
 +    if (!c) return 0;
@@ -22894,7 +22903,7 @@ index e2687b7..594ba74 100644
 +}
 +
 +static u32 vk_eng_depth_snapshot_sized(void* user, u32 depth, u32 w, u32 h, u32 tw, u32 th)
- {
++{
 +    s_sync_calls[5]++;
      vk_eng_obj* z = vk_eng_get(depth, VK_ENG_DEPTH);
      if (!z) return 0;
