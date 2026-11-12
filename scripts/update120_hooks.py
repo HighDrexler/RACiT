@@ -31,6 +31,7 @@ def apply_update120_hooks(recomp, elf):
     for path in sorted(Path(recomp).glob('ppu_recomp_*.cpp')):
         source = path.read_text(encoding='utf-8')
         replacements = []
+        includes = set()
         for match in re.finditer(r'(?m)^void func_([0-9A-F]{8})\(ppu_context\* ctx\) \{', source):
             address = match.group(1)
             if address not in hooks:
@@ -44,6 +45,7 @@ def apply_update120_hooks(recomp, elf):
             end += 3
             before = source[match.start():end]
             hook = hooks[address]
+            includes.update(hook.get('includes', []))
             checksum = hashlib.sha256(before.encode('utf-8')).hexdigest()
             if checksum == hook['after_sha256']:
                 continue
@@ -62,7 +64,11 @@ def apply_update120_hooks(recomp, elf):
             replacements.append((match.start(), end, after))
         for start, end, after in reversed(replacements):
             source = source[:start] + after + source[end:]
-        if replacements:
+        missing_includes = sorted(include for include in includes if include not in source)
+        for include in missing_includes:
+            position = source.index('\n', source.index('#include')) + 1
+            source = source[:position] + include + '\n' + source[position:]
+        if replacements or missing_includes:
             if preamble not in source:
                 include = source.index('\n', source.index('#include')) + 1
                 source = source[:include] + preamble + source[include:]

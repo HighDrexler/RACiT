@@ -2241,10 +2241,18 @@ index 1b6275d..847a541 100644
  {
      const u8* b = (const u8*)p;
 diff --git a/libs/filesystem/cellFs.c b/libs/filesystem/cellFs.c
-index 5166a47..8c83b67 100644
+index 5166a47..c82129b 100644
 --- a/libs/filesystem/cellFs.c
 +++ b/libs/filesystem/cellFs.c
-@@ -157,8 +157,13 @@ static int translate_path(const char* ps3_path, char* host_buf, size_t buf_size)
+@@ -9,6 +9,7 @@
+ #include "../../runtime/platform/win32_backtrace.h"   /* RtlCaptureStackBackTrace / GetModuleHandleA on POSIX */
+ #include "ps3emu/endian.h"
+ #include <stdio.h>
++extern void racit_menu_archive_path(char* path, size_t capacity, int read_only);
+ #include <string.h>
+ #include <stdlib.h>
+ #include <sys/stat.h>
+@@ -157,8 +158,13 @@ static int translate_path(const char* ps3_path, char* host_buf, size_t buf_size)
          return -1;
  
      const char* remainder = ps3_path + best_len;
@@ -2260,7 +2268,17 @@ index 5166a47..8c83b67 100644
  
      /* A mapped path with an empty remainder ends in a separator ("…/dev_hdd0/"),
       * and stat() rejects that on Windows -- so the directory a game asks about
-@@ -500,7 +505,7 @@ s32 cellFsRead(CellFsFd fd, void* buf, u64 nbytes, u64* nread)
+@@ -422,6 +428,9 @@ s32 cellFsOpen(const char* path, s32 flags, CellFsFd* fd, const void* arg, u64 s
+         return (s32)CELL_ENOENT;
+     }
+ 
++    racit_menu_archive_path(host_path, sizeof host_path,
++        (flags & (CELL_FS_O_ACCMODE | CELL_FS_O_CREAT | CELL_FS_O_TRUNC | CELL_FS_O_APPEND)) == CELL_FS_O_RDONLY);
++
+     /* If creating, ensure parent directories exist */
+     if (flags & CELL_FS_O_CREAT) {
+         ensure_parent_dirs(host_path);
+@@ -500,7 +509,7 @@ s32 cellFsRead(CellFsFd fd, void* buf, u64 nbytes, u64* nread)
      }
  
      { static int _n = 0;
@@ -25999,10 +26017,10 @@ index 11a7480..2251ce0 100644
      for (unsigned i = 0; i < 8 * sizeof mask && i < CPU_SETSIZE; i++)
          if (mask & ((DWORD_PTR)1 << i)) CPU_SET(i, &set);
 diff --git a/runtime/ppu/ppu_fs.cpp b/runtime/ppu/ppu_fs.cpp
-index e8f6c2b..30cd5d9 100644
+index e8f6c2b..1f2d90a 100644
 --- a/runtime/ppu/ppu_fs.cpp
 +++ b/runtime/ppu/ppu_fs.cpp
-@@ -18,6 +18,9 @@
+@@ -18,8 +18,12 @@
  #include "ps3emu/nid.h"      /* ps3_compute_nid */
  #include "ps3emu/guest_call.h" /* ps3_invoke_guest: AIO completion is a guest OPD */
  #include "sdata_decrypt.h"   /* SDATA/EDAT (NPD) decryption for cellFsSdataOpen */
@@ -26011,8 +26029,11 @@ index e8f6c2b..30cd5d9 100644
 +#include <vector>
  #include <stdint.h>
  #include <stdio.h>
++extern "C" void racit_menu_archive_path(char* path, size_t capacity, int read_only);
  #include <string.h>
-@@ -145,13 +148,65 @@ static void host_path(char* out, size_t cap, const char* guest)
+ #include <stdlib.h>
+ #include <sys/stat.h>
+@@ -145,13 +149,65 @@ static void host_path(char* out, size_t cap, const char* guest)
      snprintf(out, cap, "%s/%s", ppu_vfs_root, rel);
      for (char* p = out; *p; p++) if (*p == '\\') *p = '/';
      ps3_vfs_ps3game_fallback(out, cap);
@@ -26079,7 +26100,16 @@ index e8f6c2b..30cd5d9 100644
  static DIR*  g_dirs[FS_MAX];
  static char  g_dir_path[FS_MAX][1024];   /* host path per open dir (for readdir stat) */
  
-@@ -206,9 +261,20 @@ static void cellFsOpen(ppu_context* ctx)
+@@ -174,6 +230,8 @@ static void cellFsOpen(ppu_context* ctx)
+     uint32_t flags  = (uint32_t)ctx->gpr[4];
+     uint32_t fd_ptr = (uint32_t)ctx->gpr[5];
+     host_path(hpath, sizeof hpath, gpath);
++    racit_menu_archive_path(hpath, sizeof hpath,
++        (flags & (3u | CELL_FS_O_CREAT | CELL_FS_O_TRUNC | CELL_FS_O_APPEND)) == CELL_FS_O_RDONLY);
+ 
+     /* NPDRM: see the note in sys_fs.c -- an EDAT is decrypted once into a cache
+      * file and that is opened in its place. */
+@@ -206,9 +264,20 @@ static void cellFsOpen(ppu_context* ctx)
              return;
          }
      }
@@ -26100,7 +26130,7 @@ index e8f6c2b..30cd5d9 100644
          ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_ENOENT; return;
      }
      const char* fmode = (acc == CELL_FS_O_RDWR)
-@@ -230,6 +296,9 @@ static void cellFsOpen(ppu_context* ctx)
+@@ -230,6 +299,9 @@ static void cellFsOpen(ppu_context* ctx)
       * movies) is diagnosed from the opener: its sibling read path is the one
       * that is not running. */
      if (fd >= 0 && fd < FS_MAX) { strncpy(g_fd_path[fd], gpath, sizeof g_fd_path[fd]-1); g_fd_path[fd][sizeof g_fd_path[fd]-1]=0; }
@@ -26110,7 +26140,7 @@ index e8f6c2b..30cd5d9 100644
      { char who[64] = "?";
        if (getenv("FS_CALLER")) { ppu_guest_caller(who, sizeof who);
            fprintf(stderr, "[fs] open '%s' -> fd %d  (opened by %s)\n", gpath, fd, who);
-@@ -371,6 +440,361 @@ static inline void fs_prefault(uint32_t buf, uint64_t len)
+@@ -371,6 +443,361 @@ static inline void fs_prefault(uint32_t buf, uint64_t len)
      p[len - 1] = p[len - 1];
  }
  
@@ -26472,7 +26502,7 @@ index e8f6c2b..30cd5d9 100644
  static void cellFsRead(ppu_context* ctx)
  {
      int fd          = (int)(uint32_t)ctx->gpr[3];
-@@ -380,9 +804,73 @@ static void cellFsRead(ppu_context* ctx)
+@@ -380,9 +807,73 @@ static void cellFsRead(ppu_context* ctx)
      if (fd < 0 || fd >= FS_MAX || !g_files[fd]) { ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_EIO; return; }
      uint64_t raw_nbytes = ctx->gpr[5];
      long fpos_before = ftell(g_files[fd]);
@@ -26546,7 +26576,7 @@ index e8f6c2b..30cd5d9 100644
      /* PS3_FSLOG_EOF=<fd>,<bytes>: report end-of-file past <bytes> on one descriptor.
       * The intro cinematic is 28 seconds and this port renders it at a few frames
       * a second, so it cannot be watched to its end -- truncating the stream makes
-@@ -406,9 +894,9 @@ static void cellFsRead(ppu_context* ctx)
+@@ -406,9 +897,9 @@ static void cellFsRead(ppu_context* ctx)
        if (wfd >= 0 && fd == wfd)
            fprintf(stderr, "[fsread] fd=%d want=%llu got=%zu pos=%ld\n",
                    fd, (unsigned long long)nbytes, n, fpos_before); }
@@ -26558,7 +26588,7 @@ index e8f6c2b..30cd5d9 100644
  #endif
      /* Per-fd totals, not just the first 50 lines. The flat cap made "this file is
       * opened and never read" unfalsifiable: reads on a later-opened fd fall off
-@@ -533,6 +1021,7 @@ static void cellFsLseek(ppu_context* ctx)
+@@ -533,6 +1024,7 @@ static void cellFsLseek(ppu_context* ctx)
      int worigin = (wh == CELL_FS_SEEK_END) ? SEEK_END : (wh == CELL_FS_SEEK_CUR) ? SEEK_CUR : SEEK_SET;
      fseek(g_files[fd], (long)off, worigin);
      long p = ftell(g_files[fd]);
@@ -26566,7 +26596,7 @@ index e8f6c2b..30cd5d9 100644
      if (pos_ptr) vm_write64(pos_ptr, (uint64_t)p);
      ctx->gpr[3] = CELL_OK;
  }
-@@ -600,7 +1089,7 @@ static void cellFsFstat(ppu_context* ctx)
+@@ -600,7 +1092,7 @@ static void cellFsFstat(ppu_context* ctx)
                fprintf(stderr, "[fs] fstat fd=%d size %ld -> capped %ld (FS_FSTAT_CAP)\n", fd, sz, c);
                sz = c; } } }
      if (sb) write_stat(sb, CELL_FS_S_IFREG | 0x1B6, (uint64_t)sz);
@@ -26766,7 +26796,7 @@ index acbaf12..6ca46a3 100644
  }
  
 diff --git a/runtime/ppu/ppu_loader.cpp b/runtime/ppu/ppu_loader.cpp
-index e73a151..2c2a4db 100644
+index e73a151..60e5b09 100644
 --- a/runtime/ppu/ppu_loader.cpp
 +++ b/runtime/ppu/ppu_loader.cpp
 @@ -377,8 +377,9 @@ static void sc_trace(uint64_t num, ppu_context* ctx, uint64_t a3, uint64_t a4,
@@ -27706,7 +27736,61 @@ index e73a151..2c2a4db 100644
              fprintf(stderr,"[memfix] copy dst=0x%08X src=0x%08X n=0x%X -> 0x400240A8 gets src[0x%08X]=0x%08X\n",
                      dst, src, n, soff, sval);
      }
-@@ -2338,8 +2851,13 @@ static void icall_hist(ppu_context* ctx, uint32_t tgt, int phase)
+@@ -2078,6 +2591,7 @@ static uint32_t ppu_code_hi(void)
+     return hi;
+ }
+ 
++#include "ppu_stack_read.h"
+ extern "C" void ppu_dump_guest_stack(ppu_context* ctx, const char* tag)
+ {
+     if (!ctx || !vm_base) return;
+@@ -2108,7 +2622,7 @@ extern "C" void ppu_dump_guest_stack(ppu_context* ctx, const char* tag)
+           fprintf(stderr, "%s\n", gr);
+       } }
+     if (!vm_oob(sp,4)) { char rw[600]; int rp=snprintf(rw,sizeof rw,"      rawstk:");
+-        for (int i=0;i<24 && !vm_oob(sp+i*4,4);i++){ uint32_t t; memcpy(&t,vm_base+sp+i*4,4); rp+=snprintf(rw+rp,sizeof(rw)-rp," %08X",__builtin_bswap32(t)); }
++        for (int i=0;i<24 && !vm_oob(sp+i*4,4);i++){ uint32_t t; if (!racit_stack_read(sp+i*4,&t)) return; rp+=snprintf(rw+rp,sizeof(rw)-rp," %08X",__builtin_bswap32(t)); }
+         fprintf(stderr,"%s\n",rw); }
+     /* Identify the worker's dispatched method: func_000750A8 vcalls
+      * [[arg+0xC]+0] (code) with toc [[arg+0xC]+4]. Dump for the known thread
+@@ -2118,11 +2632,11 @@ extern "C" void ppu_dump_guest_stack(ppu_context* ctx, const char* tag)
+       for (int j=0;j<2;j++){ uint32_t o=args[j];
+         if (vm_oob(o+0x10,4)) continue;
+         uint32_t vt, code, toc; { uint32_t t;
+-          memcpy(&t,vm_base+o+0xC,4); vt=__builtin_bswap32(t);
++          if (!racit_stack_read(o+0xC,&t)) return; vt=__builtin_bswap32(t);
+           if (vt<0x600000 || vt>=0x50000000u) { /* vt could be a guest ptr */ }
+         }
+-        if (!vm_oob(vt,8)) { uint32_t t; memcpy(&t,vm_base+vt,4); code=__builtin_bswap32(t);
+-          memcpy(&t,vm_base+vt+4,4); toc=__builtin_bswap32(t);
++        if (!vm_oob(vt,8)) { uint32_t t; if (!racit_stack_read(vt,&t)) return; code=__builtin_bswap32(t);
++          if (!racit_stack_read(vt+4,&t)) return; toc=__builtin_bswap32(t);
+           fprintf(stderr,"      ARG[0x%08X] vtbl=0x%08X -> method code=0x%08X toc=0x%08X (worker body?)\n", o, vt, code, toc); }
+       } }
+     /* The real frame chain FIRST, then the scan.
+@@ -2141,10 +2655,10 @@ extern "C" void ppu_dump_guest_stack(ppu_context* ctx, const char* tag)
+       uint32_t f = sp;
+       for (int d = 0; d < 24 && bp < 820; d++) {
+           if (vm_oob(f, 8)) break;
+-          uint32_t t; memcpy(&t, vm_base + f + 4, 4);   /* low half of the 64-bit back chain */
++          uint32_t t; if (!racit_stack_read(f+4,&t)) return;   /* low half of the 64-bit back chain */
+           uint32_t prev = __builtin_bswap32(t);
+           if (prev <= f || vm_oob(prev + 0x14, 4)) break;   /* stacks grow down */
+-          memcpy(&t, vm_base + prev + 0x14, 4);         /* low half of the saved lr */
++          if (!racit_stack_read(prev+0x14,&t)) return;         /* low half of the saved lr */
+           uint32_t ra = __builtin_bswap32(t);
+           if (ra >= 0x10000 && ra < ppu_code_hi()) {
+               uint32_t bg = 0;
+@@ -2160,7 +2674,7 @@ extern "C" void ppu_dump_guest_stack(ppu_context* ctx, const char* tag)
+     uint32_t last = 0;
+     for (int i = 0; i < 700 && gp < 1100; i++) {
+         uint32_t a = sp + i*4; if (vm_oob(a,4)) break;
+-        uint32_t t; memcpy(&t, vm_base + a, 4); uint32_t w = __builtin_bswap32(t);
++        uint32_t t; if (!racit_stack_read(a,&t)) return; uint32_t w = __builtin_bswap32(t);
+         if (w < 0x10000 || w >= ppu_code_hi()) continue;
+         uint32_t bg = 0;
+         for (uint64_t k = 0; k < function_table_count; k++) { uint32_t aa = function_table[k].addr; if (aa <= w && aa > bg) bg = aa; }
+@@ -2338,8 +2852,13 @@ static void icall_hist(ppu_context* ctx, uint32_t tgt, int phase)
      ReleaseSRWLockExclusive(&lk);
  }
  
@@ -27720,7 +27804,7 @@ index e73a151..2c2a4db 100644
      static int on = -1;
      if (on < 0) on = getenv("PPU_CSCHECK") ? 1 : 0;
      { static int hg = -1; if (hg < 0) hg = getenv("PS3_ICALL_GATE") ? 1 : 0;
-@@ -2365,6 +2883,14 @@ extern "C" void ps3_indirect_call(ppu_context* ctx)
+@@ -2365,6 +2884,14 @@ extern "C" void ps3_indirect_call(ppu_context* ctx)
      }
  }
  
@@ -27735,7 +27819,7 @@ index e73a151..2c2a4db 100644
  static void ps3_indirect_call_impl(ppu_context* ctx)
  {
      g_active_ctx = ctx;
-@@ -2385,7 +2911,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
+@@ -2385,7 +2912,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
        if(bc){ unsigned t=(unsigned)ctx->thread_id & 63; g_bc_last[t]=(uint32_t)ctx->ctr; g_bc_cnt[t]++; } }
  #ifdef _WIN32
      { static int64_t tw=-2; if(tw==-2){const char*e=getenv("PPU_TOCWATCH"); tw=e?(int64_t)strtoul(e,0,16):-1;}
@@ -27744,7 +27828,7 @@ index e73a151..2c2a4db 100644
          char* mb=(char*)GetModuleHandleA(0); void* bt[24]; unsigned short fr=RtlCaptureStackBackTrace(0,24,bt,0);
          char ln[800]; int p=snprintf(ln,sizeof ln,"[TOCWATCH] r2=0x%08X ctr=0x%08X bt:",(uint32_t)ctx->gpr[2],(uint32_t)ctx->ctr);
          for(int i=0;i<fr;i++) p+=snprintf(ln+p,sizeof(ln)-p," %llX",(unsigned long long)((char*)bt[i]-mb));
-@@ -2560,7 +3086,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
+@@ -2560,7 +3087,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
                  uint32_t _c = __builtin_bswap32(*(volatile uint32_t*)(vm_base + _opd));
                  if (_c && (_c & 3) == 0) {
                      static int _n2 = 0;
@@ -27753,7 +27837,7 @@ index e73a151..2c2a4db 100644
                          fprintf(stderr, "[ppu] OPD-RECOVER: ctr=0 -> dispatching opd[0]=0x%08X\n", _c);
                      addr = _c;
                  }
-@@ -2629,7 +3155,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
+@@ -2629,7 +3156,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
          ppu_fn fn2 = ppu_lookup(toc_reg);
          if (fn2) {
              static int _n = 0;
@@ -27762,7 +27846,7 @@ index e73a151..2c2a4db 100644
              ctx->gpr[2] = addr;        /* callee TOC = the (TOC) value from the code slot */
              addr = toc_reg; ctx->ctr = toc_reg;
              fn = fn2;
-@@ -2642,7 +3168,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
+@@ -2642,7 +3169,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
          static thread_local int s_depth = 0;
          if (s_depth > 4000) {
              static int warned = 0;
@@ -27771,7 +27855,7 @@ index e73a151..2c2a4db 100644
                  fprintf(stderr, "[ppu] recursion cap @0x%08X depth=%d -- skipping\n", addr, s_depth);
              return;
          }
-@@ -2669,7 +3195,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
+@@ -2669,7 +3196,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
          /* PPU_RETWATCH=<hex>: catch the first vcall(s) whose RETURN value (r3)
           * equals this, pinning the exact virtual method that produces the poison. */
          { static int64_t rw=-2; if(rw==-2){const char*e=getenv("PPU_RETWATCH"); rw=e?(int64_t)strtoul(e,0,16):-1;}
@@ -27780,7 +27864,7 @@ index e73a151..2c2a4db 100644
              fprintf(stderr,"[RETWATCH] vcall -> func_%08X returned r3=0x%08X\n", addr, (uint32_t)rw);
  #ifdef _WIN32
              void* bt[16]; unsigned short fr=RtlCaptureStackBackTrace(0,16,bt,0);
-@@ -2709,9 +3235,9 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
+@@ -2709,9 +3236,9 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
            if(_nv && ((tgt & 3u)!=0u || tgt < 0x10000u || tgt >= 0x40000000u)) _invalid = true; }
          if (_invalid) {
              static int _gn = 0;
@@ -27792,7 +27876,7 @@ index e73a151..2c2a4db 100644
                  char* mb=(char*)GetModuleHandleA(0); void* bt[26]; unsigned short fr=RtlCaptureStackBackTrace(0,26,bt,0);
                  char ln[820]; int p=snprintf(ln,sizeof ln,"      GVBT this=0x%08X r2=0x%08X lr=0x%08X rva:",(uint32_t)ctx->gpr[3],(uint32_t)ctx->gpr[2],(uint32_t)ctx->lr);
                  for(int i=0;i<fr;i++) p+=snprintf(ln+p,sizeof(ln)-p," %llX",(unsigned long long)((char*)bt[i]-mb));
-@@ -2726,10 +3252,24 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
+@@ -2726,10 +3253,24 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
       * Detect a long run of identical unresolved targets and bail so the run
       * stays fast and the log readable. */
      static uint32_t last = 0xFFFFFFFFu; static uint32_t streak = 0;
@@ -27817,7 +27901,7 @@ index e73a151..2c2a4db 100644
              fprintf(stderr, "[ppu] FATAL: stuck calling 0x%08X (%u times) -- aborting run\n", cur, streak);
              /* The target alone rarely says why. Dump the descriptor the guest
               * dereferenced (r9/r11/r12 are where the ELFv1 idiom keeps it) and
-@@ -2753,7 +3293,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
+@@ -2753,7 +3294,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
          }
          return;   /* don't spam the log on a tight retry loop */
      }
@@ -27826,7 +27910,7 @@ index e73a151..2c2a4db 100644
      fprintf(stderr, "[ppu] unresolved indirect call -> 0x%08X (tid=%llu lr=0x%08X)\n",
              (uint32_t)ctx->ctr, (unsigned long long)ctx->thread_id, (uint32_t)ctx->lr);
      /* With no NID table the very first one of these is the expected outcome
-@@ -2993,16 +3533,16 @@ extern "C" void lv2_syscall(ppu_context* ctx)
+@@ -2993,16 +3534,16 @@ extern "C" void lv2_syscall(ppu_context* ctx)
      /* One-shot: resolve the guest function that makes the flag=100 spin syscall
       * (num=141 r3=0x64), so we can inspect its lifted arg setup (is mode=garbage a
       * lift bug or a real uninit-object field?). */
@@ -27847,7 +27931,7 @@ index e73a151..2c2a4db 100644
          uintptr_t tgt=(uintptr_t)ra; uint32_t bg=0; uintptr_t bh=0;
          for(uint64_t k=0;k<function_table_count;k++){ uintptr_t h=(uintptr_t)function_table[k].func; if(h<=tgt&&h>bh){bh=h;bg=function_table[k].addr;} }
          fprintf(stderr,"[sc-caller] port_send(port=1) from func_%08X+0x%llX data=0x%08X/0x%08X/0x%08X\n",
-@@ -3061,7 +3601,6 @@ extern "C" void lv2_syscall(ppu_context* ctx)
+@@ -3061,7 +3602,6 @@ extern "C" void lv2_syscall(ppu_context* ctx)
      case 988:     /* sys_tty_write — canonical LV2 number (psdevwiki); some CRTs
                     * use this instead of 403. Same ABI. */
      case 403: {   /* sys_tty_write(s32 ch, cptr buf, u32 len, ptr pwritelen) */
@@ -27855,7 +27939,7 @@ index e73a151..2c2a4db 100644
          uint32_t buf  = (uint32_t)ctx->gpr[4];
          uint32_t len  = (uint32_t)ctx->gpr[5];
          uint32_t pwl  = (uint32_t)ctx->gpr[6];
-@@ -3125,7 +3664,7 @@ extern "C" void lv2_syscall(ppu_context* ctx)
+@@ -3125,7 +3665,7 @@ extern "C" void lv2_syscall(ppu_context* ctx)
                  bt[bn] = 0;
                  if (strstr(bt, pat)) {
                      static int tn = 0;
@@ -27864,7 +27948,7 @@ index e73a151..2c2a4db 100644
                          fprintf(stderr, "%c[TTY_BT] \"%.90s\"%c", 10, bt, 10);
                          ppu_log_host_chain("tty-bt");
                      }
-@@ -3144,7 +3683,7 @@ extern "C" void lv2_syscall(ppu_context* ctx)
+@@ -3144,7 +3684,7 @@ extern "C" void lv2_syscall(ppu_context* ctx)
                  strstr(pt, "sentinel") || strstr(pt, "double-deallocate") ||
                  strstr(pt, "out of memory on request")) {
                  static int pc = 0;
@@ -27873,7 +27957,7 @@ index e73a151..2c2a4db 100644
              }
          }
          /* DIAGNOSTIC (FLOW_PSSGTRACE=1): when the title's tty output carries a
-@@ -3206,13 +3745,29 @@ extern "C" void lv2_syscall(ppu_context* ctx)
+@@ -3206,13 +3746,29 @@ extern "C" void lv2_syscall(ppu_context* ctx)
          if (s_sbp) {
              static ULONGLONG s_acc[1024]={0}; static uint32_t s_cnt[1024]={0}; static ULONGLONG s_win=0;
              uint32_t _a3=(uint32_t)ctx->gpr[3], _a4=(uint32_t)ctx->gpr[4], _a5=(uint32_t)ctx->gpr[5];
@@ -27908,7 +27992,7 @@ index e73a151..2c2a4db 100644
                  void* ra=__builtin_return_address(0);
                  uintptr_t tgt=(uintptr_t)ra; uint32_t bg=0; uintptr_t bh=0;
                  for(uint64_t k=0;k<function_table_count;k++){ uintptr_t h=(uintptr_t)function_table[k].func; if(h<=tgt&&h>bh){bh=h;bg=function_table[k].addr;} }
-@@ -3223,8 +3778,8 @@ extern "C" void lv2_syscall(ppu_context* ctx)
+@@ -3223,8 +3779,8 @@ extern "C" void lv2_syscall(ppu_context* ctx)
              }
              if (s_win==0) s_win=_t0;
              if (_t0 - s_win >= 2000) {
@@ -27919,7 +28003,7 @@ index e73a151..2c2a4db 100644
                  for (int n=0;n<1024;n++){s_acc[n]=0;s_cnt[n]=0;} s_win=_t0;
              }
              if (_ok) { sc_trace(num, ctx, _a3, _a4, _a5, 0); return; }
-@@ -3423,7 +3978,7 @@ extern "C" uint32_t ppu_load_elf(const char* path)
+@@ -3423,7 +3979,7 @@ extern "C" uint32_t ppu_load_elf(const char* path)
                            if (memcmp(vm_base + keep_ea, keep, keep_len)) {
                                memcpy(vm_base + keep_ea, keep, keep_len);
                                static int n = 0;
@@ -27928,7 +28012,7 @@ index e73a151..2c2a4db 100644
                            }
                            Sleep(2);
                        } } };
-@@ -3669,7 +4224,9 @@ extern "C" int ppu_run(uint32_t entry_opd, uint32_t stack_top)
+@@ -3669,7 +4225,9 @@ extern "C" int ppu_run(uint32_t entry_opd, uint32_t stack_top)
       * sys_mutex -- LBP's main + bringup threads both held the GCM lock at once
       * and concurrently-emitted fences vanished (the boot-loading stall). */
      { extern uint64_t ppu_thread_register_main(void);
@@ -27939,7 +28023,7 @@ index e73a151..2c2a4db 100644
  
      /* PS3 process-entry ABI: the loader hands _start register state the CRT
       * (_initialize) consumes directly:
-@@ -3772,6 +4329,7 @@ extern "C" int ppu_run(uint32_t entry_opd, uint32_t stack_top)
+@@ -3772,6 +4330,7 @@ extern "C" int ppu_run(uint32_t entry_opd, uint32_t stack_top)
      fprintf(stderr, "[ppu] run: code 0x%08X, toc 0x%08X, sp 0x%08X\n", code, toc, stack_top);
      g_active_ctx = &ctx;
      ppu_resv_register(&ctx);   /* main/entry thread: join the reservation set too */
@@ -27947,6 +28031,41 @@ index e73a151..2c2a4db 100644
      fn(&ctx);
      while (g_trampoline_fn) { void (*tf)(void*) = g_trampoline_fn; g_trampoline_fn = 0; tf(&ctx); }
      return 0;
+diff --git a/runtime/ppu/ppu_stack_read.h b/runtime/ppu/ppu_stack_read.h
+new file mode 100644
+index 0000000..7ca6c15
+--- /dev/null
++++ b/runtime/ppu/ppu_stack_read.h
+@@ -0,0 +1,29 @@
++/* Diagnostics must not turn an unreadable guest stack into a host crash.
++ * Read through the host kernel, which also handles a concurrent unmapping.
++ * This is deliberately outside the guest-memory execution fast path. */
++#pragma once
++#if defined(__APPLE__)
++#include <mach/mach.h>
++#include <mach/mach_vm.h>
++#elif !defined(_WIN32)
++#include <sys/syscall.h>
++#include <sys/uio.h>
++#include <unistd.h>
++#endif
++static bool racit_stack_read(uint32_t ea, uint32_t* word)
++{
++    if ((uint64_t)ea + sizeof(*word) > 0x100000000ULL) return false;
++#if defined(__APPLE__)
++    mach_vm_size_t copied = 0;
++    return mach_vm_read_overwrite(mach_task_self(),
++        (mach_vm_address_t)(vm_base + ea), sizeof(*word),
++        (mach_vm_address_t)word, &copied) == KERN_SUCCESS && copied == sizeof(*word);
++#elif defined(_WIN32)
++    SIZE_T copied = 0;
++    return ReadProcessMemory(GetCurrentProcess(), vm_base + ea, word,
++        sizeof(*word), &copied) && copied == sizeof(*word);
++#else
++    struct iovec local = { word, sizeof(*word) }, remote = { vm_base + ea, sizeof(*word) };
++    return syscall(SYS_process_vm_readv, getpid(), &local, 1, &remote, 1, 0) == sizeof(*word);
++#endif
++}
 diff --git a/runtime/ppu/ppu_sysprx.cpp b/runtime/ppu/ppu_sysprx.cpp
 index d857f30..48278e7 100644
 --- a/runtime/ppu/ppu_sysprx.cpp
@@ -33268,13 +33387,24 @@ index 4240edf..7be5df0 100644
  
      if (flag_id == 0 || flag_id > SYS_EVENT_FLAG_MAX)
 diff --git a/runtime/syscalls/sys_fs.c b/runtime/syscalls/sys_fs.c
-index 489f8a5..3701b09 100644
+index 489f8a5..7709b7b 100644
 --- a/runtime/syscalls/sys_fs.c
 +++ b/runtime/syscalls/sys_fs.c
-@@ -285,6 +285,19 @@ int64_t sys_fs_open(ppu_context* ctx)
+@@ -7,6 +7,7 @@
+ #include "../memory/vm.h"
+ #include <string.h>
+ #include <stdio.h>
++extern void racit_menu_archive_path(char* path, size_t capacity, int read_only);
+ #include <stdlib.h>
+ #include <errno.h>
+ #include <sys/types.h>
+@@ -284,6 +285,21 @@ int64_t sys_fs_open(ppu_context* ctx)
+     const char* ps3_path = (const char*)vm_to_host(path_addr);
      char host_path[1024];
      sys_fs_translate_path(ps3_path, host_path, sizeof(host_path));
- 
++    racit_menu_archive_path(host_path, sizeof host_path,
++        (flags & (CELL_FS_O_ACCMODE | CELL_FS_O_CREAT | CELL_FS_O_TRUNC | CELL_FS_O_APPEND)) == CELL_FS_O_RDONLY);
++
 +    /* racacit: RACACIT_SKIP_MOVIES=1 -- every pre-rendered (Bink) movie is
 +     * skipped: report the .bik as absent and the title plays on exactly as it
 +     * does when a movie file is missing from the disc. Movies open through
@@ -33287,10 +33417,9 @@ index 489f8a5..3701b09 100644
 +          fprintf(stderr, "[movies] skipping %s (RACACIT_SKIP_MOVIES)\n", ps3_path);
 +          return (int64_t)(int32_t)CELL_ENOENT;
 +      } }
-+
+ 
      { extern char* getenv(const char*); if (getenv("FLOW_TITLEOPEN") && ps3_path && strstr(ps3_path, "Titles")) {
          size_t _l = strlen(ps3_path);
-         fprintf(stderr, "[TITLEOPEN] path='%s' (len=%zu, ends_slash=%d) guest_lr=0x%08X\n",
 diff --git a/runtime/syscalls/sys_memory.c b/runtime/syscalls/sys_memory.c
 index bfbaac5..8cedf25 100644
 --- a/runtime/syscalls/sys_memory.c

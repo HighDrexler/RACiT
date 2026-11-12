@@ -583,6 +583,25 @@ def patch_file(path):
                         'extern "C" unsigned long long SDL_GetPerformanceFrequency(void);\n') + src[i:]
         changed = True
 
+    # Desktop menu movies use two separate frame paths in BCUS98124 disc 1.00.
+    # Publish outside ActionScript execution, preserving the guest context.
+    for entry, offsets in (('func_004C6F6C', (4,)),
+                           ('func_004ADB3C', (8, 4))):
+        sp = func_span(src, entry)
+        if sp and 'racit_publish_menu_keyboard(' not in src[sp[0]:sp[2]]:
+            a, body, end = sp
+            fn = src[a:end]
+            marker = 'void %s(ppu_context* ctx) {\n' % entry
+            assert fn.count(marker) == 1, 'menu frame: original code does not match'
+            calls = ''.join('        racit_publish_menu_keyboard(ctx, %d);\n' % offset
+                            for offset in offsets)
+            fn = fn.replace(marker, marker + calls, 1)
+            src = src[:a] + fn + src[end:]
+            if '#include "menu_keycaps.h"' not in src:
+                i = src.index('\n', src.index('#include')) + 1
+                src = src[:i] + '#include "menu_keycaps.h"\n' + src[i:]
+            changed = True
+
     if (('racacit_jb_push(' in src or 'racacit_longjmp(' in src)
             and 'racacit: guest setjmp' not in src):
         # declarations after the first include

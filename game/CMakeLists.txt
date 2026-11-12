@@ -213,6 +213,7 @@ target_sources(${PROJECT_NAME} PRIVATE
     "${HOST_DIR}/stubs.cpp"
     button_prompts.cpp
     desktop_mouse.cpp
+    menu_archive.cpp
     discord_rpc.cpp
     ${LIBSRE_SOURCES}
     ${PS3RECOMP_SCAFFOLD}
