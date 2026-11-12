@@ -135,4 +135,4 @@ Prepare a separate archive from your own game dump with `python scripts/prepare_
 
 Set `RACACIT_MENU_ARCHIVE` to the prepared file when running the player through its usual entry point. The player validates the archive header before booting the guest and redirects read-only opens of `packed/game/global_cached.psarc`. Original stat, installation and write paths retain the owner's game files. Leave the variable unset to use the original archive.
 
-These menu hooks currently target BCUS98124 disc 1.00. This source branch still needs its own native build and gameplay qualification. The bundled action payload contains only the adjacent AS2 source compiled into AVM1 actions. Game artwork and movies are supplied by the owner's archive.
+The menu hooks support BCUS98124 NA disc 1.00 and update 1.20. The normal generation pipeline verifies the executable fingerprint and selects each version's frontend and pause-menu hooks. The bundled action payload contains only the adjacent owned AS2 source compiled into AVM1 actions. Game artwork and movies are supplied by the owner's archive.
