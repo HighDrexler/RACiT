@@ -33,6 +33,33 @@ Usage: scripts/patch_lift.py [game/src/recomp]
 import glob, os, re, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+# An update of the same title can have a different code and data layout.
+# Check the decrypted executable before any generated source is touched.
+def check_game_profile(elf, selected='auto'):
+    import hashlib, json
+    with open(os.path.join(ROOT, 'versions', 'profiles.json'), encoding='utf-8') as f:
+        profiles = json.load(f)['profiles']
+    digest = hashlib.sha256()
+    with open(elf, 'rb') as f:
+        for block in iter(lambda: f.read(1024 * 1024), b''):
+            digest.update(block)
+    checksum = digest.hexdigest()
+    actual = next((p for p in profiles if p['elf_sha256'] == checksum), None)
+    if actual is None:
+        sys.exit('Unrecognized EBOOT.ELF (SHA-256 ' + checksum + '). No matching game profile; generation stopped.')
+    if selected != 'auto' and selected != actual['id']:
+        sys.exit('Selected ' + selected + ' but the executable is ' + actual['id'] + '. Generation stopped.')
+    if not actual['buildable']:
+        sys.exit('Recognized ' + actual['id'] + ', but this source tree cannot build it: ' + actual['status'])
+    print('Game profile: ' + actual['id'] + ' (SHA-256 ' + checksum + ')')
+
+if len(sys.argv) > 1 and sys.argv[1] == '--check-profile':
+    if len(sys.argv) not in (3, 4):
+        sys.exit('usage: patch_lift.py --check-profile EBOOT.ELF [PROFILE_ID|auto]')
+    check_game_profile(sys.argv[2], sys.argv[3] if len(sys.argv) == 4 else 'auto')
+    sys.exit(0)
 RECOMP = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "game", "src", "recomp")
 
 DECLS = '''
@@ -494,6 +521,54 @@ def patch_file(path):
             decl = 'extern "C" double %s(double d);\n' % hook
             src = src[:i] + decl + src[i:]
         changed = True
+
+    # Desktop follow-camera distances: preserve the game's orbit/collision and pitch bounds.
+    sp = func_span(src, 'func_000459D4')
+    if sp and 'racit_camera_take' not in src[sp[0]:sp[2]]:
+        a, body, end = sp
+        fn = src[a:end]
+        changes = (
+            ('void func_000459D4(ppu_context* ctx) {',
+             'void func_000459D4(ppu_context* ctx) {\n        double mouse_angles[2] = {};\n        const int mouse_direct = racit_camera_take(mouse_angles,(uint64_t)((double)SDL_GetPerformanceCounter()*1000000000.0/(double)SDL_GetPerformanceFrequency()));'),
+            ('        ctx->lr = 0x00045D6C; func_00633C34(ctx); DRAIN_TRAMPOLINE(ctx);',
+             '        if (mouse_direct) ctx->fpr[1] = -mouse_angles[0];\n        ctx->lr = 0x00045D6C; func_00633C34(ctx); DRAIN_TRAMPOLINE(ctx);'),
+            ('        ctx->fpr[3] = ppu_fp_single(ppu_fsub(ctx->fpr[31], ctx->fpr[1]));',
+             '''        if (mouse_direct) {
+            uint32_t lb=vm_read32(ctx->gpr[30]-0x7F24), hb=vm_read32(ctx->gpr[30]-0x7F1C);
+            float lo,hi; memcpy(&lo,&lb,4); memcpy(&hi,&hb,4);
+            const double target=mouse_angles[1]-ctx->fpr[1];
+            ctx->fpr[31]=fmin(fmax(target,lo),hi)+ctx->fpr[1];
+        }
+        ctx->fpr[3] = ppu_fp_single(ppu_fsub(ctx->fpr[31], ctx->fpr[1]));'''),
+        )
+        for old, new in changes:
+            assert fn.count(old) == 1, 'desktop camera: original code does not match'
+            fn = fn.replace(old, new, 1)
+        src = src[:a] + fn + src[end:]
+        i = src.index('\n', src.index('#include')) + 1
+        src = src[:i] + ('extern "C" int racit_camera_take(double*, unsigned long long);\n'
+                        'extern "C" unsigned long long SDL_GetPerformanceCounter(void);\n'
+                        'extern "C" unsigned long long SDL_GetPerformanceFrequency(void);\n') + src[i:]
+        changed = True
+
+    # Desktop menu movies use two separate frame paths in BCUS98124 disc 1.00.
+    # Publish outside ActionScript execution, preserving the guest context.
+    for entry, offsets in (('func_004C6F6C', (4,)),
+                           ('func_004ADB3C', (8, 4))):
+        sp = func_span(src, entry)
+        if sp and 'racit_publish_menu_keyboard(' not in src[sp[0]:sp[2]]:
+            a, body, end = sp
+            fn = src[a:end]
+            marker = 'void %s(ppu_context* ctx) {\n' % entry
+            assert fn.count(marker) == 1, 'menu frame: original code does not match'
+            calls = ''.join('        racit_publish_menu_keyboard(ctx, %d);\n' % offset
+                            for offset in offsets)
+            fn = fn.replace(marker, marker + calls, 1)
+            src = src[:a] + fn + src[end:]
+            if '#include "menu_keycaps.h"' not in src:
+                i = src.index('\n', src.index('#include')) + 1
+                src = src[:i] + '#include "menu_keycaps.h"\n' + src[i:]
+            changed = True
 
     if (('racacit_jb_push(' in src or 'racacit_longjmp(' in src)
             and 'racacit: guest setjmp' not in src):
