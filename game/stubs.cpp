@@ -619,7 +619,7 @@ extern "C" uint32_t racacit_movie_update_hook(uint32_t slot, uint32_t playing)
 }
 
 /* ---------------------------------------------------------------------------
- * Boot straight to PRESS START (RACACIT_SKIP_INTRO, default on)
+ * Boot straight to PRESS START (RACACIT_SKIP_INTRO=1; off by default)
  *
  * The title's cards (the Insomniac Games and Sony logos, the autosave notice
  * and the seizure warning) are the Scaleform main menu's own ActionScript
@@ -642,7 +642,7 @@ extern "C" PPU_THREAD_LOCAL void (*g_trampoline_fn)(void*);
 extern "C" void racacit_front_end_cards(ppu_context* ctx)
 {
     static int on = -1;
-    if (on < 0) { const char* e = getenv("RACACIT_SKIP_INTRO"); on = (e && *e == '0') ? 0 : 1; }
+    if (on < 0) { const char* e = getenv("RACACIT_SKIP_INTRO"); on = (e && *e == '1') ? 1 : 0; }   /* off unless chosen: the seizure warning shows */
     if (!on) return;
     const uint32_t sp = (uint32_t)ctx->gpr[1], val = sp + 0x90u;
     if (vm_read32(val) != 4u) return;                         /* not a string: leave it */
