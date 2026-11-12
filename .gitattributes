@@ -2,6 +2,7 @@
 *.sh text eol=lf
 *.py text eol=lf
 *.patch text eol=lf
+patches/ps3recomp-0001-racacit-runtime-fixes.patch -text
 *.cmd text eol=crlf
 *.svg text
 *.jpg binary

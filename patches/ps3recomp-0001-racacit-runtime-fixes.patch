@@ -2190,10 +2190,18 @@ index 1b6275d..847a541 100644
  {
      const u8* b = (const u8*)p;
 diff --git a/libs/filesystem/cellFs.c b/libs/filesystem/cellFs.c
-index 5166a47..8c83b67 100644
+index 5166a47..c82129b 100644
 --- a/libs/filesystem/cellFs.c
 +++ b/libs/filesystem/cellFs.c
-@@ -157,8 +157,13 @@ static int translate_path(const char* ps3_path, char* host_buf, size_t buf_size)
+@@ -9,6 +9,7 @@
+ #include "../../runtime/platform/win32_backtrace.h"   /* RtlCaptureStackBackTrace / GetModuleHandleA on POSIX */
+ #include "ps3emu/endian.h"
+ #include <stdio.h>
++extern void racit_menu_archive_path(char* path, size_t capacity, int read_only);
+ #include <string.h>
+ #include <stdlib.h>
+ #include <sys/stat.h>
+@@ -157,8 +158,13 @@ static int translate_path(const char* ps3_path, char* host_buf, size_t buf_size)
          return -1;
  
      const char* remainder = ps3_path + best_len;
@@ -2209,7 +2217,17 @@ index 5166a47..8c83b67 100644
  
      /* A mapped path with an empty remainder ends in a separator ("…/dev_hdd0/"),
       * and stat() rejects that on Windows -- so the directory a game asks about
-@@ -500,7 +505,7 @@ s32 cellFsRead(CellFsFd fd, void* buf, u64 nbytes, u64* nread)
+@@ -422,6 +428,9 @@ s32 cellFsOpen(const char* path, s32 flags, CellFsFd* fd, const void* arg, u64 s
+         return (s32)CELL_ENOENT;
+     }
+ 
++    racit_menu_archive_path(host_path, sizeof host_path,
++        (flags & (CELL_FS_O_ACCMODE | CELL_FS_O_CREAT | CELL_FS_O_TRUNC | CELL_FS_O_APPEND)) == CELL_FS_O_RDONLY);
++
+     /* If creating, ensure parent directories exist */
+     if (flags & CELL_FS_O_CREAT) {
+         ensure_parent_dirs(host_path);
+@@ -500,7 +509,7 @@ s32 cellFsRead(CellFsFd fd, void* buf, u64 nbytes, u64* nread)
      }
  
      { static int _n = 0;
@@ -25879,10 +25897,10 @@ index 11a7480..2251ce0 100644
      for (unsigned i = 0; i < 8 * sizeof mask && i < CPU_SETSIZE; i++)
          if (mask & ((DWORD_PTR)1 << i)) CPU_SET(i, &set);
 diff --git a/runtime/ppu/ppu_fs.cpp b/runtime/ppu/ppu_fs.cpp
-index e8f6c2b..d66bcd0 100644
+index e8f6c2b..903a3d9 100644
 --- a/runtime/ppu/ppu_fs.cpp
 +++ b/runtime/ppu/ppu_fs.cpp
-@@ -18,6 +18,9 @@
+@@ -18,8 +18,12 @@
  #include "ps3emu/nid.h"      /* ps3_compute_nid */
  #include "ps3emu/guest_call.h" /* ps3_invoke_guest: AIO completion is a guest OPD */
  #include "sdata_decrypt.h"   /* SDATA/EDAT (NPD) decryption for cellFsSdataOpen */
@@ -25891,8 +25909,11 @@ index e8f6c2b..d66bcd0 100644
 +#include <vector>
  #include <stdint.h>
  #include <stdio.h>
++extern "C" void racit_menu_archive_path(char* path, size_t capacity, int read_only);
  #include <string.h>
-@@ -145,13 +148,65 @@ static void host_path(char* out, size_t cap, const char* guest)
+ #include <stdlib.h>
+ #include <sys/stat.h>
+@@ -145,13 +149,65 @@ static void host_path(char* out, size_t cap, const char* guest)
      snprintf(out, cap, "%s/%s", ppu_vfs_root, rel);
      for (char* p = out; *p; p++) if (*p == '\\') *p = '/';
      ps3_vfs_ps3game_fallback(out, cap);
@@ -25959,7 +25980,16 @@ index e8f6c2b..d66bcd0 100644
  static DIR*  g_dirs[FS_MAX];
  static char  g_dir_path[FS_MAX][1024];   /* host path per open dir (for readdir stat) */
  
-@@ -206,9 +261,20 @@ static void cellFsOpen(ppu_context* ctx)
+@@ -174,6 +230,8 @@ static void cellFsOpen(ppu_context* ctx)
+     uint32_t flags  = (uint32_t)ctx->gpr[4];
+     uint32_t fd_ptr = (uint32_t)ctx->gpr[5];
+     host_path(hpath, sizeof hpath, gpath);
++    racit_menu_archive_path(hpath, sizeof hpath,
++        (flags & (3u | CELL_FS_O_CREAT | CELL_FS_O_TRUNC | CELL_FS_O_APPEND)) == CELL_FS_O_RDONLY);
+ 
+     /* NPDRM: see the note in sys_fs.c -- an EDAT is decrypted once into a cache
+      * file and that is opened in its place. */
+@@ -206,9 +264,20 @@ static void cellFsOpen(ppu_context* ctx)
              return;
          }
      }
@@ -25980,7 +26010,7 @@ index e8f6c2b..d66bcd0 100644
          ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_ENOENT; return;
      }
      const char* fmode = (acc == CELL_FS_O_RDWR)
-@@ -230,6 +296,9 @@ static void cellFsOpen(ppu_context* ctx)
+@@ -230,6 +299,9 @@ static void cellFsOpen(ppu_context* ctx)
       * movies) is diagnosed from the opener: its sibling read path is the one
       * that is not running. */
      if (fd >= 0 && fd < FS_MAX) { strncpy(g_fd_path[fd], gpath, sizeof g_fd_path[fd]-1); g_fd_path[fd][sizeof g_fd_path[fd]-1]=0; }
@@ -25990,7 +26020,7 @@ index e8f6c2b..d66bcd0 100644
      { char who[64] = "?";
        if (getenv("FS_CALLER")) { ppu_guest_caller(who, sizeof who);
            fprintf(stderr, "[fs] open '%s' -> fd %d  (opened by %s)\n", gpath, fd, who);
-@@ -371,6 +440,361 @@ static inline void fs_prefault(uint32_t buf, uint64_t len)
+@@ -371,6 +443,361 @@ static inline void fs_prefault(uint32_t buf, uint64_t len)
      p[len - 1] = p[len - 1];
  }
  
@@ -26352,7 +26382,7 @@ index e8f6c2b..d66bcd0 100644
  static void cellFsRead(ppu_context* ctx)
  {
      int fd          = (int)(uint32_t)ctx->gpr[3];
-@@ -380,9 +804,73 @@ static void cellFsRead(ppu_context* ctx)
+@@ -380,9 +807,73 @@ static void cellFsRead(ppu_context* ctx)
      if (fd < 0 || fd >= FS_MAX || !g_files[fd]) { ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_EIO; return; }
      uint64_t raw_nbytes = ctx->gpr[5];
      long fpos_before = ftell(g_files[fd]);
@@ -26426,7 +26456,7 @@ index e8f6c2b..d66bcd0 100644
      /* PS3_FSLOG_EOF=<fd>,<bytes>: report end-of-file past <bytes> on one descriptor.
       * The intro cinematic is 28 seconds and this port renders it at a few frames
       * a second, so it cannot be watched to its end -- truncating the stream makes
-@@ -406,9 +894,9 @@ static void cellFsRead(ppu_context* ctx)
+@@ -406,9 +897,9 @@ static void cellFsRead(ppu_context* ctx)
        if (wfd >= 0 && fd == wfd)
            fprintf(stderr, "[fsread] fd=%d want=%llu got=%zu pos=%ld\n",
                    fd, (unsigned long long)nbytes, n, fpos_before); }
@@ -26438,7 +26468,7 @@ index e8f6c2b..d66bcd0 100644
  #endif
      /* Per-fd totals, not just the first 50 lines. The flat cap made "this file is
       * opened and never read" unfalsifiable: reads on a later-opened fd fall off
-@@ -533,6 +1021,7 @@ static void cellFsLseek(ppu_context* ctx)
+@@ -533,6 +1024,7 @@ static void cellFsLseek(ppu_context* ctx)
      int worigin = (wh == CELL_FS_SEEK_END) ? SEEK_END : (wh == CELL_FS_SEEK_CUR) ? SEEK_CUR : SEEK_SET;
      fseek(g_files[fd], (long)off, worigin);
      long p = ftell(g_files[fd]);
@@ -26446,7 +26476,7 @@ index e8f6c2b..d66bcd0 100644
      if (pos_ptr) vm_write64(pos_ptr, (uint64_t)p);
      ctx->gpr[3] = CELL_OK;
  }
-@@ -600,7 +1089,7 @@ static void cellFsFstat(ppu_context* ctx)
+@@ -600,7 +1092,7 @@ static void cellFsFstat(ppu_context* ctx)
                fprintf(stderr, "[fs] fstat fd=%d size %ld -> capped %ld (FS_FSTAT_CAP)\n", fd, sz, c);
                sz = c; } } }
      if (sb) write_stat(sb, CELL_FS_S_IFREG | 0x1B6, (uint64_t)sz);
@@ -33222,13 +33252,24 @@ index 4240edf..7be5df0 100644
  
      if (flag_id == 0 || flag_id > SYS_EVENT_FLAG_MAX)
 diff --git a/runtime/syscalls/sys_fs.c b/runtime/syscalls/sys_fs.c
-index 489f8a5..3701b09 100644
+index 489f8a5..7709b7b 100644
 --- a/runtime/syscalls/sys_fs.c
 +++ b/runtime/syscalls/sys_fs.c
-@@ -285,6 +285,19 @@ int64_t sys_fs_open(ppu_context* ctx)
+@@ -7,6 +7,7 @@
+ #include "../memory/vm.h"
+ #include <string.h>
+ #include <stdio.h>
++extern void racit_menu_archive_path(char* path, size_t capacity, int read_only);
+ #include <stdlib.h>
+ #include <errno.h>
+ #include <sys/types.h>
+@@ -284,6 +285,21 @@ int64_t sys_fs_open(ppu_context* ctx)
+     const char* ps3_path = (const char*)vm_to_host(path_addr);
      char host_path[1024];
      sys_fs_translate_path(ps3_path, host_path, sizeof(host_path));
- 
++    racit_menu_archive_path(host_path, sizeof host_path,
++        (flags & (CELL_FS_O_ACCMODE | CELL_FS_O_CREAT | CELL_FS_O_TRUNC | CELL_FS_O_APPEND)) == CELL_FS_O_RDONLY);
++
 +    /* racacit: RACACIT_SKIP_MOVIES=1 -- every pre-rendered (Bink) movie is
 +     * skipped: report the .bik as absent and the title plays on exactly as it
 +     * does when a movie file is missing from the disc. Movies open through
@@ -33241,10 +33282,9 @@ index 489f8a5..3701b09 100644
 +          fprintf(stderr, "[movies] skipping %s (RACACIT_SKIP_MOVIES)\n", ps3_path);
 +          return (int64_t)(int32_t)CELL_ENOENT;
 +      } }
-+
+ 
      { extern char* getenv(const char*); if (getenv("FLOW_TITLEOPEN") && ps3_path && strstr(ps3_path, "Titles")) {
          size_t _l = strlen(ps3_path);
-         fprintf(stderr, "[TITLEOPEN] path='%s' (len=%zu, ends_slash=%d) guest_lr=0x%08X\n",
 diff --git a/runtime/syscalls/sys_memory.c b/runtime/syscalls/sys_memory.c
 index bfbaac5..8cedf25 100644
 --- a/runtime/syscalls/sys_memory.c
