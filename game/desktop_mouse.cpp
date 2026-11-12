@@ -33,7 +33,7 @@ extern "C" int racit_camera_take(double* angles, uint64_t now)
     if (!captured.load()) return 0;
     angles[0] = (double)camera_x.exchange(0) / 1000000000.0;
     angles[1] = (double)camera_y.exchange(0) / 1000000000.0;
-    return 1;
+    return angles[0] != 0.0 || angles[1] != 0.0;
 }
 struct RacitMouseState { uint64_t epoch_ns; int64_t dx, dy; float x, y; };
 extern "C" void racit_mouse_step(RacitMouseState* state, uint64_t now, int dx, int dy, int capture, float sensitivity, int invert)
