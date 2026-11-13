@@ -619,6 +619,69 @@ extern "C" uint32_t racacit_movie_update_hook(uint32_t slot, uint32_t playing)
 }
 
 /* ---------------------------------------------------------------------------
+ * Boot straight to PRESS START (RACACIT_SKIP_INTRO=1; off by default)
+ *
+ * The title's cards (the Insomniac Games and Sony logos, the autosave notice
+ * and the seizure warning) are the Scaleform main menu's own ActionScript
+ * (mainmenu.swf in global_cached.psarc): CardController shows the entries of
+ * <startMode>Cards one by one -- regularCards = insomLogo, sonyPresents,
+ * autosaveCard, seizureCard; afterInstallCards = the two logos -- and calls
+ * CreateMenu (the PRESS START screen) once cardIndex reaches the list's length
+ * or the list is empty. func_004C8898 tells the movie its startMode through
+ * the movie's SetVariable (vtable +0x30: r3 movie, r4 name, r5 a GFxValue --
+ * type at +0, value at +8 -- r6 1), before Init runs. patch_lift.py calls this
+ * right after that call returns: for "regular" and "afterInstall" the same
+ * SetVariable sets that mode's card list to "" (an AS2 string: length 0), so
+ * the menu's first CardController goes straight to CreateMenu. The install
+ * mode's cards (the HDD install and subtitle choice) are left alone.
+ * -----------------------------------------------------------------------*/
+void func_004C64C8(ppu_context* ctx);
+extern "C" void ps3_indirect_call(ppu_context* ctx);
+extern "C" void vm_write8(uint64_t a, uint8_t v);
+extern "C" PPU_THREAD_LOCAL void (*g_trampoline_fn)(void*);
+extern "C" void racacit_front_end_cards(ppu_context* ctx)
+{
+    static int on = -1;
+    if (on < 0) { const char* e = getenv("RACACIT_SKIP_INTRO"); on = (e && *e == '1') ? 1 : 0; }   /* off unless chosen: the seizure warning shows */
+    if (!on) return;
+    const uint32_t sp = (uint32_t)ctx->gpr[1], val = sp + 0x90u;
+    if (vm_read32(val) != 4u) return;                         /* not a string: leave it */
+    const uint32_t mode_ea = vm_read32(val + 8u);
+    char mode[16] = {0};
+    for (unsigned i = 0; mode_ea && i + 1 < sizeof mode; i++) { mode[i] = (char)vm_read8(mode_ea + i); if (!mode[i]) break; }
+    if (strcmp(mode, "regular") && strcmp(mode, "afterInstall")) return;
+
+    static uint64_t gpr[32], lr, ctr; static double fpr[32]; static u128 vr[32]; static uint32_t cr, xer, fpscr, vscr;
+    memcpy(gpr, ctx->gpr, sizeof gpr); memcpy(fpr, ctx->fpr, sizeof fpr); memcpy(vr, ctx->vr, sizeof vr);
+    cr = ctx->cr; lr = ctx->lr; ctr = ctx->ctr; xer = ctx->xer; fpscr = ctx->fpscr; vscr = ctx->vscr;
+    /* name, empty string and GFxValue below the guest stack pointer, then a new frame below them */
+    const uint32_t buf = (sp - 0x200u) & ~15u, nsp = (sp - 0x400u) & ~15u;
+    const uint32_t name = buf, empty = buf + 0x40u, nval = buf + 0x80u;
+    char nm[32]; snprintf(nm, sizeof nm, "%sCards", mode);
+    memcpy(vm_base + name, nm, strlen(nm) + 1);
+    vm_write8(empty, 0);
+    for (uint32_t k = 0; k < 0x18u; k += 4) vm_write32(nval + k, vm_read32(val + k));   /* the game's own string GFxValue */
+    vm_write32(nval + 8u, empty);
+    vm_write32(nsp, 0); vm_write32(nsp + 4, sp);              /* back chain */
+    ctx->gpr[1] = nsp;
+    ctx->gpr[3] = ctx->gpr[27];                               /* as func_004C8898: the movie from its handle */
+    func_004C64C8(ctx);
+    while (g_trampoline_fn) { void (*tf)(void*) = g_trampoline_fn; g_trampoline_fn = 0; tf(ctx); }
+    const uint32_t movie = (uint32_t)ctx->gpr[3];
+    const uint32_t opd = vm_read32(vm_read32(movie) + 0x30u);  /* SetVariable */
+    ctx->gpr[3] = movie; ctx->gpr[4] = name; ctx->gpr[5] = nval; ctx->gpr[6] = 1;
+    ctx->gpr[2] = vm_read32(opd + 4u);
+    ctx->ctr = vm_read32(opd); ctx->lr = (uint32_t)lr;
+    ps3_indirect_call(ctx);
+    while (g_trampoline_fn) { void (*tf)(void*) = g_trampoline_fn; g_trampoline_fn = 0; tf(ctx); }
+    const int ok = (int)(uint8_t)ctx->gpr[3];
+    memcpy(ctx->gpr, gpr, sizeof gpr); memcpy(ctx->fpr, fpr, sizeof fpr); memcpy(ctx->vr, vr, sizeof vr);
+    ctx->cr = cr; ctx->lr = lr; ctx->ctr = ctr; ctx->xer = xer; ctx->fpscr = fpscr; ctx->vscr = vscr;
+    fprintf(stderr, "[front-end] startMode %s: %s = \"\" (intro cards skipped, RACACIT_SKIP_INTRO)%s\n",
+            mode, nm, ok ? "" : " -- SetVariable said no");
+}
+
+/* ---------------------------------------------------------------------------
  * Every cutscene skippable (RACACIT_ALL_CUTSCENES_SKIPPABLE, default on)
  *
  * The level scripts queue movies, in-engine cinematics and scripted scenes

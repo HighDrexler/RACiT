@@ -6876,7 +6876,7 @@ index f6e4e31..6c69330 100644
      vm_write32(user - 12, 0);                            /* poison: catch double free */
      slot_lock();
 diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
-index cdb0464..8d352f1 100644
+index cdb0464..0742aa2 100644
 --- a/libs/video/cellGcmSys.c
 +++ b/libs/video/cellGcmSys.c
 @@ -29,6 +29,7 @@ static u32 s_gcm_context_ea = 0;
@@ -7341,7 +7341,7 @@ index cdb0464..8d352f1 100644
  }
  
  /* Present gate for the ticker: a flip is ready once the drain has consumed
-@@ -1166,12 +1447,44 @@ static volatile u32 s_ref_qhead = 0, s_ref_qtail = 0;   /* single producer+consu
+@@ -1166,12 +1447,62 @@ static volatile u32 s_ref_qhead = 0, s_ref_qtail = 0;   /* single producer+consu
   * a title spinning on ctrl->ref waits forever with no indication why. Tokyo
   * Jungle did exactly this -- get left the 1 MB ring for IO 0x00F00000, which it
   * never mapped, while put sat at 0x604. Stop at the bad word and say so. */
@@ -7374,6 +7374,24 @@ index cdb0464..8d352f1 100644
 +    }
 +}
 +
++/* Where the block `put` sits in starts: the target of the most recent JUMP the
++ * walker took that lands at or a little before `put`, or 0xFFFFFFFF. A title
++ * that links its frame blocks with JUMPs enters each one at its header, and
++ * `put` stops a few words into it. */
++#define GCM_RESYNC_BLOCK_BYTES 0x10000u     /* how far before put a block may start */
++#define GCM_RESYNC_NEAR_BYTES  0x100000u    /* a resync from further below than this is not in the ring */
++static u32 gcm_cf_block_start_for(u32 put)
++{
++    const u32 n = s_cf_i < GCM_CF_N ? s_cf_i : GCM_CF_N;
++    for (u32 t = 1; t <= n; t++) {
++        const u32 k = (s_cf_i - t) % GCM_CF_N;
++        if (s_cf[k].kind != 'J') continue;
++        const u32 to = s_cf[k].to;
++        if (to <= put && put - to <= GCM_RESYNC_BLOCK_BYTES) return to;
++    }
++    return 0xFFFFFFFFu;
++}
++
  static void gcm_fifo_bad_branch(const char* kind, u32 target, u32 word)
  {
      static int n = 0;
@@ -7387,7 +7405,7 @@ index cdb0464..8d352f1 100644
  }
  
  /* A bad branch nearly always means the walker mis-counted a method batch a few
-@@ -1234,6 +1547,7 @@ void gcm_forget_spu_blocks(void)
+@@ -1234,6 +1565,7 @@ void gcm_forget_spu_blocks(void)
  
  void gcm_note_spu_put(u32 ea, u32 size)
  {
@@ -7395,7 +7413,7 @@ index cdb0464..8d352f1 100644
      if (!size || size > 0x40000u) return;
      u32 room = 0;
      u32 io = gcm_ea2io_range(ea, &room);
-@@ -1293,7 +1607,7 @@ static void gcm_fifo_resync_why(const char* why, u32* getoff, u32 put)
+@@ -1293,7 +1625,7 @@ static void gcm_fifo_resync_why(const char* why, u32* getoff, u32 put)
       * by the backend as prim=0. */
      u32 land = gcm_spu_block_for_put(put);
      if (land == 0xFFFFFFFFu) land = put;
@@ -7404,16 +7422,93 @@ index cdb0464..8d352f1 100644
          fprintf(stderr, "[cellGcmSys] resync landing on SPU pushbuffer "
                  "0x%08X (put 0x%08X) instead of skipping to put\n", land, put); }
  
-@@ -1311,7 +1625,7 @@ static void gcm_fifo_resync_why(const char* why, u32* getoff, u32 put)
+@@ -1301,6 +1633,29 @@ static void gcm_fifo_resync_why(const char* why, u32* getoff, u32 put)
+      * fences inside the block itself, and pushing them here too would publish
+      * every one twice. */
+     u32 from = (*getoff <= land) ? *getoff : s_last_ring_off;
++    /* ...but only when that range is the stream the walker skipped. If the
++     * walker left the ring through a JUMP into data, `from` is wherever it
++     * stopped, possibly megabytes below put, and from there to `land` is
++     * unrelated IO memory. Ratchet & Clank: A Crack in Time hit this when
++     * reading text in the museum and the Battleplex: get left the start of
++     * one frame block for a table in low IO (0x0003C780) and stopped on a
++     * bad word, with put just past the other block's header (0x0161AF24).
++     * The linear sweep crossed 22 to 27 MB of textures, vertex data and stale
++     * frames and queued 781 to 5724 old fences, more the longer the session
++     * ran. The label walk stopped on the first bad word, so the header's
++     * releases were never replayed. The title spun on that release until
++     * its own 40 second "GPU sit and spin" timeout, with the screen frozen.
++     * The walker took a JUMP into the start of put's block a frame or two
++     * earlier. When `from` lies far below that block, sweep from the block
++     * instead: its header is exactly what was skipped. */
++    { const u32 blk = gcm_cf_block_start_for(land);
++      if (blk != 0xFFFFFFFFu && from < blk && blk - from > GCM_RESYNC_NEAR_BYTES) {
++          static int x = 0;
++          if ((x < 8 && (x++, 1)))
++              fprintf(stderr, "[cellGcmSys] resync from 0x%08X, outside the ring: "
++                      "sweeping put's block 0x%08X..0x%08X instead\n", from, blk, land);
++          from = blk;
++      } }
+     if (from < land) {
+         unsigned rescued = 0;
+         for (u32 io = from; io + 8 <= land; io += 4) {
+@@ -1311,9 +1666,52 @@ static void gcm_fifo_resync_why(const char* why, u32* getoff, u32 put)
              gcm_ref_push_at(vm_read32(dea), io);
              rescued++;
          }
 -        if (rescued) { static int m = 0; if (m++ < 8)
-+        if (rescued) { static int m = 0; if ((m < 8 && (m++, 1)))
-             fprintf(stderr, "[cellGcmSys] resync rescued %u fence(s) from"
-                     " 0x%08X..0x%08X\n", rescued, from, land); }
+-            fprintf(stderr, "[cellGcmSys] resync rescued %u fence(s) from"
+-                    " 0x%08X..0x%08X\n", rescued, from, land); }
++        /* Fences are not the only sync writes a title waits on. Walk the
++         * skipped range as a command stream (each header and its data; NOPs,
++         * flip markers and self-JUMP parks stepped over, forward JUMPs inside
++         * the range followed; stopping at anything else that is not a method
++         * header) and replay the label releases in it as well: NV406E
++         * SEMAPHORE_RELEASE (0x6C, at the offset 0x64 set) and the NV4097
++         * back-end and texture-read releases (0x1D70/0x1D74 at the 0x1D6C
++         * offset, in the 0x01A4 context), the latter through
++         * rsx_process_method so they land where the walker would have written
++         * them. A Crack in Time's frame headers release labels 0x400 and
++         * 0x410 this way, and the game waits on them. Draws in the range are
++         * still lost. (The same walk as upstream ps3recomp v0.18's resync.) */
++        static rsx_state s_resync_state;   /* the sync methods do not touch it */
++        unsigned labels = 0;
++        for (u32 io = from; io + 4 <= land; ) {
++            const u32 ea = gcm_io2ea(io); if (!ea) break;
++            const u32 w = vm_read32(ea), type = w >> 29;
++            if (w == 0 || (w & 0xFFFFFF00u) == GCM_FLIP_MARKER) { io += 4; continue; }   /* NOP, flip */
++            if ((w & 0xE0000003u) == 0x20000000u || (w & 3u) == 1u) {   /* JUMP */
++                const u32 tgt = ((w & 3u) == 1u) ? (w & ~3u) : (w & 0x1FFFFFFCu);
++                if (tgt == io) { io += 4; continue; }   /* a park */
++                if (tgt > io && tgt < land) { io = tgt; continue; }
++                break;
++            }
++            if (type != 0 && type != 2) break;          /* CALL, RETURN, or not a header */
++            const u32 count = (w >> 18) & 0x7FFu, method = w & 0x1FFCu, subch = (w >> 13) & 7u;
++            if (!count || io + 4 + count * 4 > land) break;
++            for (u32 i = 0; i < count; i++) {
++                const u32 dea = gcm_io2ea(io + 4 + i * 4); if (!dea) break;
++                const u32 m = (type == 0) ? method + i * 4 : method, v = vm_read32(dea);
++                if (subch != 0) continue;
++                if (m == 0x64u) s_sema_offset = v;
++                else if (m == 0x6Cu) {
++                    atomic_thread_fence(memory_order_release);
++                    vm_write32(GCM_LABEL_GUEST_BASE + (s_sema_offset & 0xFFFFu), v);
++                    labels++;
++                } else if (m == 0x01A4u || m == 0x1D6Cu || m == 0x1D70u || m == 0x1D74u) {
++                    rsx_process_method(&s_resync_state, m, v);
++                    labels += (m == 0x1D70u || m == 0x1D74u);
++                }
++            }
++            io += 4 + count * 4;
++        }
++        if (rescued || labels) { static int m = 0; if ((m < 8 && (m++, 1)))
++            fprintf(stderr, "[cellGcmSys] resync rescued %u fence(s) and %u label"
++                    " write(s) from 0x%08X..0x%08X\n", rescued, labels, from, land); }
      }
-@@ -1347,7 +1661,7 @@ static void gcm_ref_push_at(u32 v, u32 getoff)
+     *getoff = land;
+ }
+@@ -1347,7 +1745,7 @@ static void gcm_ref_push_at(u32 v, u32 getoff)
      if (t - s_ref_qhead >= GCM_REF_QLEN) {   /* overflow: drop oldest (keeps liveness) */
          s_ref_qhead++;
          static int _o = 0;
@@ -7422,7 +7517,7 @@ index cdb0464..8d352f1 100644
      }
      s_ref_q[t % GCM_REF_QLEN] = v;
      s_ref_qtail = t + 1;
-@@ -1466,12 +1780,69 @@ void cellGcm_rsx_process_fifo(void)
+@@ -1466,12 +1864,69 @@ void cellGcm_rsx_process_fifo(void)
      ReleaseSRWLockExclusive(&s_gcm_fifo_lock);
  }
  
@@ -7493,7 +7588,7 @@ index cdb0464..8d352f1 100644
            unsigned long long now = ps3_ms_now();
            if (_t0 == 0) _t0 = now;
            if (now - _t0 >= 2000) {
-@@ -1507,12 +1878,19 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1507,12 +1962,19 @@ static void gcm_rsx_process_fifo_unlocked(void)
       * then runs off the end of the previous frame's bytes until it meets a
       * word that is not a command, and parks there forever. */
      atomic_thread_fence(memory_order_acquire);
@@ -7514,7 +7609,7 @@ index cdb0464..8d352f1 100644
          static u32 last_ptr = 0xFFFFFFFFu, last_cur = 0xFFFFFFFFu;
          u32 ptr = vm_read32(s_gcm_ctx_out_ea);
          u32 cur = ptr ? vm_read32(ptr + 0x8) : 0;
-@@ -1527,8 +1905,29 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1527,8 +1989,29 @@ static void gcm_rsx_process_fifo_unlocked(void)
          }
      }
  
@@ -7545,7 +7640,7 @@ index cdb0464..8d352f1 100644
          static int n = 0;
          if (n++ % 60 == 0)
              printf("[DRAIN] getoff=%08X put=%08X ref=%08X ctx.current=%08X\n",
-@@ -1541,7 +1940,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1541,7 +2024,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
       * two very different causes -- we missed the command, or it was never
       * submitted -- and only a direct scan of the ring separates them. */
      { static int scanned = 0;
@@ -7554,7 +7649,7 @@ index cdb0464..8d352f1 100644
          unsigned found = 0;
          for (u32 io = 0; io + 8 <= put; io += 4) {
              u32 ea = gcm_io2ea(io); if (!ea) continue;
-@@ -1635,6 +2034,8 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1635,6 +2118,8 @@ static void gcm_rsx_process_fifo_unlocked(void)
                if (dbg && (flips <= 8ull || (flips % 200ull) == 0))
                    fprintf(stderr, "[flipword] %llu FIFO flip words decoded%c",
                            flips, 10); }
@@ -7563,7 +7658,7 @@ index cdb0464..8d352f1 100644
              if ((w & 0xFFFFFF00u) == GCM_FLIP_MARKER) {
                  /* Queued by _cellGcmSetFlipCommand, which already did the
                   * guest-visible half of the request. */
-@@ -1660,7 +2061,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1660,7 +2145,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
          }
  
          if (type == 1) {                       /* JUMP: 0x20000000 | offset */
@@ -7572,7 +7667,7 @@ index cdb0464..8d352f1 100644
                if (_rd) fprintf(stderr, "[JMP] %08X -> %08X (put=%08X)\n",
                                 s_fifo_getoff, w & 0x1FFFFFFCu, put); }
              { u32 tgt = w & 0x1FFFFFFCu;
-@@ -1682,17 +2083,20 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1682,17 +2167,20 @@ static void gcm_rsx_process_fifo_unlocked(void)
                                                gcm_fifo_resync_why("jump-park", &s_fifo_getoff, put); }
                    break;
                }
@@ -7593,7 +7688,7 @@ index cdb0464..8d352f1 100644
              s_fifo_getoff = s_fifo_calloff;
              s_fifo_calloff = 0;
              continue;
-@@ -1701,6 +2105,22 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1701,6 +2189,22 @@ static void gcm_rsx_process_fifo_unlocked(void)
              u32 count  = (w >> 18) & 0x7FF;
              u32 method = w & 0x1FFCu;
              u32 subch  = (w >> 13) & 7;
@@ -7616,7 +7711,7 @@ index cdb0464..8d352f1 100644
              /* TCONST_FIFO=1: how the title actually streams vertex constants.
               * NV4097_SET_TRANSFORM_CONSTANT is a 32-register window; if a block
               * arrives NON-INCREMENTING then every dword carries the same method
-@@ -1733,35 +2153,165 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1733,35 +2237,165 @@ static void gcm_rsx_process_fifo_unlocked(void)
               * while it waits. Semaphore offsets index the same label window
               * cellGcmGetLabelAddress hands out. */
              if (subch == 0 && (method == 0x64u || method == 0x68u || method == 0x6Cu)) {
@@ -7792,7 +7887,7 @@ index cdb0464..8d352f1 100644
                  /* GCM_SET_USER_COMMAND is method 0xEB00, which this decode
                   * splits into subchannel 7 / method 0x0B00 -- so it was landing
                   * in the 2D engine path and being dropped as unrecognised. It
-@@ -1770,7 +2320,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1770,7 +2404,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
                   * blocks on. */
                  { static int sd = -1; static unsigned long s7 = 0;
                    if (sd < 0) sd = getenv("GCM_SUBCH7") ? 1 : 0;
@@ -7801,7 +7896,7 @@ index cdb0464..8d352f1 100644
                        fprintf(stderr, "[subch7] method=0x%04X data=0x%08X\n",
                                m, vm_read32(dea)); }
                  if (subch == 7 && m == 0x0B00u) {
-@@ -1823,7 +2373,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1823,7 +2457,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
                    { static u32 vw = 1;
                      if (vw == 1) { const char* e = getenv("GCM_VAL_WATCH"); vw = e ? (u32)strtoul(e, 0, 16) : 0; }
                      if (vw && vm_read32(dea) == vw) {
@@ -7810,7 +7905,7 @@ index cdb0464..8d352f1 100644
                              printf("[valwatch] subch=%u method=0x%04X = 0x%08X get=0x%X%c", subch, m, vw, s_fifo_getoff, 10);
                      } }
                    /* ...and surface offsets (colour 0x210/0x218/0x288/0x28C, zeta 0x214) and texture 1 offset */
-@@ -1878,7 +2428,17 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1878,7 +2512,17 @@ static void gcm_rsx_process_fifo_unlocked(void)
                  } else if (mfull == 0xE920u || mfull == 0xE924u) {
                      cellGcmSetFlipCommand(vm_read32(dea) & 7u);
                  } else if (subch == 0 || (subch == 1 && !s1_2d)) {
@@ -7829,7 +7924,7 @@ index cdb0464..8d352f1 100644
                      /* NV406E_SET_REFERENCE: queue the fence value for PACED
                       * publication (gcm_ref_publish below) instead of letting a
                       * later fence in the same batch overwrite it. */
-@@ -1887,22 +2447,53 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1887,22 +2531,53 @@ static void gcm_rsx_process_fifo_unlocked(void)
                       * area. Sample counts are not measured, so a ZPASS query
                       * reports "visible" -- the conservative answer; reading 0
                       * tells the title every queried object is occluded. */
@@ -7887,7 +7982,7 @@ index cdb0464..8d352f1 100644
              fprintf(stderr, "[FIFOUW] unknown word 0x%08X at getoff 0x%X\n", w, s_fifo_getoff); }
          s_fifo_getoff += 4;                    /* unknown word: skip */
      }
-@@ -1948,16 +2539,33 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -1948,16 +2623,33 @@ static void gcm_rsx_process_fifo_unlocked(void)
        } else burned = 0; }
  
      { static u32 last = 0xFFFFFFFFu; static int stuck = 0;
@@ -7923,7 +8018,7 @@ index cdb0464..8d352f1 100644
          static int n2 = 0;
          if (n2++ % 60 == 0)
              fprintf(stderr, "[DRAINEND] %s: %08X -> %08X (%u bytes), put=%08X\n",
-@@ -2040,7 +2648,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -2040,7 +2732,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
                  s_fifo_getoff = io_begin;                          /* get */
                  put = io_begin;
                  static int n = 0;
@@ -7932,7 +8027,7 @@ index cdb0464..8d352f1 100644
                      fprintf(stderr, "[cellGcmSys] recycled the title's own ring "
                              "(ctx=0x%08X begin=0x%08X end=0x%08X) -- its callback "
                              "does not%c", ctx, begin, end, 10);
-@@ -2057,7 +2665,8 @@ static void gcm_rsx_process_fifo_unlocked(void)
+@@ -2057,7 +2749,8 @@ static void gcm_rsx_process_fifo_unlocked(void)
       * If the overflow survives this, `get` is not what it consults. */
      { static int eq = -1;
        if (eq < 0) { const char* e = getenv("GCM_GET_EQ_PUT"); eq = e ? atoi(e) : 0; }
@@ -7942,7 +8037,7 @@ index cdb0464..8d352f1 100644
  
      AcquireSRWLockExclusive(&s_ref_pub_lock);                           /* ref */
      gcm_ref_publish_one();
-@@ -2122,7 +2731,7 @@ void cellGcm_fifo_recycle(u32 ctx_ea)
+@@ -2122,7 +2815,7 @@ void cellGcm_fifo_recycle(u32 ctx_ea)
      while (g_gcm_fifo_drained_ea != begin && spins < 2000) { Sleep(1); spins++; }
      if (spins >= 2000) {
          static int warned = 0;
@@ -7951,7 +8046,7 @@ index cdb0464..8d352f1 100644
              printf("[cellGcmSys] fifo recycle: drain stalled (drained=0x%08X begin=0x%08X)\n",
                     g_gcm_fifo_drained_ea, begin);
      }
-@@ -2164,6 +2773,18 @@ s32 cellGcmSetDisplayBuffer(u32 bufferId, u32 offset, u32 pitch,
+@@ -2164,6 +2857,18 @@ s32 cellGcmSetDisplayBuffer(u32 bufferId, u32 offset, u32 pitch,
      return CELL_OK;
  }
  
@@ -7970,7 +8065,7 @@ index cdb0464..8d352f1 100644
  /* Backend query (not a guest API): is this raw RSX offset a registered
   * display buffer? Used to split display draws (-> backbuffer) from
   * offscreen render-to-texture passes. */
-@@ -2230,7 +2851,7 @@ static s32 gcm_flip_request(u32 bufferId, int in_fifo)
+@@ -2230,7 +2935,7 @@ static s32 gcm_flip_request(u32 bufferId, int in_fifo)
            }
        } }
  
@@ -7979,7 +8074,7 @@ index cdb0464..8d352f1 100644
          fprintf(stderr, "[FLIP] SetFlipCommand(buf=%u) set=%d\n",
                  bufferId, bufferId < CELL_GCM_MAX_DISPLAY_BUFFER_NUM ? s_display_buffer_set[bufferId] : -1); }
      if (bufferId >= CELL_GCM_MAX_DISPLAY_BUFFER_NUM)
-@@ -2554,7 +3175,7 @@ s32 cellGcmAddressToOffset(u32 address, u32* offset)
+@@ -2554,7 +3259,7 @@ s32 cellGcmAddressToOffset(u32 address, u32* offset)
      printf("[cellGcmSys] WARNING: AddressToOffset failed for 0x%08X\n", address);
      vm_write32(off_ea, 0);
      { static int _d = -1; if (_d < 0) _d = getenv("A2O_FAILDBG") ? 1 : 0;
@@ -7988,7 +8083,7 @@ index cdb0464..8d352f1 100644
            fprintf(stderr, "[A2O] FAILED ea=0x%08X (not in local or IO space)%c",
                    address, 10); } }
      return CELL_GCM_ERROR_FAILURE;
-@@ -2769,7 +3390,14 @@ u32 cellGcmResolveLocated(int local, u32 offset)
+@@ -2769,7 +3474,14 @@ u32 cellGcmResolveLocated(int local, u32 offset)
  {
      if (local)
          return s_config.localAddress + offset;
@@ -8004,7 +8099,7 @@ index cdb0464..8d352f1 100644
  }
  
  /* ---------------------------------------------------------------------------
-@@ -2943,7 +3571,7 @@ u32 cellGcmGetTiledPitchSize(u32 size)
+@@ -2943,7 +3655,7 @@ u32 cellGcmGetTiledPitchSize(u32 size)
              if (s_valid_pitches[i] >= size) { r = s_valid_pitches[i]; break; }
          }
      }
@@ -8013,7 +8108,7 @@ index cdb0464..8d352f1 100644
      return r;
  }
  
-@@ -3451,6 +4079,8 @@ void cellGcm_syscall_set_fifo(u32 put, u32 get)
+@@ -3451,6 +4163,8 @@ void cellGcm_syscall_set_fifo(u32 put, u32 get)
  {
      vm_write32(GCM_CONTROL_GUEST_ADDR + 0, put);
      vm_write32(GCM_CONTROL_GUEST_ADDR + 4, get);
@@ -9083,7 +9178,7 @@ index d8506de..b8f00f6 100644
          u32 header = buf[pos++];
          u32 type = (header >> 29) & 0x7;
 diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
-index 68929ed..5907c21 100644
+index 68929ed..258446b 100644
 --- a/libs/video/rsx_d3d12_backend.c
 +++ b/libs/video/rsx_d3d12_backend.c
 @@ -445,7 +445,7 @@ static void subvp_capture(u32 fi)
@@ -9095,6 +9190,17 @@ index 68929ed..5907c21 100644
              fprintf(stderr, "[SUBVP] captured %ux%u from (%u,%u)%c",
                      s_subvp[i].w, s_subvp[i].h, s_subvp[i].x, s_subvp[i].y, 10); }
      }
+@@ -1792,8 +1792,8 @@ static int vp_get_vs(const rsx_state* st)
+     }
+     if (getenv("VP_BYPASS")) {
+         static const char anchor[] =
+-            "Out.pos = float4(_p.xyz * vp_posscale.xyz + _p.w * vp_posoffset.xyz, _p.w);";
+-        static const char repl[] = "Out.pos = float4(v[0].xy * 0.5, 0.5, 1.0);";
++            "_hpos = float4(_p.xyz * vp_posscale.xyz + _p.w * vp_posoffset.xyz, _p.w);";
++        static const char repl[] = "_hpos = float4(v[0].xy * 0.5, 0.5, 1.0);";
+         char* at = hlsl;
+         while ((at = strstr(at, anchor)) != NULL) {
+             size_t n = sizeof(anchor) - 1, m = sizeof(repl) - 1;
 @@ -1807,7 +1807,7 @@ static int vp_get_vs(const rsx_state* st)
                              "main", "vs_5_0", 0, 0, &vb, &e);
      if (e) e->lpVtbl->Release(e);
@@ -9760,7 +9866,7 @@ index dab4380..6132681 100644
  /* ---- decoded state getters -------------------------------------------- */
  
 diff --git a/libs/video/rsx_draw_engine.c b/libs/video/rsx_draw_engine.c
-index 5c50e4a..8f2529f 100644
+index 5c50e4a..864ac24 100644
 --- a/libs/video/rsx_draw_engine.c
 +++ b/libs/video/rsx_draw_engine.c
 @@ -11,6 +11,7 @@
@@ -10993,7 +11099,7 @@ index 5c50e4a..8f2529f 100644
      *readable = 1;
      return hash;
  }
-@@ -741,8 +1624,34 @@ static int eng_staging_reserve(u32 bytes)
+@@ -741,9 +1624,88 @@ static int eng_staging_reserve(u32 bytes)
  
  /* Decode a guest texture out of guest memory and hand every face and level to
   * the backend. Returns the backend handle, or 0. */
@@ -11023,13 +11129,67 @@ index 5c50e4a..8f2529f 100644
 +    while (k < (u32)q && k + 1u < nlv && (w >> (k + 1u)) >= floor_ && (h >> (k + 1u)) >= floor_) k++;
 +    return k;
 +}
++/* A texture whose every channel the unit reads signed (TEXTURE_FILTER
++ * [28:31] = 0xF) in a plain 8-bit format is kept in the cache as offset
++ * binary, each byte XOR 0x80: the sampler then filters values in their
++ * signed order and the shader's decode is linear (rsx_texmode, fp_texp .w
++ * bit 5). Read as raw unorm and sign-extended after filtering, two texels
++ * either side of zero (0x02 and 0xFE: +0.016 and -0.016) blend to 0x80,
++ * -1.0 -- A Crack in Time's water normals came out as a field of
++ * full-strength spikes wherever a wave slope crossed zero. The flag rides in
++ * the cache key's remap word, bit 30 (the crossbar uses the low 16). */
++#define ENG_REMAP_SIGNED_STORE (1u << 30)
++static int eng_dyn_tex(void);
++/* Only with the dynamic texture modes (the default): RSX_FP_DYNAMIC_TEX=0
++ * bakes the modes into the programs, which do not decode signed channels. */
++static int eng_signed_store_ok(const rsx_dsp_texture* t)
++{
++    const u32 base = t->format & 0x9Fu;
++    return ((t->filter >> 28) & 0xFu) == 0xFu && (base == 0x85u || base == 0x8Bu) && !t->cubemap &&
++           eng_dyn_tex();
++}
++static u32 s_tex_sstore;   /* units bound from the cache in that form (fp_texp .w bit 5) */
++
++/* A 3D texture (FORMAT dimension 3) laid out linearly (format bit 0x20):
++ * its slices follow one another in memory, pitch * height bytes each, so it
++ * decodes as one 2D image `depth` slices tall and the program's rsx_tex3d
++ * picks slices out of it (rsx_fp_tex3d_mask). Swizzled 3D textures
++ * interleave their slices and are still read as their first slice. */
++static int eng_tex3d_ok(const rsx_dsp_texture* t)
++{
++    return t->enabled && t->dimension == 3u && t->depth > 1u && t->depth <= 4095u && (t->format & 0x20u) &&
++           !t->cubemap && t->width && t->height && eng_dyn_tex();
++}
++static u32 eng_tex3d_mask(void)
++{
++    u32 mask = 0;
++    for (u32 u = 0; u < RSX_DSP_NUM_TEXTURES && u < 16u; u++) {
++        rsx_dsp_texture t;
++        rsx_dsp_get_texture(&g.rsx, u, &t);
++        if (eng_tex3d_ok(&t)) mask |= 1u << u;
++        if (t.enabled && t.dimension == 3u) {   /* each distinct one, a few times */
++            static u32 seen[16]; static u32 ns;
++            const u32 k = t.offset ^ (t.depth << 20) ^ (t.format << 8);
++            u32 i = 0; while (i < ns && seen[i] != k) i++;
++            if (i == ns && ns < 16u) { seen[ns++] = k;
++                fprintf(stderr, "[rsx engine] 3D texture on unit %u: %u:0x%08X %ux%ux%u pitch %u fmt 0x%02X wrap %08X filter %08X border %08X -> %s%c",
++                        u, t.location, t.offset, t.width, t.height, t.depth, t.pitch, t.format, t.wrap, t.filter, t.border_color,
++                        eng_tex3d_ok(&t) ? "stacked slices" : "first slice only (swizzled or dynamic modes off)", 10); }
++        }
++    }
++    return mask;
++}
++
  static u32 eng_texture_upload(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
 -                              u32 levels, u32 pitch, int cube, u32 remap)
 +                              u32 levels, u32 pitch, int cube, u32 remap, u32 into)
  {
++    const int signed_store = (remap & ENG_REMAP_SIGNED_STORE) != 0;
++    remap &= 0xFFFFu;
      rsx_tex_level lv[RSX_MAX_TEXTURE_LEVELS];
      const u32 nlv = rsx_texture_mip_chain(fmt, w, h, levels, pitch, lv);
-@@ -753,23 +1662,48 @@ static u32 eng_texture_upload(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
+     if (!nlv || !lv[0].tl.face_bytes) return 0;
+@@ -753,23 +1715,53 @@ static u32 eng_texture_upload(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
      const u32 span = eng_texture_span(fmt, w, h, levels, pitch, cube);
      const u8* src = eng_guest_ptr(NULL, location, offset, span);
      if (!src) return 0;
@@ -11080,11 +11240,16 @@ index 5c50e4a..8f2529f 100644
                                 face + lv[m].offset, lv[m].w, lv[m].h, tl,
                                 rsx_texture_argb_is_rgba());
 -            g.be->texture_upload(g.be->user, handle, f, m, lv[m].w, lv[m].h,
++            if (signed_store) {
++                u8* b = (u8*)g.tex_staging;
++                const size_t n = (size_t)tl->dst_row_bytes * tl->rows;
++                for (size_t i = 0; i < n; i++) b[i] ^= 0x80u;
++            }
 +            g.be->texture_upload(g.be->user, handle, f, m - skip, lv[m].w, lv[m].h,
                                   g.tex_staging, tl->dst_row_bytes, tl->rows);
          }
      }
-@@ -783,67 +1717,464 @@ static u32 eng_texture_upload(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
+@@ -783,67 +1775,464 @@ static u32 eng_texture_upload(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
   * cache full evicts the least recently used entry rather than returning
   * nothing: returning white "made the recovered orphanage render as flat
   * green/black geometry" (rsx_live_draw.c:2326-2334). */
@@ -11572,10 +11737,11 @@ index 5c50e4a..8f2529f 100644
  /* SET_TEXTURE_FILTER's min field is [18:16] (1 NEAREST, 2 LINEAR, then 3..6,
   * the four combinations of a nearest/linear minification with a
   * nearest/linear mip filter) and mag [26:24]; SET_TEXTURE_CONTROL0 carries
-@@ -881,6 +2212,82 @@ static u32 eng_vtex_mask(void)
+@@ -881,36 +2270,163 @@ static u32 eng_vtex_mask(void)
      return mask;
  }
  
+-static u32 eng_cube_mask(void)
 +static int eng_is_depth_fmt(u32 format)
 +{
 +    const u32 b = format & RSX_TEX_FMT_BASE_MASK & ~(u32)RSX_TEX_FMT_UNNORM;
@@ -11613,19 +11779,31 @@ index 5c50e4a..8f2529f 100644
 + * the HLSL sampler wants 0..1, so the coordinates are divided by the image
 + * size in the shader (rsx_fp_apply_unnorm_scale -- same as rsx_live_draw). */
 +static u32 eng_unnorm_mask(u32 dim[][2])
-+{
-+    u32 mask = 0;
-+    for (u32 u = 0; u < RSX_DSP_NUM_TEXTURES; u++) {
-+        rsx_dsp_texture t;
-+        rsx_dsp_get_texture(&g.rsx, u, &t);
+ {
+     u32 mask = 0;
+     for (u32 u = 0; u < RSX_DSP_NUM_TEXTURES; u++) {
+         rsx_dsp_texture t;
+         rsx_dsp_get_texture(&g.rsx, u, &t);
+-        /* A cube face is square by construction, so a non-square image
+-         * cannot be one; the fragment program is compiled against this mask
+-         * and a texturecube slot filled with a 2D texture is a validation
+-         * failure, not a wrong pixel. */
+-        if (t.enabled && t.cubemap && t.width && t.width == t.height)
+-            mask |= 1u << u;
 +        dim[u][0] = dim[u][1] = 0;
 +        if (!t.enabled || !(t.format & RSX_TEX_FMT_UNNORM) || !t.width || !t.height) continue;
 +        mask |= 1u << u;
 +        dim[u][0] = t.width; dim[u][1] = t.height;
-+    }
-+    return mask;
-+}
-+
+     }
+     return mask;
+ }
+ 
+-/* Are both of the guest's own programs resident? One answer, used by the
+- * layout and by the pipeline, because they must not disagree: the built-in
+- * program declares all sixteen inputs, so narrowing the layout for it would
+- * leave the pipeline's vertex descriptor short of what the shader reads. */
+-static int eng_guest_programs(const u8** out_vp, u32* out_vp_instrs,
+-                              const u8** out_fp, u32* out_fp_size)
 +/* Units whose TEXTURE_ADDRESS unsigned remap (bits 12-15) is BIASED: the
 + * unit returns 2x-1 (rsx_fp_biased_mask). */
 +static u32 eng_biased_mask(void)
@@ -11635,6 +11813,45 @@ index 5c50e4a..8f2529f 100644
 +        rsx_dsp_texture t;
 +        rsx_dsp_get_texture(&g.rsx, u, &t);
 +        if (t.enabled && ((t.wrap >> 12) & 0xFu) == 1u) mask |= 1u << u;
++    }
++    return mask;
++}
++
++/* TEXTURE_FILTER [28:31] (A, R, G, B signed): the unit reads those bytes
++ * of the texel as two's-complement, -128..127 over 127 (RPCS3 RSXTexture.cpp
++ * format_ex, _sext_unorm8x4). The flags belong to the incoming channels, so
++ * they follow the crossbar to the output channels; a channel the crossbar
++ * forces to 0 or 1 is not touched. Four bits per unit in output order R, G,
++ * B, A. The 8-bit colour formats only: RPCS3's get_format_features, minus
++ * Y16_X16 (16-bit sign extension, not done here).
++ *
++ * A Crack in Time's water reads its two G8B8 wave normal maps this way.
++ * Read unsigned, every slope came out positive, the surface normal leaned
++ * ~50 degrees the same way everywhere, every reflection ray left the
++ * reflection map, and the river showed one flat blue at any shallow angle. */
++static u64 eng_signed_mask(void)
++{
++    u64 mask = 0;
++    for (u32 u = 0; u < RSX_DSP_NUM_TEXTURES; u++) {
++        rsx_dsp_texture t;
++        rsx_dsp_get_texture(&g.rsx, u, &t);
++        const u32 argb = (t.filter >> 28) & 0xFu;          /* bit0 A, 1 R, 2 G, 3 B */
++        if (!t.enabled || !argb) continue;
++        switch (t.format & 0x9Fu) {
++        case 0x81: case 0x82: case 0x83: case 0x84: case 0x85: case 0x86: case 0x87: case 0x88:
++        case 0x8B: case 0x8D: case 0x8E: case 0x8F: case 0x97: case 0x9D: case 0x9E:
++            break;
++        default:
++            continue;
++        }
++        u32 out = 0;
++        /* remap: source select at bit 2i, op at 8 + 2i, i = A, R, G, B; op 2 = from the texel */
++        static const u32 out_bit[4] = { 3u, 0u, 1u, 2u };  /* A, R, G, B -> R0 G1 B2 A3 */
++        for (u32 i = 0; i < 4u; i++) {
++            const u32 sel = (t.remap >> (2u * i)) & 3u, op = (t.remap >> (8u + 2u * i)) & 3u;
++            if (op == 2u && ((argb >> sel) & 1u)) out |= 1u << out_bit[i];
++        }
++        mask |= (u64)out << (u * 4u);
 +    }
 +    return mask;
 +}
@@ -11652,21 +11869,35 @@ index 5c50e4a..8f2529f 100644
 +    return mask;
 +}
 +
- static u32 eng_cube_mask(void)
- {
-     u32 mask = 0;
-@@ -901,6 +2308,10 @@ static u32 eng_cube_mask(void)
-  * layout and by the pipeline, because they must not disagree: the built-in
-  * program declares all sixteen inputs, so narrowing the layout for it would
-  * leave the pipeline's vertex descriptor short of what the shader reads. */
++static u32 eng_cube_mask(void)
++{
++    u32 mask = 0;
++    for (u32 u = 0; u < RSX_DSP_NUM_TEXTURES; u++) {
++        rsx_dsp_texture t;
++        rsx_dsp_get_texture(&g.rsx, u, &t);
++        /* A cube face is square by construction, so a non-square image
++         * cannot be one; the fragment program is compiled against this mask
++         * and a texturecube slot filled with a 2D texture is a validation
++         * failure, not a wrong pixel. */
++        if (t.enabled && t.cubemap && t.width && t.width == t.height)
++            mask |= 1u << u;
++    }
++    return mask;
++}
++
++/* Are both of the guest's own programs resident? One answer, used by the
++ * layout and by the pipeline, because they must not disagree: the built-in
++ * program declares all sixteen inputs, so narrowing the layout for it would
++ * leave the pipeline's vertex descriptor short of what the shader reads. */
 +/* The fragment program eng_guest_programs last read; `serial` changes
 + * whenever it had to be read again. */
 +static struct { int valid; u32 reg, size, epoch, serial; const u8* ptr; } s_fpc;
 +
- static int eng_guest_programs(const u8** out_vp, u32* out_vp_instrs,
-                               const u8** out_fp, u32* out_fp_size)
++static int eng_guest_programs(const u8** out_vp, u32* out_vp_instrs,
++                              const u8** out_fp, u32* out_fp_size)
  {
-@@ -909,8 +2320,16 @@ static int eng_guest_programs(const u8** out_vp, u32* out_vp_instrs,
+     const u8* vp_uc = NULL;
+     u32 vp_instrs = 0;
      const u32 start = rsx_dsp_vp_start(&g.rsx);
      if (start < RSX_DSP_VP_INSTR) {
          vp_uc = (const u8*)(g.rsx.vp + start * 4);
@@ -11685,7 +11916,7 @@ index 5c50e4a..8f2529f 100644
      }
  
      /* A zero SET_SHADER_PROGRAM is "none", not "the program at offset 0": the
-@@ -918,13 +2337,27 @@ static int eng_guest_programs(const u8** out_vp, u32* out_vp_instrs,
+@@ -918,13 +2434,27 @@ static int eng_guest_programs(const u8** out_vp, u32* out_vp_instrs,
       * never read back as zero. */
      const u8* fp_uc = NULL;
      u32 fp_size = 0;
@@ -11720,7 +11951,7 @@ index 5c50e4a..8f2529f 100644
      }
  
      if (out_vp) *out_vp = vp_uc;
-@@ -942,10 +2375,17 @@ static void eng_vertex_layout(rsx_vertex_layout_plan* layout)
+@@ -942,10 +2472,17 @@ static void eng_vertex_layout(rsx_vertex_layout_plan* layout)
      const u8* uc = NULL;
      u32 instrs = 0;
      if (eng_guest_programs(&uc, &instrs, NULL, NULL)) {
@@ -11742,7 +11973,7 @@ index 5c50e4a..8f2529f 100644
      }
      rsx_vertex_layout_plan_init(layout, mask);
  }
-@@ -1006,27 +2446,131 @@ static const char* const kEngFixedPS =
+@@ -1006,27 +2543,134 @@ static const char* const kEngFixedPS =
  "};\n"
  "float4 main(PSInput input) : SV_TARGET { return input.col0; }\n";
  
@@ -11800,8 +12031,8 @@ index 5c50e4a..8f2529f 100644
 +}
 +/* The texture-derived modes of the draw eng_pipeline_get last saw: what
 + * fp_texp in the fragment constants carries when they are dynamic. */
-+static u32 s_tm_unnorm, s_tm_biased, s_tm_cube;
-+static u64 s_tm_gamma;
++static u32 s_tm_unnorm, s_tm_biased, s_tm_cube, s_tm_t3d;
++static u64 s_tm_gamma, s_tm_signed;
 +static u32 s_tm_dim[RSX_DSP_NUM_TEXTURES][2];
 +#define PSTAGE(i) do { const u64 _n = eng_rdtsc(); s_pstage[i] += _n - _pt; _pt = _n; } while (0)
 +static u64 s_last_pipe_key;   /* the key eng_pipeline_get last resolved (RSX_ENG_PROBE) */
@@ -11828,14 +12059,16 @@ index 5c50e4a..8f2529f 100644
 -        return 0;
 +    /* The texture-derived masks change only with texture registers: kept
 +     * until a texture or vertex-texture register takes a new value. */
-+    static struct { int valid; u32 tgen, vgen, cube, vtex, unnorm, shadow, biased; u64 gamma; u32 dim[RSX_DSP_NUM_TEXTURES][2]; u8 func[16]; } mc;
++    static struct { int valid; u32 tgen, vgen, cube, vtex, unnorm, shadow, biased, t3d; u64 gamma, sgn; u32 dim[RSX_DSP_NUM_TEXTURES][2]; u8 func[16]; } mc;
 +    if (!mc.valid || mc.tgen != g.rsx.tex_gen_all || mc.vgen != g.rsx.vtex_gen) {
 +        mc.cube = eng_cube_mask();
++        mc.t3d = eng_tex3d_mask() & ~mc.cube;
 +        mc.vtex = eng_vtex_mask();
 +        mc.unnorm = eng_unnorm_mask(mc.dim);
 +        mc.shadow = eng_shadow_mask(mc.func);
 +        mc.biased = eng_biased_mask();
 +        mc.gamma = eng_gamma_mask();
++        mc.sgn = eng_signed_mask();
 +        mc.tgen = g.rsx.tex_gen_all; mc.vgen = g.rsx.vtex_gen; mc.valid = 1;
 +    }
 +    const u32 cube_mask = mc.cube;
@@ -11849,7 +12082,8 @@ index 5c50e4a..8f2529f 100644
 +    const u32 biased_mask = mc.biased;
 +    const u64 gamma_mask = mc.gamma;
 +    const int dyn_tex = eng_dyn_tex();
-+    s_tm_unnorm = unnorm_mask; s_tm_biased = biased_mask; s_tm_gamma = gamma_mask; s_tm_cube = cube_mask;
++    s_tm_unnorm = unnorm_mask; s_tm_biased = biased_mask; s_tm_gamma = gamma_mask; s_tm_cube = cube_mask; s_tm_signed = mc.sgn;
++    s_tm_t3d = dyn_tex ? mc.t3d : 0u;
 +    memcpy(s_tm_dim, unnorm_dim, sizeof s_tm_dim);
 +    /* SET_SHADER_PACKER (0x1FEC) bit 0: colour outputs are written as sRGB
 +     * (the RSX's sRGB-write, libgcm's fragment program gamma). A Crack in
@@ -11880,7 +12114,7 @@ index 5c50e4a..8f2529f 100644
  
      /* Identity: the vertex program's own bytes, the fragment program's
       * STRUCTURE (its inline constants are hoisted into the buffered block, so
-@@ -1034,17 +2578,46 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
+@@ -1034,17 +2678,47 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
       * SHADER_CONTROL, the cube and vertex-texture masks, the input layout,
       * and the structural render state. */
      u64 key = 1469598103934665603ull;
@@ -11915,6 +12149,7 @@ index 5c50e4a..8f2529f 100644
 +        if (dyn_tex) {
 +            static const u32 dyn_tag = 0x44594E54u;   /* "TNYD": a different program text */
 +            key = eng_fnv1a(&dyn_tag, sizeof dyn_tag, key);
++            if (mc.t3d) key = eng_fnv1a(&mc.t3d, sizeof mc.t3d, key ^ 0x3D3Dull);
 +        } else {
 +            if (unnorm_mask) {
 +                key = eng_fnv1a(&unnorm_mask, sizeof unnorm_mask, key);
@@ -11931,7 +12166,7 @@ index 5c50e4a..8f2529f 100644
      }
      key = eng_fnv1a(&layout->mask, sizeof layout->mask, key);
      key = eng_fnv1a(&layout->stride, sizeof layout->stride, key);
-@@ -1054,43 +2627,182 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
+@@ -1054,43 +2728,184 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
      key = eng_fnv1a(&rt_count, sizeof rt_count, key);
      key = rsx_draw_engine_hash_render_state(rs, key);
  
@@ -11972,6 +12207,7 @@ index 5c50e4a..8f2529f 100644
 +        rsx_fp_biased_mask = dyn_tex ? 0u : biased_mask;
 +        rsx_fp_gamma_mask = dyn_tex ? 0u : gamma_mask;
 +        rsx_fp_dynamic_tex = dyn_tex;
++        rsx_fp_tex3d_mask = dyn_tex ? mc.t3d : 0u;
 +        rsx_fp_srgb_out = srgb_out;
 +        memcpy(rsx_fp_shadow_func, shadow_func, sizeof shadow_func);
          fi = rsx_fp_decompile_buffered_ex(fp_uc, fp_size, fp_ctrl, cube_mask,
@@ -11980,6 +12216,7 @@ index 5c50e4a..8f2529f 100644
 +        rsx_fp_biased_mask = 0;
 +        rsx_fp_gamma_mask = 0;
 +        rsx_fp_dynamic_tex = 0;
++        rsx_fp_tex3d_mask = 0;
 +        rsx_fp_srgb_out = 0;
          if (fi > 0 && nconst != g.fp_constants.count) fi = -1;
          if (fi > 0 && rs->alpha_test_enable &&
@@ -11996,7 +12233,8 @@ index 5c50e4a..8f2529f 100644
 +            rsx_fp_apply_unnorm_scale(s_ps_hlsl, sizeof s_ps_hlsl, unnorm_mask,
 +                                      (const u32 (*)[2])unnorm_dim, cube_mask) < 0)
 +            fi = -1;
-+    }
+     }
+-    if (vi > 0 && fi > 0)
 +    /* RSX_FP_DEBUG_KEY=<hex pipeline key>: that pipeline's fragment program
 +     * returns its inputs instead of its colour, in 24-pixel screen stripes:
 +     * TEXCOORD1.xy (fract), unit 0 sampled there (rgb), COLOR0.rgb, and
@@ -12041,8 +12279,7 @@ index 5c50e4a..8f2529f 100644
 +                 while (s_nskip < 512 && fgets(ln, sizeof ln, f)) {
 +                     u64 k = strtoull(ln, 0, 16); if (k) s_skip[s_nskip++] = k; }
 +                 fclose(f); }
-     }
--    if (vi > 0 && fi > 0)
++    }
 +    int key_drop = 0;
 +    for (int i = 0; i < s_nskip; i++) if (s_skip[i] == key) { key_drop = 1; break; }
 +    const int dbg_drop = (s_plimit >= 0 && (long)g.n_pipelines >= s_plimit) ||
@@ -12126,7 +12363,7 @@ index 5c50e4a..8f2529f 100644
      g.n_pipelines++;
      *out_fixed = fixed;
      return handle;
-@@ -1216,16 +2928,754 @@ static void dc_fetch(const rsx_vertex_layout_plan* layout, int allow_remap)
+@@ -1216,16 +3031,754 @@ static void dc_fetch(const rsx_vertex_layout_plan* layout, int allow_remap)
          dc.fetch_ok = 0;
          return;
      }
@@ -12884,7 +13121,7 @@ index 5c50e4a..8f2529f 100644
  /* ---- sink ---------------------------------------------------------------- */
  
  static void sink_begin(void* user, const rsx_dispatch* r, u32 prim)
-@@ -1234,11 +3684,26 @@ static void sink_begin(void* user, const rsx_dispatch* r, u32 prim)
+@@ -1234,11 +3787,26 @@ static void sink_begin(void* user, const rsx_dispatch* r, u32 prim)
      dc_reset();
  }
  
@@ -12912,7 +13149,7 @@ index 5c50e4a..8f2529f 100644
      dc.arr[dc.n_arr].first = first;
      dc.arr[dc.n_arr].count = count;
      dc.n_arr++;
-@@ -1256,7 +3721,7 @@ static void sink_inline_array(void* user, const rsx_dispatch* r,
+@@ -1256,7 +3824,7 @@ static void sink_inline_array(void* user, const rsx_dispatch* r,
      dc.inl = data;
      dc.inl_bytes = bytes;
      dc.n_packets++;
@@ -12921,7 +13158,7 @@ index 5c50e4a..8f2529f 100644
      dc.arr[dc.n_arr].first = 0;
      dc.arr[dc.n_arr].count = bytes / stride;
      dc.n_arr++;
-@@ -1266,7 +3731,7 @@ static void sink_draw_index(void* user, const rsx_dispatch* r, u32 first, u32 co
+@@ -1266,7 +3834,7 @@ static void sink_draw_index(void* user, const rsx_dispatch* r, u32 first, u32 co
  {
      (void)user; (void)r;
      dc.n_packets++;
@@ -12930,7 +13167,7 @@ index 5c50e4a..8f2529f 100644
      dc.idx[dc.n_idx].first = first;
      dc.idx[dc.n_idx].count = count;
      dc.n_idx++;
-@@ -1278,55 +3743,534 @@ static void sink_draw_index(void* user, const rsx_dispatch* r, u32 first, u32 co
+@@ -1278,55 +3846,543 @@ static void sink_draw_index(void* user, const rsx_dispatch* r, u32 first, u32 co
   * render-to-texture read back through a texture unit), a unit naming a
   * tracked zeta in DEPTH24_D8 samples its snapshot, and everything else is a
   * guest upload (rsx_live_draw.c:5986-6062). */
@@ -13468,8 +13705,12 @@ index 5c50e4a..8f2529f 100644
 +        { const u64 t0 = eng_rdtsc();
 +          const u32 epoch0 = g.bind_epoch;
          textures[u] = eng_texture_slot(t.location, t.offset, t.format,
-                                        t.width, t.height, t.mipmaps, t.pitch,
-                                        (int)t.cubemap, t.remap & 0xFFFFu);
+-                                       t.width, t.height, t.mipmaps, t.pitch,
+-                                       (int)t.cubemap, t.remap & 0xFFFFu);
++                                       t.width, eng_tex3d_ok(&t) ? t.height * t.depth : t.height,
++                                       eng_tex3d_ok(&t) ? 1u : t.mipmaps, t.pitch,
++                                       (int)t.cubemap, (t.remap & 0xFFFFu) |
++                                       (eng_signed_store_ok(&t) ? ENG_REMAP_SIGNED_STORE : 0u));
 +          s_tex_slot_cyc += eng_rdtsc() - t0;
 +          if (textures[u] && g.bind_epoch == epoch0) {
 +              eng_unit_memo* mm = &s_unit_memo[u];
@@ -13478,10 +13719,17 @@ index 5c50e4a..8f2529f 100644
 +              mm->rt = 0; mm->slot = ENG_INVALID;
 +              mm->gen = g.rsx.tex_gen[u]; mm->enabled = 1;
 +          } }
++    }
++    /* Which cache-bound units hold offset-binary bytes (eng_signed_store_ok). */
++    s_tex_sstore = 0;
++    for (u32 u = 0; u < RSX_BE_MAX_TEXTURES; u++) {
++        if (!((mask >> u) & 1u) || !s_tex_src[u] || strcmp(s_tex_src[u], "texture cache") != 0) continue;
++        rsx_dsp_texture t; rsx_dsp_get_texture(&g.rsx, u, &t);
++        if (eng_signed_store_ok(&t)) s_tex_sstore |= 1u << u;
      }
      return mask;
  }
-@@ -1350,12 +4294,156 @@ static u32 sink_bind_vertex_textures(
+@@ -1350,12 +4406,156 @@ static u32 sink_bind_vertex_textures(
      return bound;
  }
  
@@ -13638,7 +13886,7 @@ index 5c50e4a..8f2529f 100644
      /* Everything that becomes triangles -- lists, strips, fans, quads, quad
       * strips and polygons -- is REBUILT into one triangle list through an
       * index buffer. A host strip topology cannot express a restart cut, which
-@@ -1368,41 +4456,68 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -1368,41 +4568,68 @@ static void sink_end(void* user, const rsx_dispatch* r)
      int scratch = 0;
      const int rebuild = eng_topology_rebuild(prim, 0, &scratch) != 0;
      if (!rebuild) {
@@ -13725,7 +13973,7 @@ index 5c50e4a..8f2529f 100644
  
      /* Textures before any pipeline or target binding: a cache refresh can
       * replace a resource, and the backend is free to submit while doing it. */
-@@ -1414,28 +4529,44 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -1414,28 +4641,44 @@ static void sink_end(void* user, const rsx_dispatch* r)
      memset(samplers, 0, sizeof samplers);
      memset(vtextures, 0, sizeof vtextures);
      memset(vsamplers, 0, sizeof vsamplers);
@@ -13781,7 +14029,7 @@ index 5c50e4a..8f2529f 100644
  
      /* The transform constant block, then the viewport epilogue the vertex
       * program's tail multiplies by: RSX window coordinates mapped into the
-@@ -1451,13 +4582,217 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -1451,13 +4694,217 @@ static void sink_end(void* user, const rsx_dispatch* r)
          xf[5] = -((vp.translate[1] - H * 0.5f) / (H * 0.5f));
          xf[6] = vp.translate[2];
      }
@@ -14002,7 +14250,7 @@ index 5c50e4a..8f2529f 100644
      if (g.fp_cb_cap < fp_bytes) {
          u8* n = (u8*)realloc(g.fp_cb, fp_bytes);
          if (!n) return;
-@@ -1469,8 +4804,35 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -1469,8 +4916,47 @@ static void sink_end(void* user, const rsx_dispatch* r)
          memcpy(g.fp_cb, g.fp_constants.values, g.fp_constants.count * 16u);
      { float* alpha = (float*)(g.fp_cb + nslots * 16u);
        alpha[0] = rsx_fp_alpha_ref(rs.alpha_ref_raw, rs.alpha_ref_format);
@@ -14030,7 +14278,19 @@ index 5c50e4a..8f2529f 100644
 +             * so this cannot change a pass that reads colour. */
 +            if (((s_tm_biased >> u) & 1u) && ((s_tex_srgb_src >> u) & 1u)) gam |= 7u;
 +            tp[2] = s_tex_reint[u] ? (float)s_tex_reint[u] : (float)gam;
-+            tp[3] = (float)((s_tm_biased >> u) & 1u);
++            /* .w: bit 0 BIASED (x2-1), bits 1-4 the signed channels (R, G, B, A),
++             * bit 5 those channels' bytes are stored offset binary; for a 3D
++             * unit (rsx_tex3d) bits 6-17 the depth, 18 r unnormalised, 19-22
++             * r's wrap mode, 23 t repeats. All under 2^24: exact in a float. */
++            u32 w3 = 0;
++            if ((s_tm_t3d >> u) & 1u) {
++                rsx_dsp_texture t3; rsx_dsp_get_texture(&g.rsx, u, &t3);
++                if (eng_tex3d_ok(&t3))
++                    w3 = (t3.depth << 6) | ((t3.format & RSX_TEX_FMT_UNNORM) ? 1u << 18 : 0u) |
++                         (((t3.wrap >> 16) & 0xFu) << 19) | (((t3.wrap >> 8) & 0xFu) == 1u ? 1u << 23 : 0u);
++            }
++            tp[3] = (float)(((s_tm_biased >> u) & 1u) | ((u32)((s_tm_signed >> (u * 4u)) & 0xFu) << 1) |
++                            (((s_tex_sstore >> u) & 1u) << 5) | w3);
 +        }
 +    }
  
@@ -14039,7 +14299,7 @@ index 5c50e4a..8f2529f 100644
      /* The depth attachment is cleared the first time it is bound, so a title
       * that never clears its shadow zeta still tests against something. */
      const u32 depth_handle = (zslot != ENG_INVALID) ? g.zdepths[zslot].handle : 0;
-@@ -1482,15 +4844,50 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -1482,15 +4968,50 @@ static void sink_end(void* user, const rsx_dispatch* r)
          g.zdepths[zslot].had_write = 0;
      }
  
@@ -14094,7 +14354,7 @@ index 5c50e4a..8f2529f 100644
  
      /* The guest scissor intersected with the surface. The nv40 reset is a
       * full 4096x4096 window and a never-written register reads 0 here, which
-@@ -1501,8 +4898,8 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -1501,8 +5022,8 @@ static void sink_end(void* user, const rsx_dispatch* r)
          u32 sw = g.surfaces[target].w, sh = g.surfaces[target].h;
          const u32 h = rsx_dsp_reg(&g.rsx, M_SCISSOR_HORIZONTAL);
          const u32 v = rsx_dsp_reg(&g.rsx, M_SCISSOR_VERTICAL);
@@ -14105,7 +14365,7 @@ index 5c50e4a..8f2529f 100644
          if (gw > 0 && gh > 0) {
              u32 right = sx + sw, bottom = sy + sh;
              if (gx > sx) sx = gx;
-@@ -1517,17 +4914,342 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -1517,17 +5038,342 @@ static void sink_end(void* user, const rsx_dispatch* r)
      /* Dynamic, and deliberately outside the pipeline key. */
      g.be->set_stencil_ref(g.be->user,
                            rsx_dsp_reg(&g.rsx, M_STENCIL_FUNC_REF) & 0xFFu);
@@ -14369,8 +14629,8 @@ index 5c50e4a..8f2529f 100644
 +                        for (u32 u = 0; u < RSX_BE_MAX_TEXTURES; u++) {
 +                            if (!(tex_mask & (1u << u))) continue;
 +                            rsx_dsp_texture tt; rsx_dsp_get_texture(&g.rsx, u, &tt);
-+                            fprintf(stderr, "[probe-units]   tex%u %u:%08X %ux%u fmt 0x%X remap %04X <- %s%c", u, tt.location, tt.offset,
-+                                    tt.width, tt.height, tt.format, tt.remap & 0xFFFFu,
++                            fprintf(stderr, "[probe-units]   tex%u %u:%08X %ux%ux%u dim %u pitch %u fmt 0x%X remap %04X filter %08X addr %08X <- %s%c", u, tt.location, tt.offset,
++                                    tt.width, tt.height, tt.depth, tt.dimension, tt.pitch, tt.format, tt.remap & 0xFFFFu, tt.filter, tt.wrap,
 +                                    s_tex_src[u] && *s_tex_src[u] ? s_tex_src[u] : "?", 10);
 +                        }
 +                        for (u32 c = 0; c < g.fp_constants.count && c < 12; c++) {
@@ -14453,7 +14713,7 @@ index 5c50e4a..8f2529f 100644
  }
  
  static void sink_clear(void* user, const rsx_dispatch* r, u32 mask)
-@@ -1536,6 +5258,14 @@ static void sink_clear(void* user, const rsx_dispatch* r, u32 mask)
+@@ -1536,6 +5382,14 @@ static void sink_clear(void* user, const rsx_dispatch* r, u32 mask)
      if (!g.ready) return;
      u32 targets[RSX_BE_MAX_COLOR_TARGETS];
      const u32 n_targets = eng_current_target_set(targets);
@@ -14468,7 +14728,7 @@ index 5c50e4a..8f2529f 100644
      if (!n_targets) return;
  
      if (mask & (RSX_CLEAR_COLOR_R | RSX_CLEAR_COLOR_G |
-@@ -1550,31 +5280,60 @@ static void sink_clear(void* user, const rsx_dispatch* r, u32 mask)
+@@ -1550,31 +5404,60 @@ static void sink_clear(void* user, const rsx_dispatch* r, u32 mask)
          /* Every target the set names, not only A: a deferred pass clears its
           * whole G-buffer in one CLEAR_SURFACE, and B, C and D would otherwise
           * keep whatever the last frame left in them. */
@@ -14536,7 +14796,7 @@ index 5c50e4a..8f2529f 100644
          }
      }
  }
-@@ -1585,16 +5344,534 @@ static void sink_clear(void* user, const rsx_dispatch* r, u32 mask)
+@@ -1585,16 +5468,534 @@ static void sink_clear(void* user, const rsx_dispatch* r, u32 mask)
   * scene's draws having executed (rsx_live_draw.c:7557-7570). */
  static u32 eng_present_surface(u32 buffer_id)
  {
@@ -15075,7 +15335,7 @@ index 5c50e4a..8f2529f 100644
  static void eng_present(u32 buffer_id)
  {
      if (!g.ready) return;
-@@ -1609,9 +5886,46 @@ static void eng_present(u32 buffer_id)
+@@ -1609,9 +6010,46 @@ static void eng_present(u32 buffer_id)
                      i, g.surfaces[i].location, g.surfaces[i].offset,
                      g.surfaces[i].w, g.surfaces[i].h, g.surfaces[i].handle);
      }
@@ -15122,7 +15382,7 @@ index 5c50e4a..8f2529f 100644
      g.last_guest_draws = g.guest_draws;
      g.guest_draws = 0;
  }
-@@ -1661,6 +5975,8 @@ int rsx_draw_engine_init(u32 width, u32 height)
+@@ -1661,6 +6099,8 @@ int rsx_draw_engine_init(u32 width, u32 height)
      g.height = height ? height : 720;
      g.vp_cb = (u8*)calloc(1, ENG_VP_CB_BYTES);
      if (!g.vp_cb) return -1;
@@ -15131,7 +15391,7 @@ index 5c50e4a..8f2529f 100644
      if (g.be->init && g.be->init(g.be->user, g.width, g.height) != 0) {
          free(g.vp_cb); g.vp_cb = NULL;
          return -1;
-@@ -1697,8 +6013,13 @@ void rsx_draw_engine_shutdown(void)
+@@ -1697,8 +6137,13 @@ void rsx_draw_engine_shutdown(void)
      if (g.ready && g.be->shutdown) g.be->shutdown(g.be->user);
  
      rsx_draw_engine_set_guest_memory(NULL, NULL);
@@ -15146,7 +15406,7 @@ index 5c50e4a..8f2529f 100644
      memset(&dc, 0, sizeof dc);
      free(g.tex_staging); free(g.vp_cb); free(g.fp_cb); free(g.indices);
      const rsx_draw_backend* be = g.be;
-@@ -1719,6 +6040,25 @@ void rsx_draw_engine_method(u32 method, u32 arg)
+@@ -1719,6 +6164,25 @@ void rsx_draw_engine_method(u32 method, u32 arg)
      rsx_dispatch_method(&g.rsx, m, arg);
  }
  
@@ -15172,7 +15432,7 @@ index 5c50e4a..8f2529f 100644
  void rsx_draw_engine_set_display_buffer(u32 buffer_id, u32 location, u32 offset,
                                          u32 pitch, u32 width, u32 height)
  {
-@@ -1745,10 +6085,363 @@ void rsx_draw_engine_present(void)
+@@ -1745,10 +6209,363 @@ void rsx_draw_engine_present(void)
       * a runner that both consumes 0xE944 and calls here would otherwise
       * re-present a double-buffered title's OTHER scanout. Presenting twice is
       * harmless either way -- the engine never clears the surface, so a second
@@ -15692,7 +15952,7 @@ index fa8b57d..74e64fe 100644
  /* --- test hooks ---------------------------------------------------------- */
  
 diff --git a/libs/video/rsx_fp_decompiler.c b/libs/video/rsx_fp_decompiler.c
-index 545670f..a6cbe78 100644
+index 545670f..c36220b 100644
 --- a/libs/video/rsx_fp_decompiler.c
 +++ b/libs/video/rsx_fp_decompiler.c
 @@ -160,7 +160,10 @@ int rsx_fp_collect_constants(
@@ -15788,7 +16048,7 @@ index 545670f..a6cbe78 100644
      case 0x1: return "input.col0";     /* COL0 */
      case 0x2: return "input.col1";     /* COL1 */
      case 0x3: return "input.fog";      /* FOGC */
-@@ -415,6 +472,68 @@ int rsx_fp_decompile(const u8* ucode, u32 max_bytes, u32 ctrl, char* out, u32 ou
+@@ -415,6 +472,86 @@ int rsx_fp_decompile(const u8* ucode, u32 max_bytes, u32 ctrl, char* out, u32 ou
      return rsx_fp_decompile_ex(ucode, max_bytes, ctrl, 0u, out, out_size);
  }
  
@@ -15818,20 +16078,38 @@ index 545670f..a6cbe78 100644
 +int rsx_fp_srgb_out = 0;
 +int rsx_fp_dynamic_tex = 0;
 +static int s_fp_dyn;     /* rsx_fp_dynamic_tex, for a buffered program (it needs the block) */
++/* 3D units (dynamic texture modes only). The engine binds each as one tall
++ * 2D image, its slices stacked top to bottom, and fp_texp .w carries the
++ * depth (bits 6-17), whether r is unnormalised (bit 18), r's wrap mode (bits
++ * 19-22) and whether t repeats (bit 23); rsx_tex3d picks the two slices
++ * around r and blends them. A Crack in Time's water keeps its splash ripples
++ * as a stack of frames, the frame for each patch of water picked from an
++ * index map: read as a plain 2D image, every patch showed the first frame,
++ * the splash repeated over the whole surface. */
++u32 rsx_fp_tex3d_mask = 0;
++
++/* A lookup on a 3D unit, coordinate `c` (a float3 expression), or 0 when
++ * the unit is not one. */
++static int fp_tex3d_rhs(char* rhs, size_t n, const char* tn, u32 unit, const char* c)
++{
++    if (!s_fp_dyn || !((rsx_fp_tex3d_mask >> (unit & 15u)) & 1u)) return 0;
++    snprintf(rhs, n, "rsx_tex3d(%s, rsx_samp[%u], %s, %uu)", tn, unit & 15u, c, unit & 15u);
++    return 1;
++}
 +
 +/* A fetch's value as the unit returns it (rsx_fp_gamma_mask, then
 + * rsx_fp_biased_mask). */
 +static void fp_tex_remap(char* rhs, size_t n, u32 unit)
 +{
 +    if (s_fp_dyn) {
-+        char t[704];
++        char t[2200];
 +        snprintf(t, sizeof t, "rsx_texmode(%s, %uu)", rhs, unit & 15u);
 +        snprintf(rhs, n, "%s", t);
 +        return;
 +    }
 +    const u32 gm = (u32)(rsx_fp_gamma_mask >> ((unit & 15u) * 4u)) & 0xFu;
 +    if (gm) {
-+        char t[704];
++        char t[2200];
 +        snprintf(t, sizeof t, "rsx_gamma(%s, float4(%u, %u, %u, %u))", rhs,
 +                 gm & 1u, (gm >> 1) & 1u, (gm >> 2) & 1u, (gm >> 3) & 1u);
 +        snprintf(rhs, n, "%s", t);
@@ -15857,7 +16135,7 @@ index 545670f..a6cbe78 100644
  static int rsx_fp_decompile_internal(
      const u8* ucode, u32 max_bytes, u32 ctrl, u32 tex_cube_mask,
      int buffered, char* out, u32 out_size, u32* out_constant_count)
-@@ -422,6 +541,8 @@ static int rsx_fp_decompile_internal(
+@@ -422,6 +559,8 @@ static int rsx_fp_decompile_internal(
      if (!ucode || !out || out_size == 0) return -1;
  
      u32 buffered_constant_count = 0;
@@ -15866,14 +16144,13 @@ index 545670f..a6cbe78 100644
      if (buffered) {
          rsx_fp_constant_block constants;
          const int result =
-@@ -488,6 +609,19 @@ static int rsx_fp_decompile_internal(
+@@ -488,6 +627,18 @@ static int rsx_fp_decompile_internal(
          u32 input_src = (w0 & FP_INPUT_SRC_MASK) >> FP_INPUT_SRC_SHIFT;
          u32 tex_unit  = (w0 & FP_TEX_UNIT_MASK) >> FP_TEX_UNIT_SHIFT;
          int is_branch = (w2 & FP_BRANCH) ? 1 : 0;
-+        /* Texture lookups this decompiler does not compare or does not do at
-+         * all: TXD anywhere, TXB/TXL or a cube map on a depth-compare unit
-+         * (those sample the raw depth). Logged once each, to see whether a
-+         * title uses them. */
++        /* Texture lookups worth knowing a title uses: TXD anywhere (explicit
++         * gradients), TXB/TXL or a cube map on a depth-compare unit (those
++         * sample the raw depth). Logged once each. */
 +        if (!is_branch && (opcode == OP_TXD || opcode == OP_TXB || opcode == OP_TXL || opcode == OP_TEX || opcode == OP_TXP)) {
 +            const int shadow = (rsx_fp_shadow_mask >> tex_unit) & 1u, cube = (tex_cube_mask >> tex_unit) & 1u;
 +            const int kind = opcode == OP_TXD ? 0 : (shadow && cube) ? 1 : (shadow && (opcode == OP_TXB || opcode == OP_TXL)) ? 2 : -1;
@@ -15886,7 +16163,16 @@ index 545670f..a6cbe78 100644
  
          /* Execution condition (exec_if) + condition-code write (set_cond).
           * Faithful to RPCS3 FragmentProgramDecompiler {GetRawCond, AddCodeCond,
-@@ -671,43 +805,49 @@ static int rsx_fp_decompile_internal(
+@@ -610,7 +761,7 @@ static int rsx_fp_decompile_internal(
+         }
+ 
+         /* Build the RHS expression for this opcode. */
+-        char rhs[640];
++        char rhs[2048];
+         int handled = 1;
+         switch (opcode) {
+         case OP_NOP: rhs[0] = '\0'; handled = 0; break;
+@@ -671,45 +822,133 @@ static int rsx_fp_decompile_internal(
          case OP_SGT: snprintf(rhs, sizeof(rhs), "(float4)((%s) >  (%s))", a, b); break;
          case OP_SNE: snprintf(rhs, sizeof(rhs), "(float4)((%s) != (%s))", a, b); break;
          case OP_SEQ: snprintf(rhs, sizeof(rhs), "(float4)((%s) == (%s))", a, b); break;
@@ -15910,8 +16196,10 @@ index 545670f..a6cbe78 100644
 +                break;
 +            }
 +            /* Cubemap: sample with the full 3-component direction vector. */
-+            snprintf(rhs, sizeof(rhs), "%s.Sample(rsx_samp[%u], (%s).%s)", tn, tex_unit, a,
-+                     ((tex_cube_mask >> tex_unit) & 1u) ? "xyz" : "xy");
++            { char c3[1100]; snprintf(c3, sizeof c3, "(%s).xyz", a);
++              if (!fp_tex3d_rhs(rhs, sizeof rhs, tn, tex_unit, c3))
++                  snprintf(rhs, sizeof(rhs), "%s.Sample(rsx_samp[%u], (%s).%s)", tn, tex_unit, a,
++                           ((tex_cube_mask >> tex_unit) & 1u) ? "xyz" : "xy"); }
 +            fp_tex_remap(rhs, sizeof rhs, tex_unit);
              break;
 -        case OP_TXP:
@@ -15924,6 +16212,7 @@ index 545670f..a6cbe78 100644
 +                         a, a, (unsigned)rsx_fp_shadow_func[tex_unit & 15u]);
 +                break;
 +            }
++            char c3[1100]; snprintf(c3, sizeof c3, "(%s).xyz / (%s).w", a, a);
              if ((tex_cube_mask >> tex_unit) & 1u)
                  /* Projective divide is meaningless for a cube lookup; sample
                   * the direction directly. */
@@ -15934,6 +16223,7 @@ index 545670f..a6cbe78 100644
 -                         "rsx_tex%u.Sample(rsx_samp[%u], (%s).xy / (%s).w)",
 -                         tex_unit, tex_unit, a, a);
 +                snprintf(rhs, sizeof(rhs), "%s.Sample(rsx_samp[%u], (%s).xyz)", tn, tex_unit, a);
++            else if (fp_tex3d_rhs(rhs, sizeof rhs, tn, tex_unit, c3)) {}
              else
 -                snprintf(rhs, sizeof(rhs),
 -                         "rsx_tex[%u].Sample(rsx_samp[%u], (%s).xy / (%s).w)",
@@ -15950,15 +16240,115 @@ index 545670f..a6cbe78 100644
              const int cube = (tex_cube_mask >> tex_unit) & 1u;
              char tn[32];
 -            snprintf(tn, sizeof(tn), tex_cube_mask ? "rsx_tex%u" : "rsx_tex[%u]", tex_unit);
+-            snprintf(rhs, sizeof(rhs), "%s.%s(rsx_samp[%u], (%s).%s, (%s).x)", tn,
+-                     opcode == OP_TXB ? "SampleBias" : "SampleLevel", tex_unit, a,
+-                     cube ? "xyz" : "xy", b);
 +            fp_tex_name(tn, sizeof tn, tex_cube_mask, tex_unit);
-             snprintf(rhs, sizeof(rhs), "%s.%s(rsx_samp[%u], (%s).%s, (%s).x)", tn,
-                      opcode == OP_TXB ? "SampleBias" : "SampleLevel", tex_unit, a,
-                      cube ? "xyz" : "xy", b);
++            char c3[1100]; snprintf(c3, sizeof c3, "(%s).xyz", a);
++            if (!fp_tex3d_rhs(rhs, sizeof rhs, tn, tex_unit, c3))
++                snprintf(rhs, sizeof(rhs), "%s.%s(rsx_samp[%u], (%s).%s, (%s).x)", tn,
++                         opcode == OP_TXB ? "SampleBias" : "SampleLevel", tex_unit, a,
++                         cube ? "xyz" : "xy", b);
 +            fp_tex_remap(rhs, sizeof rhs, tex_unit);
              break;
          }
++        /* The rest of the NV40 set (RPCS3 FragmentProgramDecompiler.cpp +
++         * GLSLCommon.cpp getFunction). Every one of these used to fall to the
++         * TODO below, which writes nothing: the destination kept whatever it
++         * held before. A Crack in Time's water builds its reflection vector
++         * with RFL, so the environment lookup sampled one fixed direction and
++         * the surface showed a flat blue at every grazing angle. */
++        case OP_RFL: snprintf(rhs, sizeof(rhs), "reflect((%s), (%s))", a, b); break;
++        case OP_DDX: snprintf(rhs, sizeof(rhs), "ddx(%s)", a); break;
++        case OP_DDY: snprintf(rhs, sizeof(rhs), "ddy(%s)", a); break;
++        case OP_DP2A: snprintf(rhs, sizeof(rhs), "dot((%s).xy, (%s).xy) + (%s).x", a, b, c); break;
++        case OP_DST: snprintf(rhs, sizeof(rhs), "float4(1.0, (%s).y * (%s).y, (%s).z, (%s).w)", a, b, a, b); break;
++        case OP_STR: snprintf(rhs, sizeof(rhs), "1.0"); break;
++        case OP_SFL: snprintf(rhs, sizeof(rhs), "0.0"); break;
++        /* RPCS3 _builtin_lit (lit_legacy). */
++        case OP_LIT:
++            snprintf(rhs, sizeof(rhs),
++                     "float4(1.0, max((%s).x, 0.0), (%s).x > 0.0 ? exp2((%s).w * log2(max((%s).y, 1e-10))) : 0.0, 1.0)",
++                     a, a, a, a);
++            break;
++        case OP_TXD: {
++            /* Explicit gradients: coordinate a, d/dx b, d/dy c. A depth-
++             * compare unit keeps the plain comparison. */
++            const int cube = (tex_cube_mask >> tex_unit) & 1u;
++            char tn[32];
++            fp_tex_name(tn, sizeof tn, tex_cube_mask, tex_unit);
++            if (((rsx_fp_shadow_mask >> tex_unit) & 1u) && !cube) {
++                snprintf(rhs, sizeof(rhs), "rsx_shadow(%s, rsx_samp[%u], (%s).xyz, %u)", tn, tex_unit, a,
++                         (unsigned)rsx_fp_shadow_func[tex_unit & 15u]);
++                break;
++            }
++            const char* sw = cube ? "xyz" : "xy";
++            char c3[1100]; snprintf(c3, sizeof c3, "(%s).xyz", a);
++            if (!fp_tex3d_rhs(rhs, sizeof rhs, tn, tex_unit, c3))
++                snprintf(rhs, sizeof(rhs), "%s.SampleGrad(rsx_samp[%u], (%s).%s, (%s).%s, (%s).%s)",
++                         tn, tex_unit, a, sw, b, sw, c, sw);
++            fp_tex_remap(rhs, sizeof rhs, tex_unit);
++            break;
++        }
++        /* Pack/unpack (NV_fragment_program PK2H/PK2US/PK4B/PK4UB and the
++         * UP forms): the packed word travels as the bits of a float. */
++        case OP_PK2H:
++            snprintf(rhs, sizeof(rhs), "asfloat(f32tof16((%s).x) | (f32tof16((%s).y) << 16))", a, a);
++            break;
++        case OP_UP2H:
++            snprintf(rhs, sizeof(rhs), "f16tof32(asuint((%s).x).xxxx >> uint4(0u, 16u, 0u, 16u))", a);
++            break;
++        case OP_PK2US:
++            snprintf(rhs, sizeof(rhs),
++                     "asfloat((uint)round(saturate((%s).x) * 65535.0) | ((uint)round(saturate((%s).y) * 65535.0) << 16))",
++                     a, a);
++            break;
++        case OP_UP2US:
++            snprintf(rhs, sizeof(rhs),
++                     "((float4)((asuint((%s).x).xxxx >> uint4(0u, 16u, 0u, 16u)) & 0xFFFFu) / 65535.0)", a);
++            break;
++        case OP_PK4UB:
++            snprintf(rhs, sizeof(rhs),
++                     "asfloat((uint)dot(round(saturate(%s) * 255.0).xy, float2(1.0, 256.0)) |"
++                     " ((uint)dot(round(saturate(%s) * 255.0).zw, float2(1.0, 256.0)) << 16))", a, a);
++            break;
++        case OP_UP4UB:
++            snprintf(rhs, sizeof(rhs),
++                     "((float4)((asuint((%s).x).xxxx >> uint4(0u, 8u, 16u, 24u)) & 0xFFu) / 255.0)", a);
++            break;
++        /* Signed bytes: 256 * frac(q / 256) is q's two's-complement byte,
++         * exact for |q| <= 127. */
++        case OP_PK4B:
++            snprintf(rhs, sizeof(rhs),
++                     "asfloat((uint)dot((256.0 * frac(round(clamp((%s), -1.0, 1.0) * 127.0) / 256.0)).xy, float2(1.0, 256.0)) |"
++                     " ((uint)dot((256.0 * frac(round(clamp((%s), -1.0, 1.0) * 127.0) / 256.0)).zw, float2(1.0, 256.0)) << 16))",
++                     a, a);
++            break;
++        case OP_UP4B:
++            snprintf(rhs, sizeof(rhs),
++                     "clamp((float4)((int4)(asuint((%s).x).xxxx << uint4(24u, 16u, 8u, 0u)) >> 24) / 127.0, -1.0, 1.0)", a);
++            break;
          case OP_KIL:
-@@ -839,6 +979,13 @@ static int rsx_fp_decompile_internal(
+             /* Fragment kill. Predicated by the same exec_if condition as any
+              * other instruction (RPCS3 FragmentProgramDecompiler case
+@@ -766,14 +1005,14 @@ static int rsx_fp_decompile_internal(
+             if (has_dest && is_uncond && !set_cond) {
+                 /* Common unconditional path — kept byte-identical so the 39
+                  * non-predicated programs in this capture emit unchanged. */
+-                char line[800];
++                char line[2400];
+                 snprintf(line, sizeof(line),
+                          "    { float4 _v = (float4)(%s)%s;%s %s[%u].%s = _v.%s; }\n",
+                          rhs, scale_txt[res_scale], sat, reg, dst_idx, m, m);
+                 out_puts(&o, line);
+             } else {
+                 /* Predicated and/or CC-writing instruction. */
+-                char buf[1200];
++                char buf[2600];
+                 snprintf(buf, sizeof(buf),
+                          "    { float4 _v = (float4)(%s)%s;%s\n",
+                          rhs, scale_txt[res_scale], sat);
+@@ -839,6 +1078,13 @@ static int rsx_fp_decompile_internal(
          half_exports = (ctrl & FP_CTRL_32BIT_EXPORTS) ? 0 : 1;
      }
      const char* export_file = half_exports ? "h" : "r";
@@ -15972,7 +16362,7 @@ index 545670f..a6cbe78 100644
  
      /* How many colour targets the program feeds: one past the highest export
       * register of the selected file it wrote. A program that writes only the
-@@ -851,33 +998,63 @@ static int rsx_fp_decompile_internal(
+@@ -851,33 +1097,63 @@ static int rsx_fp_decompile_internal(
      for (u32 t = FP_MAX_COLOR_TARGETS; t-- > 1; )
          if (wrote[half_exports][t]) { targets = t + 1; break; }
  
@@ -16044,7 +16434,7 @@ index 545670f..a6cbe78 100644
      Out p = { preamble, sizeof(preamble), 0, 1 };
      preamble[0] = '\0';
      out_puts(&p,
-@@ -891,8 +1068,10 @@ static int rsx_fp_decompile_internal(
+@@ -891,8 +1167,10 @@ static int rsx_fp_decompile_internal(
       * array declaration so 2D-only programs are byte-identical. When any unit
       * is a cubemap, declare each unit individually at its t-register so the
       * cube units can be TextureCube while the rest stay Texture2D. */
@@ -16056,7 +16446,7 @@ index 545670f..a6cbe78 100644
      } else {
          char decl[64];
          for (u32 u = 0; u < 16; u++) {
-@@ -904,18 +1083,138 @@ static int rsx_fp_decompile_internal(
+@@ -904,18 +1182,186 @@ static int rsx_fp_decompile_internal(
      out_puts(&p,
          "SamplerState rsx_samp[16] : register(s0);\n"
      );
@@ -16179,7 +16569,8 @@ index 545670f..a6cbe78 100644
 +        out_puts(&p,
 +            "float4 rsx_texmode(float4 c, uint u) {\n"
 +            "    float4 tp = fp_texp[u];\n"
-+            "    if (tp.z >= 16.0) {\n"                     /* RGBA8 bytes read as Y16_X16 */
++            "    float4 c0 = c;\n"
++            "    if (tp.z >= 16.0) {\n"                    /* RGBA8 bytes read as Y16_X16 */
 +            "        uint q = (uint)tp.z;\n"
 +            "        float4 b = round(saturate(c) * 255.0);\n"
 +            "        float k[6] = { (b.a * 256.0 + b.r) / 65535.0, (b.g * 256.0 + b.b) / 65535.0, 0.0, 1.0, 0.0, 1.0 };\n"
@@ -16191,14 +16582,61 @@ index 545670f..a6cbe78 100644
 +            "        float4 hi = pow(max((c + 0.055) / 1.055, 0.0), 2.4);\n"
 +            "        c = lerp(c, lerp(hi, c / 12.92, step(c, 0.04045)), m);\n"
 +            "    }\n"
-+            "    if (tp.w != 0.0) c = c * 2.0 - 1.0;\n"
++            "    uint w = (uint)tp.w;\n"
++            "    if ((w & 1u) != 0u) c = c * 2.0 - 1.0;\n"
++            /* Signed channels (fp_texp .w bits 1-4, R G B A): the texel's
++             * bytes as two's-complement over 127 (RPCS3 _sext_unorm8x4),
++             * in place of gamma and BIASED for those channels. Bit 5: the
++             * cache stored the bytes offset binary (XOR 0x80), so the
++             * filtered value decodes linearly -- (b - 128) / 127. */
++            "    if ((w & 62u) != 0u) {\n"
++            "        uint s = (w >> 1) & 15u;\n"
++            "        float4 m = float4(s & 1u, (s >> 1) & 1u, (s >> 2) & 1u, (s >> 3) & 1u);\n"
++            "        float4 sv;\n"
++            "        if ((w & 32u) != 0u) sv = (c0 * 255.0 - 128.0) / 127.0;\n"
++            "        else sv = (float4)(((int4)((uint4)floor(saturate(c0) * 255.0 + 0.5) << 24)) >> 24) / 127.0;\n"
++            "        c = lerp(c, sv, m);\n"
++            "    }\n"
 +            "    return c;\n"
++            "}\n");
++    /* A 3D unit bound as its slices stacked (rsx_fp_tex3d_mask). r's texel
++     * centres sit at n + 0.5, as on s and t; wrap mode 1 repeats over the
++     * depth, BORDER (4, and 5 CLAMP, whose edge is half border) reads the
++     * border colour past either end, the rest clamp. The border is taken as
++     * 0 -- in the offset-binary store (bit 5) that is 0x80, which decodes to
++     * 0. A Crack in Time's water indexes the splash frames from 1 and leaves
++     * still patches at 0, below the first slice: clamped, each of them showed
++     * the first frame, a tilted normal, and the patch flat blue. Within a
++     * slice t clamps half a texel short of the edge so the filter never
++     * reaches the next slice. */
++    if (s_fp_dyn && rsx_fp_tex3d_mask)
++        out_puts(&p,
++            "float4 rsx_tex3d(Texture2D t, SamplerState s, float3 c, uint u) {\n"
++            "    float4 tp = fp_texp[u];\n"
++            "    uint w = (uint)tp.w;\n"
++            "    float d = max((float)((w >> 6) & 4095u), 1.0);\n"
++            "    float tw, th; t.GetDimensions(tw, th);\n"
++            "    float hs = max(th / d, 1.0);\n"
++            "    float2 uv = c.xy * tp.xy;\n"
++            "    float zt = (((w >> 18) & 1u) != 0u ? c.z : c.z * d) - 0.5;\n"
++            "    float l0 = floor(zt); float f = zt - l0; float l1 = l0 + 1.0;\n"
++            "    uint wr = (w >> 19) & 15u;\n"
++            "    bool o0 = l0 < 0.0 || l0 > d - 1.0, o1 = l1 < 0.0 || l1 > d - 1.0;\n"
++            "    if (wr == 1u) { l0 -= d * floor(l0 / d); l1 -= d * floor(l1 / d); o0 = false; o1 = false; }\n"
++            "    else { l0 = clamp(l0, 0.0, d - 1.0); l1 = clamp(l1, 0.0, d - 1.0); }\n"
++            "    bool bd = wr == 4u || wr == 5u;\n"
++            "    float4 bc = (w & 32u) != 0u ? (float4)(128.0 / 255.0) : (float4)0;\n"
++            "    float v = ((w >> 23) & 1u) != 0u ? frac(uv.y) : saturate(uv.y);\n"
++            "    v = clamp(v, 0.5 / hs, 1.0 - 0.5 / hs);\n"
++            "    float4 a = bd && o0 ? bc : t.SampleLevel(s, float2(uv.x, (l0 + v) / d), 0.0);\n"
++            "    float4 b = bd && o1 ? bc : t.SampleLevel(s, float2(uv.x, (l1 + v) / d), 0.0);\n"
++            "    return lerp(a, b, f);\n"
 +            "}\n");
 +    if (targets == 1 && !depth_export) {
          out_puts(&p, "float4 main(PSInput input) : SV_TARGET {\n");
      } else {
          out_puts(&p, "struct PSOutput {\n");
-@@ -925,6 +1224,7 @@ static int rsx_fp_decompile_internal(
+@@ -925,6 +1371,7 @@ static int rsx_fp_decompile_internal(
                       "    float4 t%u : SV_TARGET%u;\n", t, t);
              out_puts(&p, member);
          }
@@ -16206,7 +16644,7 @@ index 545670f..a6cbe78 100644
          out_puts(&p, "};\n"
                       "PSOutput main(PSInput input) {\n");
      }
-@@ -1143,7 +1443,7 @@ int rsx_fp_extract_consts(const u8* ucode, u32 max_bytes, float* out, int max_ou
+@@ -1143,7 +1590,7 @@ int rsx_fp_extract_consts(const u8* ucode, u32 max_bytes, float* out, int max_ou
      }
      { static int dbg = -1;
        if (dbg < 0) { const char* e = getenv("FP_KDBG"); dbg = e ? atoi(e) : 0; }
@@ -16215,7 +16653,7 @@ index 545670f..a6cbe78 100644
          fprintf(stderr, "[FPK] %d consts%c", n, 10);
          for (int _q = 0; _q < n; _q++)
              fprintf(stderr, "   k[%2d] = (%g %g %g %g)%c", _q, out[_q*4+0],
-@@ -1215,7 +1515,7 @@ int rsx_fp_apply_unnorm_scale(char* hlsl, u32 hlsl_size, u32 unnorm_mask,
+@@ -1215,7 +1662,7 @@ int rsx_fp_apply_unnorm_scale(char* hlsl, u32 hlsl_size, u32 unnorm_mask,
      for (u32 u = 0; u < 16; u++) {
          if (!((unnorm_mask >> u) & 1u)) continue;
          if ((cube_mask >> u) & 1u) continue;
@@ -16224,7 +16662,7 @@ index 545670f..a6cbe78 100644
          if (!w || !h) continue;
  
          /* Both spellings the emitter produces for a 2D unit. */
-@@ -1242,8 +1542,11 @@ int rsx_fp_apply_unnorm_scale(char* hlsl, u32 hlsl_size, u32 unnorm_mask,
+@@ -1242,8 +1689,11 @@ int rsx_fp_apply_unnorm_scale(char* hlsl, u32 hlsl_size, u32 unnorm_mask,
                  if (*p != ')') break;
  
                  char scale[80];
@@ -16239,10 +16677,10 @@ index 545670f..a6cbe78 100644
                  const u32 used = (u32)strlen(hlsl);
                  if (used + slen + 1 > hlsl_size) return -1;
 diff --git a/libs/video/rsx_fp_decompiler.h b/libs/video/rsx_fp_decompiler.h
-index cbec250..41829d8 100644
+index cbec250..4359a3b 100644
 --- a/libs/video/rsx_fp_decompiler.h
 +++ b/libs/video/rsx_fp_decompiler.h
-@@ -84,6 +84,23 @@ float rsx_fp_alpha_ref(u32 raw, u32 surface_color_format);
+@@ -84,6 +84,24 @@ float rsx_fp_alpha_ref(u32 raw, u32 surface_color_format);
   * unnorm_mask selects the units; dim[u] gives that unit's {width, height};
   * cube units are skipped. Returns the number of Sample sites patched, or -1 if
   * the buffer would overflow. A no-op when unnorm_mask is 0. */
@@ -16263,10 +16701,11 @@ index cbec250..41829d8 100644
 + * where there were hundreds. rsx_fp_gamma_mask / rsx_fp_biased_mask are
 + * ignored then; rsx_fp_apply_unnorm_scale with dim NULL scales by fp_texp. */
 +extern int rsx_fp_dynamic_tex;
++extern u32 rsx_fp_tex3d_mask;   /* 3D units, bound as stacked slices (dynamic modes) */
  int rsx_fp_apply_unnorm_scale(char* hlsl, u32 hlsl_size, u32 unnorm_mask,
                                const u32 dim[][2], u32 cube_mask);
  
-@@ -126,6 +143,10 @@ int rsx_fp_collect_constants(
+@@ -126,6 +144,10 @@ int rsx_fp_collect_constants(
   * malformed input. */
  u64 rsx_fp_structural_hash(const u8* ucode, u32 max_bytes, u64 seed);
  
@@ -19445,7 +19884,7 @@ index ad21361..bf55d13 100644
   * refs is rewritten in place with the unique prefix.  The occurrence map
   * remains valid until the next call using the same remap object. */
 diff --git a/libs/video/rsx_vp_decompiler.c b/libs/video/rsx_vp_decompiler.c
-index edd01d6..e5b6d85 100644
+index edd01d6..31def54 100644
 --- a/libs/video/rsx_vp_decompiler.c
 +++ b/libs/video/rsx_vp_decompiler.c
 @@ -31,6 +31,7 @@
@@ -19494,6 +19933,24 @@ index edd01d6..e5b6d85 100644
  void rsx_vp_set_branch_base(u32 start_slot) { s_vp_branch_base = start_slot; }
  
  /* BRA BRI CAL CLI RET BRB CLB (scalar opcodes). */
+@@ -410,7 +438,7 @@ static int rsx_vp_decompile_impl(
+             case 0x03: snprintf(rhs,sizeof rhs,"(%s)+(%s)",A,C); break;        /* ADD: src0 + src2 */
+             case 0x04: snprintf(rhs,sizeof rhs,"vp_mul((%s),(%s))+(%s)",A,B,C); break; /* MAD */
+             case 0x05: snprintf(rhs,sizeof rhs,"vp_dot3((%s),(%s))",A,B); break; /* DP3 */
+-            case 0x06: snprintf(rhs,sizeof rhs,"(vp_dot3((%s),(%s))+(%s).w)",A,B,B); break; /* DPH */
++            case 0x06: snprintf(rhs,sizeof rhs,"vp_dot4(float4((%s).xyz,1.0),(%s))",A,B); break; /* DPH: dot3 + b.w */
+             case 0x07: snprintf(rhs,sizeof rhs,"vp_dot4((%s),(%s))",A,B); break; /* DP4 */
+             case 0x08: snprintf(rhs,sizeof rhs,"float4(1,(%s).y*(%s).y,(%s).z,(%s).w)",A,B,A,B); break; /* DST */
+             case 0x09: snprintf(rhs,sizeof rhs,"min((%s),(%s))",A,B); break;   /* MIN */
+@@ -457,7 +485,7 @@ static int rsx_vp_decompile_impl(
+             if (handled) {
+                 char m[6]; mask_str(vmx,vmy,vmz,vmw,m);
+                 char line[600];
+-                snprintf(line,sizeof line,"    { float4 _v = (float4)(%s);%s\n",
++                snprintf(line,sizeof line,"    { precise float4 _v = (float4)(%s);%s\n",
+                          rhs, saturate ? " _v = saturate(_v);" : "");
+                 emit(&b, line);
+                 if (vec_result && dst_out != 0x1F)
 @@ -501,9 +529,22 @@ static int rsx_vp_decompile_impl(
                           "        if (%s) { if (_csp > 0) { _csp--; _pc = _cs[_csp]; } else _pc = -1; } else _pc = %d;\n",
                           c, next);
@@ -19520,12 +19977,85 @@ index edd01d6..e5b6d85 100644
              }
          }
          /* ---- scalar ALU (reads SRC2) ---- */
-@@ -659,7 +700,11 @@ static int rsx_vp_decompile_impl(
+@@ -535,7 +576,7 @@ static int rsx_vp_decompile_impl(
+             if (rhs[0]) {
+                 char m[6]; mask_str(smx,smy,smz,smw,m);
+                 char line[600];
+-                snprintf(line,sizeof line,"    { float4 _v = (float4)(%s);%s\n",
++                snprintf(line,sizeof line,"    { precise float4 _v = (float4)(%s);%s\n",
+                          rhs, saturate ? " _v = saturate(_v);" : "");
+                 emit(&b, line);
+                 /* SCA writes the output register when the VEC unit does not
+@@ -605,11 +646,50 @@ static int rsx_vp_decompile_impl(
+          * text came out NaN, which the FP's NaN guard turned into black. */
+         /* Scalar logic per component: glslang's HLSL front end (the Metal
+          * path) does not take || on vectors. */
+-        "float vp_mul1(float a, float b) { return (a == 0.0 || b == 0.0) ? 0.0 : a * b; }\n"
++        /* DP3/DP4/DPH as if summed in double precision, then rounded once
++         * (Ogita-Rump-Oishi Dot2: each product's rounding error from an FMA,
++         * each sum's from TwoSum, all added back at the end). Rounding after
++         * every product and add, as plain HLSL does, is not what the RSX
++         * gives: a position far from the map origin (world coordinates in the
++         * thousands) times a camera row nearly cancels against the row's
++         * translation, and the per-step roundings left ~0.3 mm of error that
++         * changed with every camera move. Ratchet's eyes, his ear stripes
++         * and the decals on his gun z-fought their own model in the Insomniac
++         * Museum and parts of the story -- worst looking along the axis with
++         * the large coordinate, clean on the console. Everything is `precise`
++         * (NoContraction): the error terms are only exact if the compiler
++         * neither fuses nor reorders them. A non-finite result (an overflow,
++         * where the error terms turn NaN) falls back to the plain sum. */
++        "float vp_mul1(float a, float b) { precise float p = a * b; return (a == 0.0 || b == 0.0) ? 0.0 : p; }\n"
+         "float4 vp_mul(float4 a, float4 b) { return float4(vp_mul1(a.x, b.x), vp_mul1(a.y, b.y),"
+         " vp_mul1(a.z, b.z), vp_mul1(a.w, b.w)); }\n"
+-        "float vp_dot3(float4 a, float4 b) { float4 m = vp_mul(a, b); return m.x + m.y + m.z; }\n"
+-        "float vp_dot4(float4 a, float4 b) { float4 m = vp_mul(a, b); return m.x + m.y + m.z + m.w; }\n");
++        /* a*b - p exactly, for p = the rounded product (0 under the 0*x rule):
++         * Dekker's product from Veltkamp halves. Only multiplies and adds,
++         * which Vulkan requires correctly rounded -- an FMA (mad) need not be
++         * fused there, and an unfused one would make the error term wrong. */
++        "float vp_mul_err(float a, float b, float p) {\n"
++        "    precise float ca = 4097.0 * a; precise float ah = ca - (ca - a); precise float al = a - ah;\n"
++        "    precise float cb = 4097.0 * b; precise float bh = cb - (cb - b); precise float bl = b - bh;\n"
++        "    precise float e = ((ah * bh - p) + ah * bl + al * bh) + al * bl;\n"
++        "    return (a == 0.0 || b == 0.0) ? 0.0 : e; }\n"
++        /* (p, s) += a*b: p the running rounded sum, s the running error */
++        "void vp_dot_step(inout float p, inout float s, float a, float b) {\n"
++        "    precise float h = vp_mul1(a, b); precise float r = vp_mul_err(a, b, h);\n"
++        "    precise float t = p + h; precise float z = t - p;\n"
++        "    precise float q = (p - (t - z)) + (h - z);\n"
++        "    p = t; precise float s2 = s + (q + r); s = s2; }\n"
++        "float vp_dot3(float4 a, float4 b) {\n"
++        "    precise float p = vp_mul1(a.x, b.x); precise float s = vp_mul_err(a.x, b.x, p);\n"
++        "    vp_dot_step(p, s, a.y, b.y); vp_dot_step(p, s, a.z, b.z);\n"
++        "    precise float d = p + s;\n"
++        "    float4 m = vp_mul(a, b); precise float plain = m.x + m.y + m.z;\n"
++        "    return isfinite(d) ? d : plain; }\n"
++        "float vp_dot4(float4 a, float4 b) {\n"
++        "    precise float p = vp_mul1(a.x, b.x); precise float s = vp_mul_err(a.x, b.x, p);\n"
++        "    vp_dot_step(p, s, a.y, b.y); vp_dot_step(p, s, a.z, b.z); vp_dot_step(p, s, a.w, b.w);\n"
++        "    precise float d = p + s;\n"
++        "    float4 m = vp_mul(a, b); precise float plain = m.x + m.y + m.z + m.w;\n"
++        "    return isfinite(d) ? d : plain; }\n");
+ 
+     for (u32 vtu = 0; vtu < 4; vtu++) {
+         if (!((vtex_mask >> vtu) & 1u)) continue;
+@@ -642,7 +722,7 @@ static int rsx_vp_decompile_impl(
+         }
+     }
+     emit(&o,
+-        "    float4 r[32]; float4 o[16];\n"
++        "    precise float4 r[32]; precise float4 o[16];\n"
+         "    [unroll] for (int _i=0;_i<32;_i++) r[_i]=(float4)0;\n"
+         "    [unroll] for (int _j=0;_j<16;_j++) o[_j]=float4(0,0,0,1);\n"
+         "    int4 a0 = (int4)0; int4 a1 = (int4)0;\n"
+@@ -659,7 +739,12 @@ static int rsx_vp_decompile_impl(
      emit(&o,
          "    VSOutput Out;\n"
          "    float4 _p = o[0];\n"
 -        "    Out.pos = float4(_p.xyz * vp_posscale.xyz + _p.w * vp_posoffset.xyz, _p.w);\n"
-+        "    Out.pos = float4(_p.xyz * vp_posscale.xyz + _p.w * vp_posoffset.xyz, _p.w);\n");
++        "    precise float4 _hpos = float4(_p.xyz * vp_posscale.xyz + _p.w * vp_posoffset.xyz, _p.w);\n"
++        "    Out.pos = _hpos;\n");
 +    /* RSX_VP_Z_DEBUG=1: every vertex at mid depth -- separates "the geometry
 +     * is off the target" from "its depth is out of range" (a diagnostic). */
 +    if (getenv("RSX_VP_Z_DEBUG")) emit(&o, "    Out.pos.z = Out.pos.w * 0.5;\n");
@@ -25482,6 +26012,203 @@ index 0000000..2762e6e
 +}
 +#endif
 +#endif
+diff --git a/libs/video/tests/test_gcm_resync_excursion.c b/libs/video/tests/test_gcm_resync_excursion.c
+new file mode 100644
+index 0000000..865b1ec
+--- /dev/null
++++ b/libs/video/tests/test_gcm_resync_excursion.c
+@@ -0,0 +1,191 @@
++/* A resync from outside the ring sweeps the block put is in, not the IO
++ * space between the two (cellGcmSys.c, gcm_fifo_resync_why).
++ *
++ * Ratchet & Clank: A Crack in Time double-buffers its frames in two 5 MB
++ * blocks, A and B. Each starts with a header (semaphore releases and a flip),
++ * the frame follows, and the frame ends in a JUMP to the other block's header;
++ * put stops just past that header. Reading text in the museum or the Battleplex
++ * sometimes left the walker taking a JUMP from the start of B into low IO that
++ * held a data table, not commands. It hit a bad word there and resynced to put
++ * (A + 0x24). The fence sweep then ran from that low address up to put, across
++ * 22 to 27 MB of IO: textures, vertex data and the stale frames in A. It
++ * queued 781 to 5724 old SET_REFERENCE values, more the longer the session.
++ * The label walk stopped on the first bad word, so the releases in A's header
++ * were never replayed. The title spun on that frame's release until its own
++ * "GPU sit and spin" timeout, about 40 seconds with the screen frozen.
++ *
++ * The walker took a JUMP into A's header two frames earlier, so that target
++ * is where put's block starts. The resync now sweeps from there.
++ *
++ * Layout (IO offsets):
++ *   0x3F0000  previous frame's tail: JUMP A
++ *   0x400000  A: header (release 0x400), a method, JUMP B
++ *   0x480000  B: header (release 0x400), then a JUMP into low IO
++ *   0x001000  low IO: one method, then a word that branches to unmapped IO
++ *   0x002000  stale data: 64 old SET_REFERENCE commands
++ *
++ * zig cc -target x86_64-windows-gnu -std=gnu17 -I include -I libs/video
++ *   libs/video/tests/test_gcm_resync_excursion.c -ffunction-sections
++ *   -fdata-sections -Wl,--gc-sections -o test_gcm_resync_excursion.exe
++ */
++#include "../cellGcmSys.c"
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++uint8_t* vm_base;
++uint32_t ppu_vm_size;
++int g_resv_store_active;
++uint32_t g_ww_lo, g_ww_hi;
++void ppu_resv_break_store(uint64_t ea) { (void)ea; }
++void ps3_ww_report_inline(uint32_t a, uint64_t v, int w) { (void)a; (void)v; (void)w; }
++int spu_coh_is_reserved(uint32_t a) { (void)a; return 0; }
++void spu_coh_notify_write(uint32_t a) { (void)a; }
++void spu_lockline_lock(void) {}
++void spu_lockline_unlock(void) {}
++ps3_guest_caller_fn g_ps3_guest_caller;
++PPU_THREAD_LOCAL ppu_context* g_active_ctx;
++u32 g_rsx_last_reference;
++void (*g_spu_put_hook)(uint32_t ea, uint32_t size);
++void ppu_dump_bctrl_ring(uint32_t n, const char* why) { (void)n; (void)why; }
++void ppu_dump_guest_stack(ppu_context* c, const char* why) { (void)c; (void)why; }
++void rsx_state_init(rsx_state* state) { (void)state; }
++int  rsx_process_method(rsx_state* state, u32 method, u32 data) { (void)state; (void)method; (void)data; return 0; }
++int  rsx_draw_engine_enabled(void) { return 0; }
++int  rsx_process_vp_run(rsx_state* state, u32 method, const u8* src, u32 count)
++{ (void)state; (void)method; (void)src; (void)count; return 0; }
++rsx_backend* rsx_get_backend(void) { return NULL; }
++void rsx_draw_engine_method(u32 method, u32 arg) { (void)method; (void)arg; }
++void rsx_draw_engine_note_flip(u32 buffer_id) { (void)buffer_id; }
++void rsx_draw_engine_set_display_buffer(u32 id, u32 location, u32 offset, u32 pitch, u32 width, u32 height)
++{ (void)id; (void)location; (void)offset; (void)pitch; (void)width; (void)height; }
++void rsx_draw_engine_guest_read(u32 l, u32 o, u32 p, u32 w, u32 h) { (void)l; (void)o; (void)p; (void)w; (void)h; }
++void rsx_draw_engine_guest_wrote(u32 l, u32 o, u32 p, u32 w, u32 h) { (void)l; (void)o; (void)p; (void)w; (void)h; }
++int  rsx_live_draw_enabled(void) { return 0; }
++void rsx_live_draw_method(u32 method, u32 arg) { (void)method; (void)arg; }
++int  rsx_live_draw_blit(u32 a, u32 b, u32 c, u32 d, u32 e, u32 f, u32 w, u32 h)
++{ (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; (void)w; (void)h; return 0; }
++void rsx_live_draw_note_resolve(u32 a, u32 b, u32 c, u32 d) { (void)a; (void)b; (void)c; (void)d; }
++int  rsx_live_draw_resolve_blit(u32 a, u32 b, u32 c, u32 d, u32 e, u32 f, u32 g, u32 h,
++                                u32 i, u32 j, u32 k, u32 l)
++{ (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; (void)g; (void)h; (void)i; (void)j; (void)k; (void)l; return 0; }
++void rsx_raise_user_cmd(uint32_t arg) { (void)arg; }
++/* RACiT's runtime hooks the walker also calls. */
++void edgezlib_check_range(u32 ea, u32 len) { (void)ea; (void)len; }
++uint64_t ps3_guest_clock_epoch_qpc(void) { return 0; }
++void ps3_tl(char ev, u32 a, u32 b) { (void)ev; (void)a; (void)b; }
++u32  rsx_draw_engine_park_id(void) { return 0; }
++void rsx_stats_add(u32 a, u32 b, u32 c) { (void)a; (void)b; (void)c; }
++void rsx_ww_poll(void) {}
++void rsx_ww_poll_heap(void) {}
++int  vm_plain_copy(u32 dst, u32 src, u32 n) { memmove(vm_base + dst, vm_base + src, n); return 1; }
++u8*  vm_plain_span(u32 ea, u32 n, int write) { (void)n; (void)write; return vm_base + ea; }
++
++#define IO_ADDR   0x00800000u
++#define IO_SIZE   0x00800000u
++#define CMD_SIZE  0x00010000u
++
++#define BLK_A     0x00400000u
++#define BLK_B     0x00480000u
++#define PREV_TAIL 0x003F0000u
++#define LOW       0x00001000u
++#define STALE     0x00002000u
++#define N_STALE   64u
++
++static uint32_t g_heap = 0x00400000u;
++static u32 host_alloc(u32 size, u32 align)
++{
++    if (!align) align = 4;
++    g_heap = (g_heap + align - 1u) & ~(align - 1u);
++    u32 r = g_heap;
++    g_heap += size;
++    return r;
++}
++static void gw32(uint32_t ea, uint32_t v)
++{
++    uint8_t* p = vm_base + ea;
++    p[0] = (uint8_t)(v >> 24); p[1] = (uint8_t)(v >> 16); p[2] = (uint8_t)(v >> 8); p[3] = (uint8_t)v;
++}
++static void host_w32(u32 ea, u32 v) { gw32(ea, v); }
++
++static int fails;
++static void check(int ok, const char* what)
++{
++    printf("[%s] %s\n", ok ? "PASS" : "FAIL", what);
++    fails += !ok;
++}
++
++/* One method, count 1, subchannel 0. */
++static u32 put_method(u32 io, u32 method, u32 arg)
++{
++    gw32(IO_ADDR + io, (1u << 18) | method);
++    gw32(IO_ADDR + io + 4, arg);
++    return io + 8;
++}
++static u32 put_jump(u32 io, u32 target)
++{
++    gw32(IO_ADDR + io, 0x20000000u | target);
++    return io + 4;
++}
++/* A block header: NV406E semaphore offset 0x400, release `v`. */
++static u32 put_header(u32 io, u32 v)
++{
++    io = put_method(io, 0x0064u, 0x0400u);
++    return put_method(io, 0x006Cu, v);
++}
++
++static void run(const uint32_t ctrl, u32 put)
++{
++    vm_write32(ctrl + 0, put);
++    cellGcm_rsx_process_fifo();
++}
++
++int main(void)
++{
++    setvbuf(stdout, NULL, _IONBF, 0);
++    const uint32_t vm_size = ppu_hle_inject_base + 0x10000u;
++    vm_base = (uint8_t*)calloc(1, vm_size);
++    if (!vm_base) { puts("FAIL: guest VM alloc"); return 1; }
++    ppu_vm_size = vm_size;
++
++    u32 ctx_out = host_alloc(4, 4);
++    (void)cellGcmSetupContext(ctx_out, CMD_SIZE, IO_SIZE, IO_ADDR, host_alloc, host_w32);
++    const uint32_t ctrl = (uint32_t)(uintptr_t)cellGcmGetControlRegister();
++
++    /* Stale data well below the ring: old fences a linear sweep would find. */
++    for (u32 i = 0; i < N_STALE; i++)
++        (void)put_method(STALE + i * 16u, 0x0050u, 0xBAD00000u + i);
++
++    /* Frame 1: the previous frame's tail jumps to A; A's frame ends in a
++     * JUMP to B; put stops past B's header. */
++    (void)put_jump(PREV_TAIL, BLK_A);
++    u32 io = put_header(BLK_A, 0x11u);
++    io = put_method(io, 0x1FCCu, 0x6Fu);
++    (void)put_jump(io, BLK_B);
++    const u32 b_put = put_header(BLK_B, 0x22u);
++
++    s_fifo_getoff = PREV_TAIL;
++    vm_write32(ctrl + 4, PREV_TAIL);
++    run(ctrl, b_put);
++    check(s_fifo_getoff == b_put, "frame 1 walks A and stops past B's header");
++    check(vm_read32(GCM_LABEL_GUEST_BASE + 0x400u) == 0x22u, "B's header release reached the label");
++
++    /* Frame 2: B's frame starts with a JUMP into low IO, where a method is
++     * followed by a word that branches to unmapped IO. A gets its next header
++     * and put stops past it. */
++    (void)put_jump(b_put, LOW);
++    io = put_method(LOW, 0x1FCCu, 0x6Fu);
++    gw32(IO_ADDR + io, 0x3F800000u);                    /* float 1.0: JUMP 0x1F800000 */
++    const u32 a_put = put_header(BLK_A, 0x33u);
++
++    const u32 pushed_before = s_ref_qtail;
++    run(ctrl, a_put);
++    check(s_fifo_getoff == a_put, "the bad branch resyncs get to put");
++    check(vm_read32(GCM_LABEL_GUEST_BASE + 0x400u) == 0x33u,
++          "the release in A's header, skipped by the resync, was replayed");
++    check(s_ref_qtail == pushed_before,
++          "no stale SET_REFERENCE from below the ring was queued");
++
++    printf("[gcm_resync_excursion] %s (%d failed)\n", fails ? "FAIL" : "PASS", fails);
++    free(vm_base);
++    return fails ? 1 : 0;
++}
 diff --git a/libs/video/tests/test_rsx_draw_engine.c b/libs/video/tests/test_rsx_draw_engine.c
 index 704ccef..7beb023 100644
 --- a/libs/video/tests/test_rsx_draw_engine.c
@@ -26647,7 +27374,6 @@ index acbaf12..6ca46a3 100644
  }
  
 diff --git a/runtime/ppu/ppu_loader.cpp b/runtime/ppu/ppu_loader.cpp
-index e73a151..bc83b9d 100644
 --- a/runtime/ppu/ppu_loader.cpp
 +++ b/runtime/ppu/ppu_loader.cpp
 @@ -377,8 +377,9 @@ static void sc_trace(uint64_t num, ppu_context* ctx, uint64_t a3, uint64_t a4,
@@ -27572,7 +28298,61 @@ index e73a151..bc83b9d 100644
              fprintf(stderr,"[memfix] copy dst=0x%08X src=0x%08X n=0x%X -> 0x400240A8 gets src[0x%08X]=0x%08X\n",
                      dst, src, n, soff, sval);
      }
-@@ -2338,8 +2843,13 @@ static void icall_hist(ppu_context* ctx, uint32_t tgt, int phase)
+@@ -2078,6 +2583,7 @@ static uint32_t ppu_code_hi(void)
+     return hi;
+ }
+ 
++#include "ppu_stack_read.h"
+ extern "C" void ppu_dump_guest_stack(ppu_context* ctx, const char* tag)
+ {
+     if (!ctx || !vm_base) return;
+@@ -2108,7 +2614,7 @@ extern "C" void ppu_dump_guest_stack(ppu_context* ctx, const char* tag)
+           fprintf(stderr, "%s\n", gr);
+       } }
+     if (!vm_oob(sp,4)) { char rw[600]; int rp=snprintf(rw,sizeof rw,"      rawstk:");
+-        for (int i=0;i<24 && !vm_oob(sp+i*4,4);i++){ uint32_t t; memcpy(&t,vm_base+sp+i*4,4); rp+=snprintf(rw+rp,sizeof(rw)-rp," %08X",__builtin_bswap32(t)); }
++        for (int i=0;i<24 && !vm_oob(sp+i*4,4);i++){ uint32_t t; if (!racit_stack_read(sp+i*4,&t)) return; rp+=snprintf(rw+rp,sizeof(rw)-rp," %08X",__builtin_bswap32(t)); }
+         fprintf(stderr,"%s\n",rw); }
+     /* Identify the worker's dispatched method: func_000750A8 vcalls
+      * [[arg+0xC]+0] (code) with toc [[arg+0xC]+4]. Dump for the known thread
+@@ -2118,11 +2624,11 @@ extern "C" void ppu_dump_guest_stack(ppu_context* ctx, const char* tag)
+       for (int j=0;j<2;j++){ uint32_t o=args[j];
+         if (vm_oob(o+0x10,4)) continue;
+         uint32_t vt, code, toc; { uint32_t t;
+-          memcpy(&t,vm_base+o+0xC,4); vt=__builtin_bswap32(t);
++          if (!racit_stack_read(o+0xC,&t)) return; vt=__builtin_bswap32(t);
+           if (vt<0x600000 || vt>=0x50000000u) { /* vt could be a guest ptr */ }
+         }
+-        if (!vm_oob(vt,8)) { uint32_t t; memcpy(&t,vm_base+vt,4); code=__builtin_bswap32(t);
+-          memcpy(&t,vm_base+vt+4,4); toc=__builtin_bswap32(t);
++        if (!vm_oob(vt,8)) { uint32_t t; if (!racit_stack_read(vt,&t)) return; code=__builtin_bswap32(t);
++          if (!racit_stack_read(vt+4,&t)) return; toc=__builtin_bswap32(t);
+           fprintf(stderr,"      ARG[0x%08X] vtbl=0x%08X -> method code=0x%08X toc=0x%08X (worker body?)\n", o, vt, code, toc); }
+       } }
+     /* The real frame chain FIRST, then the scan.
+@@ -2141,10 +2647,10 @@ extern "C" void ppu_dump_guest_stack(ppu_context* ctx, const char* tag)
+       uint32_t f = sp;
+       for (int d = 0; d < 24 && bp < 820; d++) {
+           if (vm_oob(f, 8)) break;
+-          uint32_t t; memcpy(&t, vm_base + f + 4, 4);   /* low half of the 64-bit back chain */
++          uint32_t t; if (!racit_stack_read(f+4,&t)) return;   /* low half of the 64-bit back chain */
+           uint32_t prev = __builtin_bswap32(t);
+           if (prev <= f || vm_oob(prev + 0x14, 4)) break;   /* stacks grow down */
+-          memcpy(&t, vm_base + prev + 0x14, 4);         /* low half of the saved lr */
++          if (!racit_stack_read(prev+0x14,&t)) return;         /* low half of the saved lr */
+           uint32_t ra = __builtin_bswap32(t);
+           if (ra >= 0x10000 && ra < ppu_code_hi()) {
+               uint32_t bg = 0;
+@@ -2160,7 +2666,7 @@ extern "C" void ppu_dump_guest_stack(ppu_context* ctx, const char* tag)
+     uint32_t last = 0;
+     for (int i = 0; i < 700 && gp < 1100; i++) {
+         uint32_t a = sp + i*4; if (vm_oob(a,4)) break;
+-        uint32_t t; memcpy(&t, vm_base + a, 4); uint32_t w = __builtin_bswap32(t);
++        uint32_t t; if (!racit_stack_read(a,&t)) return; uint32_t w = __builtin_bswap32(t);
+         if (w < 0x10000 || w >= ppu_code_hi()) continue;
+         uint32_t bg = 0;
+         for (uint64_t k = 0; k < function_table_count; k++) { uint32_t aa = function_table[k].addr; if (aa <= w && aa > bg) bg = aa; }
+@@ -2338,8 +2844,13 @@ static void icall_hist(ppu_context* ctx, uint32_t tgt, int phase)
      ReleaseSRWLockExclusive(&lk);
  }
  
@@ -27586,7 +28366,7 @@ index e73a151..bc83b9d 100644
      static int on = -1;
      if (on < 0) on = getenv("PPU_CSCHECK") ? 1 : 0;
      { static int hg = -1; if (hg < 0) hg = getenv("PS3_ICALL_GATE") ? 1 : 0;
-@@ -2365,6 +2875,14 @@ extern "C" void ps3_indirect_call(ppu_context* ctx)
+@@ -2365,6 +2876,14 @@ extern "C" void ps3_indirect_call(ppu_context* ctx)
      }
  }
  
@@ -27601,7 +28381,7 @@ index e73a151..bc83b9d 100644
  static void ps3_indirect_call_impl(ppu_context* ctx)
  {
      g_active_ctx = ctx;
-@@ -2385,7 +2903,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
+@@ -2385,7 +2904,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
        if(bc){ unsigned t=(unsigned)ctx->thread_id & 63; g_bc_last[t]=(uint32_t)ctx->ctr; g_bc_cnt[t]++; } }
  #ifdef _WIN32
      { static int64_t tw=-2; if(tw==-2){const char*e=getenv("PPU_TOCWATCH"); tw=e?(int64_t)strtoul(e,0,16):-1;}
@@ -27610,7 +28390,7 @@ index e73a151..bc83b9d 100644
          char* mb=(char*)GetModuleHandleA(0); void* bt[24]; unsigned short fr=RtlCaptureStackBackTrace(0,24,bt,0);
          char ln[800]; int p=snprintf(ln,sizeof ln,"[TOCWATCH] r2=0x%08X ctr=0x%08X bt:",(uint32_t)ctx->gpr[2],(uint32_t)ctx->ctr);
          for(int i=0;i<fr;i++) p+=snprintf(ln+p,sizeof(ln)-p," %llX",(unsigned long long)((char*)bt[i]-mb));
-@@ -2560,7 +3078,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
+@@ -2560,7 +3079,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
                  uint32_t _c = __builtin_bswap32(*(volatile uint32_t*)(vm_base + _opd));
                  if (_c && (_c & 3) == 0) {
                      static int _n2 = 0;
@@ -27619,7 +28399,7 @@ index e73a151..bc83b9d 100644
                          fprintf(stderr, "[ppu] OPD-RECOVER: ctr=0 -> dispatching opd[0]=0x%08X\n", _c);
                      addr = _c;
                  }
-@@ -2629,7 +3147,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
+@@ -2629,7 +3148,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
          ppu_fn fn2 = ppu_lookup(toc_reg);
          if (fn2) {
              static int _n = 0;
@@ -27628,7 +28408,7 @@ index e73a151..bc83b9d 100644
              ctx->gpr[2] = addr;        /* callee TOC = the (TOC) value from the code slot */
              addr = toc_reg; ctx->ctr = toc_reg;
              fn = fn2;
-@@ -2642,7 +3160,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
+@@ -2642,7 +3161,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
          static thread_local int s_depth = 0;
          if (s_depth > 4000) {
              static int warned = 0;
@@ -27637,7 +28417,7 @@ index e73a151..bc83b9d 100644
                  fprintf(stderr, "[ppu] recursion cap @0x%08X depth=%d -- skipping\n", addr, s_depth);
              return;
          }
-@@ -2669,7 +3187,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
+@@ -2669,7 +3188,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
          /* PPU_RETWATCH=<hex>: catch the first vcall(s) whose RETURN value (r3)
           * equals this, pinning the exact virtual method that produces the poison. */
          { static int64_t rw=-2; if(rw==-2){const char*e=getenv("PPU_RETWATCH"); rw=e?(int64_t)strtoul(e,0,16):-1;}
@@ -27646,7 +28426,7 @@ index e73a151..bc83b9d 100644
              fprintf(stderr,"[RETWATCH] vcall -> func_%08X returned r3=0x%08X\n", addr, (uint32_t)rw);
  #ifdef _WIN32
              void* bt[16]; unsigned short fr=RtlCaptureStackBackTrace(0,16,bt,0);
-@@ -2709,9 +3227,9 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
+@@ -2709,9 +3228,9 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
            if(_nv && ((tgt & 3u)!=0u || tgt < 0x10000u || tgt >= 0x40000000u)) _invalid = true; }
          if (_invalid) {
              static int _gn = 0;
@@ -27658,7 +28438,7 @@ index e73a151..bc83b9d 100644
                  char* mb=(char*)GetModuleHandleA(0); void* bt[26]; unsigned short fr=RtlCaptureStackBackTrace(0,26,bt,0);
                  char ln[820]; int p=snprintf(ln,sizeof ln,"      GVBT this=0x%08X r2=0x%08X lr=0x%08X rva:",(uint32_t)ctx->gpr[3],(uint32_t)ctx->gpr[2],(uint32_t)ctx->lr);
                  for(int i=0;i<fr;i++) p+=snprintf(ln+p,sizeof(ln)-p," %llX",(unsigned long long)((char*)bt[i]-mb));
-@@ -2726,10 +3244,24 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
+@@ -2726,10 +3245,24 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
       * Detect a long run of identical unresolved targets and bail so the run
       * stays fast and the log readable. */
      static uint32_t last = 0xFFFFFFFFu; static uint32_t streak = 0;
@@ -27683,7 +28463,7 @@ index e73a151..bc83b9d 100644
              fprintf(stderr, "[ppu] FATAL: stuck calling 0x%08X (%u times) -- aborting run\n", cur, streak);
              /* The target alone rarely says why. Dump the descriptor the guest
               * dereferenced (r9/r11/r12 are where the ELFv1 idiom keeps it) and
-@@ -2753,7 +3285,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
+@@ -2753,7 +3286,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
          }
          return;   /* don't spam the log on a tight retry loop */
      }
@@ -27692,7 +28472,7 @@ index e73a151..bc83b9d 100644
      fprintf(stderr, "[ppu] unresolved indirect call -> 0x%08X (tid=%llu lr=0x%08X)\n",
              (uint32_t)ctx->ctr, (unsigned long long)ctx->thread_id, (uint32_t)ctx->lr);
      /* With no NID table the very first one of these is the expected outcome
-@@ -2993,16 +3525,16 @@ extern "C" void lv2_syscall(ppu_context* ctx)
+@@ -2993,16 +3526,16 @@ extern "C" void lv2_syscall(ppu_context* ctx)
      /* One-shot: resolve the guest function that makes the flag=100 spin syscall
       * (num=141 r3=0x64), so we can inspect its lifted arg setup (is mode=garbage a
       * lift bug or a real uninit-object field?). */
@@ -27713,7 +28493,7 @@ index e73a151..bc83b9d 100644
          uintptr_t tgt=(uintptr_t)ra; uint32_t bg=0; uintptr_t bh=0;
          for(uint64_t k=0;k<function_table_count;k++){ uintptr_t h=(uintptr_t)function_table[k].func; if(h<=tgt&&h>bh){bh=h;bg=function_table[k].addr;} }
          fprintf(stderr,"[sc-caller] port_send(port=1) from func_%08X+0x%llX data=0x%08X/0x%08X/0x%08X\n",
-@@ -3061,7 +3593,6 @@ extern "C" void lv2_syscall(ppu_context* ctx)
+@@ -3061,7 +3594,6 @@ extern "C" void lv2_syscall(ppu_context* ctx)
      case 988:     /* sys_tty_write — canonical LV2 number (psdevwiki); some CRTs
                     * use this instead of 403. Same ABI. */
      case 403: {   /* sys_tty_write(s32 ch, cptr buf, u32 len, ptr pwritelen) */
@@ -27721,7 +28501,7 @@ index e73a151..bc83b9d 100644
          uint32_t buf  = (uint32_t)ctx->gpr[4];
          uint32_t len  = (uint32_t)ctx->gpr[5];
          uint32_t pwl  = (uint32_t)ctx->gpr[6];
-@@ -3125,7 +3656,7 @@ extern "C" void lv2_syscall(ppu_context* ctx)
+@@ -3125,7 +3657,7 @@ extern "C" void lv2_syscall(ppu_context* ctx)
                  bt[bn] = 0;
                  if (strstr(bt, pat)) {
                      static int tn = 0;
@@ -27730,7 +28510,7 @@ index e73a151..bc83b9d 100644
                          fprintf(stderr, "%c[TTY_BT] \"%.90s\"%c", 10, bt, 10);
                          ppu_log_host_chain("tty-bt");
                      }
-@@ -3144,7 +3675,7 @@ extern "C" void lv2_syscall(ppu_context* ctx)
+@@ -3144,7 +3676,7 @@ extern "C" void lv2_syscall(ppu_context* ctx)
                  strstr(pt, "sentinel") || strstr(pt, "double-deallocate") ||
                  strstr(pt, "out of memory on request")) {
                  static int pc = 0;
@@ -27739,7 +28519,7 @@ index e73a151..bc83b9d 100644
              }
          }
          /* DIAGNOSTIC (FLOW_PSSGTRACE=1): when the title's tty output carries a
-@@ -3206,13 +3737,29 @@ extern "C" void lv2_syscall(ppu_context* ctx)
+@@ -3206,13 +3738,29 @@ extern "C" void lv2_syscall(ppu_context* ctx)
          if (s_sbp) {
              static ULONGLONG s_acc[1024]={0}; static uint32_t s_cnt[1024]={0}; static ULONGLONG s_win=0;
              uint32_t _a3=(uint32_t)ctx->gpr[3], _a4=(uint32_t)ctx->gpr[4], _a5=(uint32_t)ctx->gpr[5];
@@ -27774,7 +28554,7 @@ index e73a151..bc83b9d 100644
                  void* ra=__builtin_return_address(0);
                  uintptr_t tgt=(uintptr_t)ra; uint32_t bg=0; uintptr_t bh=0;
                  for(uint64_t k=0;k<function_table_count;k++){ uintptr_t h=(uintptr_t)function_table[k].func; if(h<=tgt&&h>bh){bh=h;bg=function_table[k].addr;} }
-@@ -3223,8 +3770,8 @@ extern "C" void lv2_syscall(ppu_context* ctx)
+@@ -3223,8 +3771,8 @@ extern "C" void lv2_syscall(ppu_context* ctx)
              }
              if (s_win==0) s_win=_t0;
              if (_t0 - s_win >= 2000) {
@@ -27785,7 +28565,7 @@ index e73a151..bc83b9d 100644
                  for (int n=0;n<1024;n++){s_acc[n]=0;s_cnt[n]=0;} s_win=_t0;
              }
              if (_ok) { sc_trace(num, ctx, _a3, _a4, _a5, 0); return; }
-@@ -3423,7 +3970,7 @@ extern "C" uint32_t ppu_load_elf(const char* path)
+@@ -3423,7 +3971,7 @@ extern "C" uint32_t ppu_load_elf(const char* path)
                            if (memcmp(vm_base + keep_ea, keep, keep_len)) {
                                memcpy(vm_base + keep_ea, keep, keep_len);
                                static int n = 0;
@@ -27794,7 +28574,7 @@ index e73a151..bc83b9d 100644
                            }
                            Sleep(2);
                        } } };
-@@ -3669,7 +4216,9 @@ extern "C" int ppu_run(uint32_t entry_opd, uint32_t stack_top)
+@@ -3669,7 +4217,9 @@ extern "C" int ppu_run(uint32_t entry_opd, uint32_t stack_top)
       * sys_mutex -- LBP's main + bringup threads both held the GCM lock at once
       * and concurrently-emitted fences vanished (the boot-loading stall). */
      { extern uint64_t ppu_thread_register_main(void);
@@ -27805,7 +28585,7 @@ index e73a151..bc83b9d 100644
  
      /* PS3 process-entry ABI: the loader hands _start register state the CRT
       * (_initialize) consumes directly:
-@@ -3772,6 +4321,7 @@ extern "C" int ppu_run(uint32_t entry_opd, uint32_t stack_top)
+@@ -3772,6 +4322,7 @@ extern "C" int ppu_run(uint32_t entry_opd, uint32_t stack_top)
      fprintf(stderr, "[ppu] run: code 0x%08X, toc 0x%08X, sp 0x%08X\n", code, toc, stack_top);
      g_active_ctx = &ctx;
      ppu_resv_register(&ctx);   /* main/entry thread: join the reservation set too */
@@ -27813,6 +28593,41 @@ index e73a151..bc83b9d 100644
      fn(&ctx);
      while (g_trampoline_fn) { void (*tf)(void*) = g_trampoline_fn; g_trampoline_fn = 0; tf(&ctx); }
      return 0;
+diff --git a/runtime/ppu/ppu_stack_read.h b/runtime/ppu/ppu_stack_read.h
+new file mode 100644
+index 0000000..7ca6c15
+--- /dev/null
++++ b/runtime/ppu/ppu_stack_read.h
+@@ -0,0 +1,29 @@
++/* Diagnostics must not turn an unreadable guest stack into a host crash.
++ * Read through the host kernel, which also handles a concurrent unmapping.
++ * This is deliberately outside the guest-memory execution fast path. */
++#pragma once
++#if defined(__APPLE__)
++#include <mach/mach.h>
++#include <mach/mach_vm.h>
++#elif !defined(_WIN32)
++#include <sys/syscall.h>
++#include <sys/uio.h>
++#include <unistd.h>
++#endif
++static bool racit_stack_read(uint32_t ea, uint32_t* word)
++{
++    if ((uint64_t)ea + sizeof(*word) > 0x100000000ULL) return false;
++#if defined(__APPLE__)
++    mach_vm_size_t copied = 0;
++    return mach_vm_read_overwrite(mach_task_self(),
++        (mach_vm_address_t)(vm_base + ea), sizeof(*word),
++        (mach_vm_address_t)word, &copied) == KERN_SUCCESS && copied == sizeof(*word);
++#elif defined(_WIN32)
++    SIZE_T copied = 0;
++    return ReadProcessMemory(GetCurrentProcess(), vm_base + ea, word,
++        sizeof(*word), &copied) && copied == sizeof(*word);
++#else
++    struct iovec local = { word, sizeof(*word) }, remote = { vm_base + ea, sizeof(*word) };
++    return syscall(SYS_process_vm_readv, getpid(), &local, 1, &remote, 1, 0) == sizeof(*word);
++#endif
++}
 diff --git a/runtime/ppu/ppu_sysprx.cpp b/runtime/ppu/ppu_sysprx.cpp
 index d857f30..48278e7 100644
 --- a/runtime/ppu/ppu_sysprx.cpp
