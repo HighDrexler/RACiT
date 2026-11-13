@@ -16,7 +16,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PS3R="$ROOT/tools/ps3recomp"
 ELF="${1:-$ROOT/input/EBOOT.ELF}"
 PY="${PY:-python3 -I}"
-JOBS="${JOBS:-${CMAKE_BUILD_PARALLEL_LEVEL:-2}}"
+JOBS="${JOBS:-${CMAKE_BUILD_PARALLEL_LEVEL:-}}"
 
 [ -f "$ELF" ] || { echo "No ELF at $ELF — put your decrypted EBOOT.ELF in input/"; exit 1; }
 # Profiles identify both the disc region and the executable update.
@@ -56,7 +56,10 @@ fi
 
 echo "== 3/5 PPU lift"
 # names.json (name_pass.py) only adds comments above lifted functions.
-LIFT_ARGS=("$ELF" --jobs "$JOBS" --functions "$FUNCS" --hle-stubs "$OUT/$BASE.imports.json" --output "$RECOMP")
+LIFT_ARGS=("$ELF" --functions "$FUNCS" --hle-stubs "$OUT/$BASE.imports.json" --output "$RECOMP")
+if [ -n "$JOBS" ]; then
+  LIFT_ARGS+=(--jobs "$JOBS")
+fi
 if [ -f "$OUT/names.json" ]; then
   LIFT_ARGS+=(--names "$OUT/names.json")
 fi
@@ -105,5 +108,5 @@ elif [ -d "$ROOT/tools/sdl2" ]; then
   CMAKE_ARGS+=(-DCMAKE_PREFIX_PATH="$ROOT/tools/sdl2")
 fi
 cmake -S "$ROOT/game" -B "$BUILD" -G "${CMAKE_GENERATOR:-Ninja}" -DCMAKE_BUILD_TYPE=Release "${CMAKE_ARGS[@]}"
-cmake --build "$BUILD" --parallel "$JOBS"
+cmake --build "$BUILD" --parallel "${JOBS:-$(getconf _NPROCESSORS_ONLN)}"
 echo "Done: $BUILD/RaCACiTRecomp"

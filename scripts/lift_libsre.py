@@ -97,8 +97,10 @@ def main():
     stub_json = os.path.join(OUT, "libsre_hle_stubs.json")
     json.dump(stubs, open(stub_json, "w"), indent=1)
 
+    jobs = os.environ.get("JOBS") or os.environ.get("CMAKE_BUILD_PARALLEL_LEVEL")
+    job_args = ["--jobs", jobs] if jobs else []
     subprocess.run([sys.executable, "-I", os.path.join(PS3R_TOOLS, "ppu_lifter.py"),
-                    "--jobs", os.environ.get("CMAKE_BUILD_PARALLEL_LEVEL", "2"),
+                    *job_args,
                     os.path.join(OUT, f"{stem}_image.bin"), "--raw", "--base", hex(BASE),
                     "--toc", toc, "--functions", os.path.join(OUT, f"{stem}_functions.json"),
                     "--symbol-prefix", "libsre_", "--hle-stubs", stub_json,
