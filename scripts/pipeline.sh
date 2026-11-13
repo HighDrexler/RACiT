@@ -108,5 +108,9 @@ elif [ -d "$ROOT/tools/sdl2" ]; then
   CMAKE_ARGS+=(-DCMAKE_PREFIX_PATH="$ROOT/tools/sdl2")
 fi
 cmake -S "$ROOT/game" -B "$BUILD" -G "${CMAKE_GENERATOR:-Ninja}" -DCMAKE_BUILD_TYPE=Release "${CMAKE_ARGS[@]}"
-cmake --build "$BUILD" --parallel "${JOBS:-$(getconf _NPROCESSORS_ONLN)}"
+if [ -n "$JOBS" ]; then
+  cmake --build "$BUILD" --parallel "$JOBS"
+else
+  cmake --build "$BUILD"
+fi
 echo "Done: $BUILD/RaCACiTRecomp"
