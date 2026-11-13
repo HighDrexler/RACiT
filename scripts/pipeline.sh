@@ -56,8 +56,11 @@ fi
 
 echo "== 3/5 PPU lift"
 # names.json (name_pass.py) only adds comments above lifted functions.
-PPU_STAGE="$(mktemp -d "$OUT/.ppu.XXXXXXXX")"
-trap 'rm -rf -- "$PPU_STAGE"' EXIT
+LIFT_STAGE="$(mktemp -d "$OUT/.lift.XXXXXXXX")"
+trap 'rm -rf -- "$LIFT_STAGE"' EXIT
+PPU_STAGE="$LIFT_STAGE/recomp"
+export RACACIT_SPU_DIR="$LIFT_STAGE/spu" RACACIT_PRX_DIR="$LIFT_STAGE/prx"
+mkdir -p "$PPU_STAGE" "$RACACIT_SPU_DIR" "$RACACIT_PRX_DIR"
 LIFT_ARGS=("$ELF" --functions "$FUNCS" --hle-stubs "$OUT/$BASE.imports.json" --output "$PPU_STAGE")
 if [ -n "$JOBS" ]; then
   LIFT_ARGS+=(--jobs "$JOBS")
@@ -93,20 +96,33 @@ $PY "$ROOT/scripts/lift_spu_jobs.py" "$ELF" --extra
 $PY "$ROOT/scripts/lift_spu_jobs.py" "$ELF" --sub
 $PY "$ROOT/scripts/patch_lift.py" "$PPU_STAGE" --elf "$ELF" --profile "$PROFILE"
 
-# Remove old chunks when the lifter changes its output layout.
-for target in "$RECOMP"/ppu_recomp.c "$RECOMP"/ppu_recomp_*.c "$RECOMP"/ppu_recomp_*.cpp; do
+# Publish the patched sources without touching files CMake can reuse.
+publish_lift() {
+  local staged="$1" destination="$2" source target
+  mkdir -p "$destination"
+  for source in "$staged"/*; do
+    [ -e "$source" ] || continue
+    target="$destination/${source##*/}"
+    if [ -d "$source" ]; then
+      publish_lift "$source" "$target"
+    elif ! cmp -s "$source" "$target"; then
+      mv -f -- "$source" "$target"
+    fi
+  done
+}
+
+# Prune obsolete compiler inputs before moving files out of staging.
+for target in "$RECOMP"/ppu_recomp.c "$RECOMP"/ppu_recomp_*.c "$RECOMP"/ppu_recomp_*.cpp \
+              "$SPU"/*/spu_recomp.c "$PRX"/libsre/*.cpp; do
   [ -f "$target" ] || continue
-  if [ ! -f "$PPU_STAGE/${target##*/}" ]; then
+  if [ ! -f "$LIFT_STAGE/${target#"$OUT/"}" ]; then
     rm -- "$target"
   fi
 done
-# Keep the timestamps of unchanged, fully patched sources for CMake.
-for source in "$PPU_STAGE"/*; do
-  target="$RECOMP/${source##*/}"
-  if ! cmp -s "$source" "$target"; then
-    mv -f -- "$source" "$target"
-  fi
-done
+publish_lift "$PPU_STAGE" "$RECOMP"
+publish_lift "$RACACIT_SPU_DIR" "$SPU"
+publish_lift "$RACACIT_PRX_DIR" "$PRX"
+export RACACIT_SPU_DIR="$SPU" RACACIT_PRX_DIR="$PRX"
 
 # SKIP_DESKTOP=1: lift only (Windows: the build is windows/, see README).
 [ "${SKIP_DESKTOP:-0}" = 1 ] && { echo "Lifted: $RECOMP and $SPU"; exit 0; }
