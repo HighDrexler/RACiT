@@ -33,6 +33,33 @@ Usage: scripts/patch_lift.py [game/src/recomp]
 import glob, os, re, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+# An update of the same title can have a different code and data layout.
+# Check the decrypted executable before any generated source is touched.
+def check_game_profile(elf, selected='auto'):
+    import hashlib, json
+    with open(os.path.join(ROOT, 'versions', 'profiles.json'), encoding='utf-8') as f:
+        profiles = json.load(f)['profiles']
+    digest = hashlib.sha256()
+    with open(elf, 'rb') as f:
+        for block in iter(lambda: f.read(1024 * 1024), b''):
+            digest.update(block)
+    checksum = digest.hexdigest()
+    actual = next((p for p in profiles if p['elf_sha256'] == checksum), None)
+    if actual is None:
+        sys.exit('Unrecognized EBOOT.ELF (SHA-256 ' + checksum + '). No matching game profile; generation stopped.')
+    if selected != 'auto' and selected != actual['id']:
+        sys.exit('Selected ' + selected + ' but the executable is ' + actual['id'] + '. Generation stopped.')
+    if not actual['buildable']:
+        sys.exit('Recognized ' + actual['id'] + ', but this source tree cannot build it: ' + actual['status'])
+    print('Game profile: ' + actual['id'] + ' (SHA-256 ' + checksum + ')')
+
+if len(sys.argv) > 1 and sys.argv[1] == '--check-profile':
+    if len(sys.argv) not in (3, 4):
+        sys.exit('usage: patch_lift.py --check-profile EBOOT.ELF [PROFILE_ID|auto]')
+    check_game_profile(sys.argv[2], sys.argv[3] if len(sys.argv) == 4 else 'auto')
+    sys.exit(0)
 RECOMP = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "game", "src", "recomp")
 
 DECLS = '''
@@ -494,6 +521,32 @@ def patch_file(path):
             decl = 'extern "C" double %s(double d);\n' % hook
             src = src[:i] + decl + src[i:]
         changed = True
+
+    # 19. Boot straight to PRESS START (game/stubs.cpp racacit_front_end_cards): right
+    #     after func_004C8898 hands the Scaleform main menu its startMode (the movie's
+    #     SetVariable, name from r30 - 0x7F28), the intro cards' list is emptied.
+    sp = func_span(src, 'func_004C8898')
+    if sp and 'racacit_front_end_cards' not in src[sp[0]:sp[2]]:
+        a_, body_, end_ = sp
+        fn = src[a_:end_]
+        # The call's TOC restore holds the disc's own TOC (BCUS98124 0x00D349C8,
+        # BCES00511 0x00D34A88), so the anchor matches any value there.
+        anchor = re.compile(r'        ctx->ctr = \(uint32_t\)ctx->lr; ps3_indirect_call\(ctx\); DRAIN_TRAMPOLINE\(ctx\);\n'
+                            r'        ctx->gpr\[2\] = 0x[0-9A-F]+ULL; /\*TOCFIX ld r2,N\(r1\)\*/\n'
+                            r'(?=        ctx->gpr\[6\] = vm_read32\(ctx->gpr\[30\] \+ -0x7F24\);\n)')
+        name_load = '        ctx->gpr[4] = vm_read32(ctx->gpr[30] + -0x7F28);\n'
+        hits = list(anchor.finditer(fn))
+        if len(hits) == 1 and name_load in fn[:hits[0].start()]:
+            add = '        racacit_front_end_cards(ctx);   /* racacit */\n'
+            cut = hits[0].end()
+            fn = fn[:cut] + add + fn[cut:]
+            src = src[:a_] + fn + src[end_:]
+            if 'void racacit_front_end_cards' not in src:
+                i = src.index('\n', src.index('#include')) + 1
+                src = src[:i] + 'extern "C" void racacit_front_end_cards(ppu_context* ctx);\n' + src[i:]
+            changed = True
+        else:
+            print('patch_lift #19: func_004C8898: startMode SetVariable not found once (%d)' % len(hits))
 
     if (('racacit_jb_push(' in src or 'racacit_longjmp(' in src)
             and 'racacit: guest setjmp' not in src):

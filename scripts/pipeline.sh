@@ -21,6 +21,8 @@ SPU="$ROOT/game/spu"
 PY="${PY:-python3 -I}"
 
 [ -f "$ELF" ] || { echo "No ELF at $ELF — put your decrypted EBOOT.ELF in input/"; exit 1; }
+# Profiles identify both the disc region and the executable update.
+$PY "$ROOT/scripts/patch_lift.py" --check-profile "$ELF" "${RACACIT_GAME_PROFILE:-auto}"
 mkdir -p "$OUT" "$RECOMP" "$SPU"
 
 echo "== 1/5 Loader"
