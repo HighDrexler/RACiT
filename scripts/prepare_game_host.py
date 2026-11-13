@@ -65,9 +65,16 @@ def main():
     output = Path(options.output)
     output.mkdir(parents=True, exist_ok=True)
     for name, source in prepared.items():
+        target = output / name
+        contents = source.encode('utf-8')
+        try:
+            if target.read_bytes() == contents:
+                continue
+        except FileNotFoundError:
+            pass
         temporary = output / (name + '.tmp')
-        temporary.write_text(source, encoding='utf-8', newline='')
-        os.replace(temporary, output / name)
+        temporary.write_bytes(contents)
+        os.replace(temporary, target)
     print('Prepared %s host sources in %s' % (profile['id'], output))
 
 
