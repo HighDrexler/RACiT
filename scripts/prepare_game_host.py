@@ -55,6 +55,11 @@ def main():
     for name in ('main.cpp', 'stubs.cpp'):
         source = (ROOT / 'game' / name).read_text(encoding='utf-8')
         if update:
+            if name == 'stubs.cpp':
+                start = source.index('// Disc-only intro hook begins.')
+                finish = '// Disc-only intro hook ends.'
+                end = source.index(finish, start) + len(finish)
+                source = source[:start] + source[end:]
             source = rewrite_host(source, functions, addresses)
             if name == 'stubs.cpp':
                 start = source.index('extern "C" void racacit_skin_armor_selected(')

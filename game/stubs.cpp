@@ -635,6 +635,7 @@ extern "C" uint32_t racacit_movie_update_hook(uint32_t slot, uint32_t playing)
  * the menu's first CardController goes straight to CreateMenu. The install
  * mode's cards (the HDD install and subtitle choice) are left alone.
  * -----------------------------------------------------------------------*/
+// Disc-only intro hook begins.
 void func_004C64C8(ppu_context* ctx);
 extern "C" void ps3_indirect_call(ppu_context* ctx);
 extern "C" void vm_write8(uint64_t a, uint8_t v);
@@ -680,6 +681,7 @@ extern "C" void racacit_front_end_cards(ppu_context* ctx)
     fprintf(stderr, "[front-end] startMode %s: %s = \"\" (intro cards skipped, RACACIT_SKIP_INTRO)%s\n",
             mode, nm, ok ? "" : " -- SetVariable said no");
 }
+// Disc-only intro hook ends.
 
 /* ---------------------------------------------------------------------------
  * Every cutscene skippable (RACACIT_ALL_CUTSCENES_SKIPPABLE, default on)
