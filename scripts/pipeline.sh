@@ -49,8 +49,10 @@ fi
 
 echo "== 3/5 PPU lift"
 # names.json (name_pass.py) only adds comments above lifted functions.
+PPU_STAGE="$(mktemp -d "$RECOMP/.ppu.XXXXXXXX")"
+trap 'rm -rf -- "$PPU_STAGE"' EXIT
 LIFT_ARGS=("$ELF" --functions "$FUNCS"
-           --hle-stubs "$OUT/$BASE.imports.json" --output "$RECOMP")
+           --hle-stubs "$OUT/$BASE.imports.json" --output "$PPU_STAGE")
 if [ -n "$JOBS" ]; then
   LIFT_ARGS+=(--jobs "$JOBS")
 fi
@@ -59,7 +61,7 @@ if [ -f "$OUT/names.json" ]; then
 fi
 PS3RECOMP_CHUNK_LINES=${PS3RECOMP_CHUNK_LINES:-100000} $PY "$PS3R/tools/ppu_lifter.py" "${LIFT_ARGS[@]}"
 
-$PY "$ROOT/scripts/patch_lift.py" "$RECOMP"
+$PY "$ROOT/scripts/patch_lift.py" "$PPU_STAGE"
 
 echo "== 4/5 SPU images"
 $PY "$PS3R/tools/extract_spu_images.py" "$ELF" --output "$OUT/spu_images" \
@@ -83,7 +85,22 @@ $PY "$ROOT/scripts/lift_spu_jobs.py" "$ELF" --extra
 # every module added to the list since ran in the SPU interpreter (v91: 109 of
 # 144, the AsyncMoby animation and FXVis effect modules among them).
 $PY "$ROOT/scripts/lift_spu_jobs.py" "$ELF" --sub
-$PY "$ROOT/scripts/patch_lift.py" || true
+$PY "$ROOT/scripts/patch_lift.py" "$PPU_STAGE" || true
+
+# Remove old chunks when the lifter changes its output layout.
+for target in "$RECOMP"/ppu_recomp.c "$RECOMP"/ppu_recomp_*.c "$RECOMP"/ppu_recomp_*.cpp; do
+  [ -f "$target" ] || continue
+  if [ ! -f "$PPU_STAGE/${target##*/}" ]; then
+    rm -- "$target"
+  fi
+done
+# Keep the timestamps of unchanged, fully patched sources for CMake.
+for source in "$PPU_STAGE"/*; do
+  target="$RECOMP/${source##*/}"
+  if ! cmp -s "$source" "$target"; then
+    mv -f -- "$source" "$target"
+  fi
+done
 
 # SKIP_DESKTOP=1: lift only (Windows: the build is windows/, see README).
 [ "${SKIP_DESKTOP:-0}" = 1 ] && { echo "Lifted: $RECOMP and $SPU"; exit 0; }
