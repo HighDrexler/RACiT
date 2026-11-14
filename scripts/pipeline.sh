@@ -18,6 +18,19 @@ ELF="${1:-$ROOT/input/EBOOT.ELF}"
 PY="${PY:-python3 -I}"
 JOBS="${JOBS:-${CMAKE_BUILD_PARALLEL_LEVEL:-}}"
 
+# The same explicit count bounds both lifters and the native compiler.
+case "$JOBS" in
+  "") ;;
+  *[!0-9]*)
+    echo "CMAKE_BUILD_PARALLEL_LEVEL must be a positive integer or empty." >&2
+    exit 1 ;;
+  *)
+    if [[ ! "$JOBS" =~ [1-9] ]]; then
+      echo "CMAKE_BUILD_PARALLEL_LEVEL must be a positive integer or empty." >&2
+      exit 1
+    fi ;;
+esac
+
 [ -f "$ELF" ] || { echo "No ELF at $ELF — put your decrypted EBOOT.ELF in input/"; exit 1; }
 # Profiles identify both the disc region and the executable update.
 $PY "$ROOT/scripts/patch_lift.py" --check-profile "$ELF" "${RACACIT_GAME_PROFILE:-auto}"
