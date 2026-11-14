@@ -709,13 +709,15 @@ std::string Store::fetch_latest_release(ReleaseInfo* out)
     // The asset: a .zip with "launcher" in its name. A .7z is listed for the message only.
     for (const Json& a : j["assets"].a) {
         const std::string n = a.str("name"), low = lower(n), url = a.str("browser_download_url");
-#ifdef __APPLE__
-        // The Mac release's zip: "launcher" and "mac" in its name (RACiT-vX-launcher-macos.zip).
-        const bool zip = low.size() > 4 && low.compare(low.size() - 4, 4, ".zip") == 0 && low.find("mac") != std::string::npos;
-#else
         const bool zip = low.size() > 4 && low.compare(low.size() - 4, 4, ".zip") == 0;
+#ifdef __APPLE__
+        // The Mac release's zip is RACiT-vX-macos.zip: no "launcher" in its name, so the
+        // Windows updater (first .zip with "launcher") never picks it.
+        const bool want = zip && low.find("macos") != std::string::npos;
+#else
+        const bool want = zip && low.find("launcher") != std::string::npos;
 #endif
-        if (out->asset.empty() && zip && low.find("launcher") != std::string::npos && release_download_ok(url)) {
+        if (out->asset.empty() && want && release_download_ok(url)) {
             out->asset = n; out->url = url; out->size = (uint64_t)a.num("size");
             const std::string d = lower(a.str("digest"));
             if (d.rfind("sha256:", 0) == 0) out->sha256 = d.substr(7);

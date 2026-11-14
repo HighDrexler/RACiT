@@ -92,7 +92,7 @@ done
 if [ $ZIP = 1 ]; then
     # "launcher" and "macos" in the name: the Mac launcher's updater takes this asset.
     # No AppleDouble (._) files or quarantine flags inside.
-    (cd "$OUT" && rm -f "RACiT-$LVER-launcher-macos.zip" && ditto -c -k --norsrc --noextattr --noqtn --keepParent "$NAME" "RACiT-$LVER-launcher-macos.zip")
-    echo "$OUT/RACiT-$LVER-launcher-macos.zip"
+    (cd "$OUT" && rm -f "RACiT-$LVER-macos.zip" && ditto -c -k --norsrc --noextattr --noqtn --keepParent "$NAME" "RACiT-$LVER-macos.zip")
+    echo "$OUT/RACiT-$LVER-macos.zip"
 fi
 echo "$REL"
