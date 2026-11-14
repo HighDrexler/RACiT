@@ -208,6 +208,8 @@ target_sources(${PROJECT_NAME} PRIVATE
     ${ZLIB_SOURCES}
     stubs.cpp
     button_prompts.cpp
+    desktop_mouse.cpp
+    menu_archive.cpp
     discord_rpc.cpp
     ${LIBSRE_SOURCES}
     ${PS3RECOMP_SCAFFOLD}
@@ -284,6 +286,11 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 target_link_libraries(${PROJECT_NAME} PRIVATE
     ps3recomp_runtime
 )
+if(APPLE)
+    find_package(ZLIB REQUIRED)
+    target_link_libraries(${PROJECT_NAME} PRIVATE ZLIB::ZLIB)
+    target_link_libraries(ps3recomp_runtime PRIVATE ZLIB::ZLIB)
+endif()
 if(ANDROID)
     # SDL_main / SDL_AndroidGetExternalStoragePath, and logcat.
     target_link_libraries(${PROJECT_NAME} PRIVATE SDL2::SDL2 log android)
