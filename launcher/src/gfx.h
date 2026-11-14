@@ -1,11 +1,14 @@
 // Direct2D / DirectWrite drawing in A Crack in Time's look (the same palette and
 // shapes as the Android launcher's Acit.java): deep navy panels with thin glowing
 // cyan edges and cut corners, orange for what is focused, condensed bold capitals.
+// macOS: the same class drawn with CoreGraphics, CoreText and ImageIO (gfx_mac.mm).
 #pragma once
+#ifdef _WIN32
 #include <windows.h>
 #include <d2d1.h>
 #include <dwrite.h>
 #include <wincodec.h>
+#endif
 #include <string>
 #include "util.h"
 
@@ -28,7 +31,12 @@ struct Rect { float l, t, r, b; float w() const { return r - l; } float h() cons
 
 class Gfx {
 public:
+#ifdef _WIN32
     bool init(HWND hwnd);
+#else
+    bool init(void* sdl_window);           // an SDL_Window; null = offscreen only (snapshots)
+    void set_offscreen(float w, float h, float scale);   // the size snapshots draw at, with no window
+#endif
     void shutdown();
     bool begin();                          // false = nothing to draw into right now
     void end();                            // handles a lost device
@@ -63,6 +71,13 @@ public:
     bool snapshot(const std::wstring& png, void (*draw)());
 
 private:
+#ifndef _WIN32
+public:
+    struct Mac;                            // gfx_mac.mm
+private:
+    Mac* m_ = nullptr;
+    float w_ = 0, h_ = 0, dpi_ = 96;
+#else
     ID2D1Factory* f_ = nullptr;
     IDWriteFactory* dw_ = nullptr;
     IWICImagingFactory* wic_ = nullptr;
@@ -84,6 +99,9 @@ private:
     ID2D1SolidColorBrush* brush(uint32_t c);
     ID2D1PathGeometry* chamfer_geo(const Rect& r, float cut);
     Img* load(const fs::path& p);
+#endif
 };
 
+#ifdef _WIN32
 D2D1_COLOR_F d2c(uint32_t argb);
+#endif

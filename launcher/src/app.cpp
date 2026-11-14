@@ -1,10 +1,15 @@
 // RaCACiT Launcher (Windows): imports the player's own copy of A Crack in Time,
 // manages settings, saves, mods and builds, and starts the game. The Windows
-// counterpart of the Android launcher (android/), in the same look.
+// counterpart of the Android launcher (android/), in the same look. The same screens on
+// macOS: an SDL window feeding this file's window procedure (app_mac.h, main at the end).
+#ifdef _WIN32
 #include <windows.h>
 #include <windowsx.h>
 #include <shellapi.h>
 #include <shlobj.h>
+#else
+#include "app_mac.h"
+#endif
 #include <SDL2/SDL.h>
 
 #include <algorithm>
@@ -135,6 +140,11 @@ static void capture_done(const std::string& name)
 // itself reads the keyboard on Windows: by position, so the game sees the same key.
 static std::string key_name_from_scan(LPARAM l)
 {
+#ifdef __APPLE__
+    // The Mac loop sends SDL's own scan code (a USB HID position, as above) in bits 16-25.
+    const SDL_Scancode mac_sc = (SDL_Scancode)((l >> 16) & 0x3FF);
+    return mac_sc == SDL_SCANCODE_UNKNOWN ? std::string() : std::string(SDL_GetScancodeName(mac_sc));
+#endif
     const unsigned sc = (unsigned)(l >> 16) & 0xFF; const bool ext = (l >> 24) & 1;
     static const SDL_Scancode base[0x59] = {
         SDL_SCANCODE_UNKNOWN, SDL_SCANCODE_ESCAPE, SDL_SCANCODE_1, SDL_SCANCODE_2, SDL_SCANCODE_3, SDL_SCANCODE_4, SDL_SCANCODE_5,
@@ -926,6 +936,14 @@ static void logs_screen()
     scr.info.push_back({ "Sending", "After a session with a problem, send log.txt (Copy to the Desktop makes a copy named with the date)." });
     scr.items.push_back(button("Open the last log", "", [] { shell_open(S->log()); }, has));
     scr.items.push_back(button("Copy the last log to the Desktop", "", [] {
+#ifdef __APPLE__
+        if (const char* home_dir = getenv("HOME")) {
+            std::error_code ec;
+            const fs::path to = fs::path(home_dir) / L"Desktop" / widen("acit-log-" + stamp_now() + ".txt");
+            fs::copy_file(S->log(), to, fs::copy_options::overwrite_existing, ec);
+            message("Logs", ec ? "Copy failed: " + ec.message() : "Copied to " + u8(to));
+        }
+#else
         wchar_t* desk = nullptr;
         if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Desktop, 0, nullptr, &desk))) {
             std::error_code ec;
@@ -934,6 +952,7 @@ static void logs_screen()
             message("Logs", ec ? "Copy failed: " + ec.message() : "Copied to " + u8(to));
             CoTaskMemFree(desk);
         }
+#endif
     }, has));
     scr.items.push_back(button("Open the logs folder", "", [] { shell_open(S->logs()); }));
     scr.items.push_back(button("Back", "", [] { set_screen(home); }));
@@ -1179,8 +1198,10 @@ static void pad_event(const SDL_Event& e)
 static void pad_poll()
 {
     if (!sdl_ok) return;
+#ifdef _WIN32
     SDL_Event e;
     while (SDL_PollEvent(&e)) pad_event(e);
+#endif   // macOS: the main loop reads SDL's events (the window's too) and hands these to pad_event
     if (!pad || GetForegroundWindow() != g_hwnd) return;
     const int y = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY), x = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTX);
     const int d = y < -20000 ? VK_UP : y > 20000 ? VK_DOWN : x < -20000 ? VK_LEFT : x > 20000 ? VK_RIGHT : 0;
@@ -1486,7 +1507,11 @@ static void script_poll()
     else if (cmd == "type") { edit_text += arg; redraw(); }
     else if (cmd == "scan") {   // scan <hex scan code> [ext]: a real WM_KEYDOWN, as the keyboard sends it
         const unsigned sc = (unsigned)strtoul(arg.c_str(), nullptr, 16);
+#ifdef __APPLE__
+        PostMessageW(g_hwnd, WM_KEYDOWN, 0, (LPARAM)(1 | sc << 16));   // macOS: an SDL scan code
+#else
         PostMessageW(g_hwnd, WM_KEYDOWN, MapVirtualKeyW(sc, MAPVK_VSC_TO_VK), (LPARAM)(1 | sc << 16 | (arg.find("ext") != std::string::npos ? 1 << 24 : 0)));
+#endif
     } else if (cmd == "mouse") {   // mouse 1-5 | wheelup | wheeldown
         const int b = atoi(arg.c_str());
         if (arg == "wheelup" || arg == "wheeldown") PostMessageW(g_hwnd, WM_MOUSEWHEEL, MAKEWPARAM(0, arg == "wheelup" ? 120 : -120), 0);
@@ -1623,6 +1648,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
     return DefWindowProcW(h, m, w, l);
 }
 
+#ifdef _WIN32
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show)
 {
     // An update tries a new launcher this way before it replaces the running one.
@@ -1683,3 +1709,6 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show)
     }
     return 0;
 }
+#else
+#include "app_mac.inc"   // macOS: main(), the SDL event loop, --snapshot
+#endif
