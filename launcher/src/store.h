@@ -2,7 +2,7 @@
 // builds and updates, mods, saves, logs, and starting the game.
 //
 // <launcher folder>
-//   RaCACiT Launcher.exe
+//   RaCACiT Launcher.exe     (macOS: RaCACiT Launcher.app; builds/vNN/RaCACiT, see platform.h)
 //   launcher.ini            the launcher's own options
 //   builds\v65\             RaCACiT.exe (+ README.txt, version.txt) per installed build
 //   builds\current.txt      which one Play starts
@@ -153,7 +153,7 @@ public:
     // Every settings.txt value also goes in the environment and the game's
     // EBOOT on the command line, so builds that only read the settings.txt
     // beside their exe (v65 and older) get them too.
-    std::string launch(void** process);
+    std::string launch(void** process);   // Windows: a process HANDLE; macOS: a ChildProcess*
     // The build's shader and pipeline caches into data\cache: copied when there are none,
     // else merged in once per build (launch does this).
     void seed_caches(const BuildInfo& b);
@@ -161,4 +161,8 @@ public:
     // older) -- moved to data\log.txt.
     void collect_log();
     fs::path launched_dir;
+#ifdef __APPLE__
+private:
+    std::string launch_mac(const GameInfo& g, const BuildInfo& b, std::map<std::wstring, std::wstring>& set, void** process);
+#endif
 };

@@ -1,4 +1,4 @@
-// Small Windows helpers for the launcher: text, files, processes, zip (via the
+// Small helpers for the launcher (Windows; macOS in util_mac.mm): text, files, processes, zip (via the
 // system's tar.exe), SHA-256, HTTPS downloads, a tiny JSON reader, pickers.
 #pragma once
 #include <atomic>
@@ -93,3 +93,33 @@ fs::path exe_dir();
 // A running process whose exe is somewhere under dir.
 bool process_running_under(const fs::path& dir);
 uint64_t free_space(const fs::path& dir);        // bytes, 0 if unknown
+
+#ifdef __APPLE__
+// ---- macOS only (util_mac.mm) -----------------------------------------------------------
+#include <cwchar>
+inline int _wcsicmp(const wchar_t* a, const wchar_t* b) { return wcscasecmp(a, b); }
+// The launcher's .app bundle (its original place when Gatekeeper runs it translocated), and
+// the folder it sits in: data, game, builds, mods and backups live there, as beside the .exe.
+fs::path app_bundle_path();
+fs::path launcher_root();
+// The Windows wording of the screens and messages, for a Mac: folder\ -> folder/, the exe names.
+std::string ui_text(const std::string& s);
+// The quarantine flag (a downloaded release) off everything under dir, so the game build and
+// its libraries start once the player has opened the launcher with "Open anyway".
+void clear_quarantine(const fs::path& dir);
+
+// A child process (run_hidden, the game). env: KEY=value lines (null = this process's own);
+// stdout and stderr go to out (empty: /dev/null). Null = it did not start (*err says why).
+struct ChildProcess;
+ChildProcess* child_start(const std::vector<std::string>& argv, const std::vector<std::string>* env,
+                          const fs::path& cwd, const fs::path& out, std::string* err = nullptr);
+bool child_wait(ChildProcess* c, int timeout_ms);  // true = it has ended; timeout_ms < 0 waits
+int child_exit_code(ChildProcess* c);             // exit status; a signal = 128 + its number
+void child_terminate(ChildProcess* c, int code);   // ends it; its exit code reads as `code`
+void child_free(ChildProcess* c);
+int run_argv(const std::vector<std::string>& argv, const fs::path& cwd, std::atomic<bool>* cancel = nullptr);
+
+fs::path mac_pick_folder(const wchar_t* title, const fs::path& start);
+fs::path mac_pick_open_file(const wchar_t* title, const wchar_t* filter_spec);
+fs::path mac_pick_save_file(const wchar_t* title, const wchar_t* default_name, const wchar_t* filter_spec);
+#endif

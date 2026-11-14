@@ -1,7 +1,15 @@
 #include "iso.h"
 
+#ifdef _WIN32
 #include <windows.h>
 #include <bcrypt.h>
+#else
+// macOS: pread on a file descriptor, and CommonCrypto's AES-128-ECB in place of BCrypt's
+// (the same calls on the same buffers; key_ holds the 16 key bytes).
+#include <CommonCrypto/CommonCryptor.h>
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 #include <algorithm>
 #include <cstring>
@@ -11,6 +19,7 @@ static const uint32_t SEC = 2048;
 static uint32_t be32(const unsigned char* p) { return (uint32_t)p[0] << 24 | p[1] << 16 | p[2] << 8 | p[3]; }
 static uint32_t le32(const unsigned char* p) { return (uint32_t)p[3] << 24 | p[2] << 16 | p[1] << 8 | p[0]; }
 
+#ifdef _WIN32
 IsoImage::~IsoImage()
 {
     if (key_) BCryptDestroyKey((BCRYPT_KEY_HANDLE)key_);
@@ -25,6 +34,28 @@ bool IsoImage::read_sectors(uint32_t first, uint32_t count, unsigned char* out)
     const DWORD want = count * SEC; DWORD got = 0;
     return ReadFile((HANDLE)f_, out, want, &got, nullptr) && got == want;
 }
+#else
+static int fd_of(void* f) { return (int)(intptr_t)f - 1; }   // f_ = fd + 1, so null stays "not open"
+
+IsoImage::~IsoImage()
+{
+    alg_ = nullptr;   // BCrypt's algorithm handle: CommonCrypto needs none
+    if (key_) { memset(key_, 0, 16); delete[] (unsigned char*)key_; }
+    if (f_) close(fd_of(f_));
+}
+
+bool IsoImage::read_sectors(uint32_t first, uint32_t count, unsigned char* out)
+{
+    const size_t want = (size_t)count * SEC;
+    size_t got = 0;
+    while (got < want) {
+        const ssize_t n = pread(fd_of(f_), out + got, want - got, (off_t)first * SEC + (off_t)got);
+        if (n <= 0) return false;
+        got += (size_t)n;
+    }
+    return true;
+}
+#endif
 
 // Each encrypted sector on its own: AES-128-CBC, IV = the sector number (big-endian,
 // 16 bytes). ECB over the run, then the CBC chaining by hand -- one BCrypt call per run.
@@ -38,10 +69,17 @@ void IsoImage::decrypt(uint32_t first, uint32_t count, unsigned char* buf)
         if (s < r->first) { s = std::min(first + count, r->first); continue; }
         const uint32_t end = std::min(first + count - 1, r->second);
         unsigned char* p = buf + (size_t)(s - first) * SEC;
+#ifdef _WIN32
         const ULONG n = (end - s + 1) * SEC;
         ct.assign(p, p + n);
         ULONG got = 0;
         BCryptDecrypt((BCRYPT_KEY_HANDLE)key_, ct.data(), n, nullptr, nullptr, 0, p, n, &got, 0);
+#else
+        const uint32_t n = (end - s + 1) * SEC;
+        ct.assign(p, p + n);
+        size_t got = 0;
+        CCCrypt(kCCDecrypt, kCCAlgorithmAES128, kCCOptionECBMode, key_, 16, nullptr, ct.data(), n, p, n, &got);
+#endif
         for (uint32_t k = s; k <= end; k++) {
             unsigned char* q = p + (size_t)(k - s) * SEC;
             const unsigned char* c = ct.data() + (size_t)(k - s) * SEC;
@@ -89,8 +127,14 @@ void IsoImage::walk(uint32_t sector, uint32_t bytes, const std::string& prefix, 
 
 std::string IsoImage::open(const fs::path& iso)
 {
+#ifdef _WIN32
     f_ = CreateFileW(iso.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
     if (f_ == INVALID_HANDLE_VALUE) { f_ = nullptr; return "Cannot open " + u8(iso) + "."; }
+#else
+    const int fd = ::open(iso.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return "Cannot open " + u8(iso) + ".";
+    f_ = (void*)(intptr_t)(fd + 1);
+#endif
     unsigned char s[SEC];
     // Sector 0 of a PS3 disc: the plain (unencrypted) regions as (first, last) sector
     // pairs; the sectors between them are the encrypted ones.
@@ -135,6 +179,12 @@ std::string IsoImage::set_key(const std::string& hex_in)
     if (hex.size() != 32) return "A disc key is 32 hex digits (a .dkey file's text); this one has " + std::to_string(hex.size()) + ".";
     unsigned char k[16];
     for (int i = 0; i < 16; i++) k[i] = (unsigned char)strtoul(hex.substr(i * 2, 2).c_str(), nullptr, 16);
+#ifndef _WIN32
+    if (!key_) key_ = new unsigned char[16];
+    memcpy(key_, k, 16);
+    memset(k, 0, sizeof k);
+    return {};
+#else
     if (!alg_) {
         BCRYPT_ALG_HANDLE a = nullptr;
         if (BCryptOpenAlgorithmProvider(&a, BCRYPT_AES_ALGORITHM, nullptr, 0) != 0) return "AES is not available.";
@@ -146,6 +196,7 @@ std::string IsoImage::set_key(const std::string& hex_in)
     if (BCryptGenerateSymmetricKey((BCRYPT_ALG_HANDLE)alg_, &h, nullptr, 0, k, 16, 0) != 0) return "The disc key was not taken.";
     key_ = h;
     return {};
+#endif
 }
 
 std::string IsoImage::read(const IsoFile& f, uint64_t max)
@@ -167,8 +218,15 @@ std::string IsoImage::extract(const IsoFile& f, const fs::path& dst, Progress* p
 {
     std::error_code ec;
     fs::create_directories(dst.parent_path(), ec);
+#ifdef _WIN32
     HANDLE o = CreateFileW(dst.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (o == INVALID_HANDLE_VALUE) return "cannot write " + u8(dst);
+#else
+    const int o = ::open(dst.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (o < 0) return "cannot write " + u8(dst);
+    auto CloseHandle = [](int fd) { close(fd); };
+    auto DeleteFileW = [](const char* p) { unlink(p); };
+#endif
     const uint32_t chunk = 2048;   // sectors: 4 MB
     std::vector<unsigned char> b((size_t)chunk * SEC);
     bool ok = true;
@@ -178,8 +236,16 @@ std::string IsoImage::extract(const IsoFile& f, const fs::path& dst, Progress* p
             const uint32_t n = (uint32_t)std::min<uint64_t>(chunk, (left + SEC - 1) / SEC);
             if (!read_sectors(s, n, b.data())) { CloseHandle(o); DeleteFileW(dst.c_str()); return "the image ends early (an incomplete .iso?) at " + f.path; }
             decrypt(s, n, b.data());
+#ifdef _WIN32
             const DWORD put_n = (DWORD)std::min<uint64_t>(left, (uint64_t)n * SEC); DWORD put = 0;
             if (!WriteFile(o, b.data(), put_n, &put, nullptr) || put != put_n) ok = false;
+#else
+            const uint32_t put_n = (uint32_t)std::min<uint64_t>(left, (uint64_t)n * SEC);
+            for (uint32_t at = 0; ok && at < put_n;) {
+                const ssize_t w = ::write(o, b.data() + at, put_n - at);
+                if (w <= 0) ok = false; else at += (uint32_t)w;
+            }
+#endif
             left -= put_n; s += n;
             if (p) { p->done += put_n; if (p->cancel) ok = false; }
         }

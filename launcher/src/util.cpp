@@ -1,11 +1,20 @@
 #include "util.h"
 
+#ifdef _WIN32
 #include <windows.h>
 #include <bcrypt.h>
 #include <shellapi.h>
 #include <shobjidl.h>
 #include <tlhelp32.h>
 #include <winhttp.h>
+#else
+// The macOS versions of the system parts are in util_mac.mm; the zip reader here maps
+// and writes files with POSIX calls.
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 #include <algorithm>
 #include <cstdio>
@@ -14,6 +23,7 @@
 #include <fstream>
 #include <sstream>
 
+#ifdef _WIN32
 std::wstring widen(const std::string& s)
 {
     if (s.empty()) return {};
@@ -31,6 +41,7 @@ std::string narrow(const std::wstring& w)
     WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), s.data(), n, nullptr, nullptr);
     return s;
 }
+#endif
 
 std::string read_text(const fs::path& p, size_t max)
 {
@@ -46,6 +57,7 @@ std::string read_text(const fs::path& p, size_t max)
     return s;
 }
 
+#ifdef _WIN32
 bool write_text_atomic(const fs::path& p, const std::string& text)
 {
     std::error_code ec;
@@ -59,6 +71,7 @@ bool write_text_atomic(const fs::path& p, const std::string& text)
     }
     return MoveFileExW(tmp.c_str(), p.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
 }
+#endif
 
 std::string trim(const std::string& s)
 {
@@ -89,6 +102,7 @@ std::string format_duration(uint64_t s)
     return t;
 }
 
+#ifdef _WIN32
 std::string stamp_now()
 {
     time_t t = time(nullptr); struct tm lt; localtime_s(&lt, &t);
@@ -105,6 +119,7 @@ std::string file_date(const fs::path& p)
     char b[48]; snprintf(b, sizeof b, "%04u-%02u-%02u %02u:%02u", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute);
     return b;
 }
+#endif
 
 uint64_t tree_size(const fs::path& dir, uint64_t* files)
 {
@@ -118,6 +133,7 @@ uint64_t tree_size(const fs::path& dir, uint64_t* files)
     return total;
 }
 
+#ifdef _WIN32
 std::string copy_tree(const fs::path& src, const fs::path& dst, Progress* p)
 {
     std::error_code ec;
@@ -153,6 +169,7 @@ std::string copy_tree(const fs::path& src, const fs::path& dst, Progress* p)
     if (ec) return "reading " + u8(src) + ": " + ec.message();
     return {};
 }
+#endif
 
 bool delete_tree(const fs::path& p)
 {
@@ -161,6 +178,7 @@ bool delete_tree(const fs::path& p)
     return !ec;
 }
 
+#ifdef _WIN32
 int run_hidden(const std::wstring& cmdline, const fs::path& cwd, std::atomic<bool>* cancel)
 {
     STARTUPINFOW si{}; si.cb = sizeof si; si.dwFlags = STARTF_USESHOWWINDOW; si.wShowWindow = SW_HIDE;
@@ -204,9 +222,11 @@ std::string zip_extract(const fs::path& zip, const fs::path& to_dir)
     if (r != 0) return "unpacking the zip failed (tar exit " + std::to_string(r) + ")";
     return {};
 }
+#endif
 
 // ---- the launcher's own zip reader ----------------------------------------------------------
 namespace {
+#ifdef _WIN32
 struct MappedFile {
     HANDLE f = INVALID_HANDLE_VALUE, m = nullptr;
     const unsigned char* d = nullptr;
@@ -227,6 +247,27 @@ struct MappedFile {
         if (f != INVALID_HANDLE_VALUE) CloseHandle(f);
     }
 };
+#else
+struct MappedFile {
+    int f = -1;
+    const unsigned char* d = nullptr;
+    uint64_t size = 0;
+    explicit MappedFile(const fs::path& p)
+    {
+        f = open(p.c_str(), O_RDONLY | O_CLOEXEC);
+        struct stat st;
+        if (f < 0 || fstat(f, &st) != 0 || st.st_size <= 0) return;
+        size = (uint64_t)st.st_size;
+        void* m = mmap(nullptr, (size_t)size, PROT_READ, MAP_PRIVATE, f, 0);
+        if (m != MAP_FAILED) d = (const unsigned char*)m;
+    }
+    ~MappedFile()
+    {
+        if (d) munmap((void*)d, (size_t)size);
+        if (f >= 0) close(f);
+    }
+};
+#endif
 uint16_t rd16(const unsigned char* p) { return (uint16_t)(p[0] | p[1] << 8); }
 uint32_t rd32(const unsigned char* p) { return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24; }
 
@@ -244,13 +285,26 @@ uint32_t crc32_add(uint32_t crc, const unsigned char* p, size_t n)
 
 // What comes out of an entry: to a file, counted and CRC'd, stopping at the size it declared.
 struct ZipOut {
-    HANDLE f; uint64_t limit; Progress* p;
+#ifdef _WIN32
+    HANDLE f;
+#else
+    int f;
+#endif
+    uint64_t limit; Progress* p;
     uint64_t total = 0; uint32_t crc = 0; std::string err;
     bool write(const unsigned char* d, size_t n)
     {
         if (total + n > limit) { err = "bigger than it says"; return false; }
+#ifdef _WIN32
         DWORD put = 0;
         if (!WriteFile(f, d, (DWORD)n, &put, nullptr) || put != n) { err = "write failed (disk full?)"; return false; }
+#else
+        for (size_t at = 0; at < n;) {
+            const ssize_t put = ::write(f, d + at, n - at);
+            if (put <= 0) { err = "write failed (disk full?)"; return false; }
+            at += (size_t)put;
+        }
+#endif
         crc = crc32_add(crc, d, n);
         total += n;
         if (p) { p->done += n; if (p->cancel) { err = "cancelled"; return false; } }
@@ -454,8 +508,13 @@ std::string zip_unpack_entry(const fs::path& zip, const ZipEntry& e, const fs::p
     if (at + e.packed > z.size) return "the zip is damaged at " + e.name;
     std::error_code ec;
     fs::create_directories(to.parent_path(), ec);
+#ifdef _WIN32
     HANDLE f = CreateFileW(to.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (f == INVALID_HANDLE_VALUE) return "cannot write " + u8(to);
+#else
+    const int f = open(to.c_str(), O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);   // read back below
+    if (f < 0) return "cannot write " + u8(to);
+#endif
     ZipOut out{ f, e.size, p };
     bool ok;
     if (e.method == 0) {
@@ -468,14 +527,30 @@ std::string zip_unpack_entry(const fs::path& zip, const ZipEntry& e, const fs::p
         auto inf = std::make_unique<Inflate>(Inflate{ z.d + at, (size_t)e.packed, &out });
         ok = inf->run();
     }
+#ifdef _WIN32
     CloseHandle(f);
+#else
+    // A program or script (the game build, the launcher in its .app) stays runnable.
+    if (ok && out.total >= 4) {
+        unsigned char m[4] = {};
+        if (pread(f, m, 4, 0) == 4 && ((m[0] == 0xCF && m[1] == 0xFA && m[2] == 0xED && m[3] == 0xFE) ||
+                                       (m[0] == 0xCA && m[1] == 0xFE && m[2] == 0xBA && m[3] == 0xBE) || (m[0] == '#' && m[1] == '!')))
+            fchmod(f, 0755);
+    }
+    close(f);
+#endif
     std::string err = out.err;
     if (ok && (out.total != e.size || out.crc != e.crc)) err = "the zip is damaged at " + e.name + " (its check does not match)";
     else if (!ok && err.empty()) err = "the zip is damaged at " + e.name;
+#ifdef _WIN32
     if (!err.empty()) DeleteFileW(to.c_str());
+#else
+    if (!err.empty()) unlink(to.c_str());
+#endif
     return err;
 }
 
+#ifdef _WIN32
 std::string sha256_file(const fs::path& p, Progress* prog)
 {
     BCRYPT_ALG_HANDLE alg = nullptr; BCRYPT_HASH_HANDLE h = nullptr;
@@ -563,6 +638,7 @@ std::string http_get(const std::string& url, std::string* body, const fs::path* 
     WinHttpCloseHandle(s);
     return err;
 }
+#endif
 
 // ---- JSON ------------------------------------------------------------------
 const Json& Json::operator[](const std::string& k) const
@@ -674,6 +750,27 @@ static bool next_pick(fs::path* r)
     return true;
 }
 
+#ifndef _WIN32
+// macOS: NSOpenPanel / NSSavePanel (util_mac.mm).
+fs::path pick_folder(void*, const wchar_t* title, const fs::path& start)
+{
+    fs::path r;
+    if (next_pick(&r)) return r;
+    return mac_pick_folder(title, start);
+}
+fs::path pick_open_file(void*, const wchar_t* title, const wchar_t*, const wchar_t* filter_spec)
+{
+    fs::path r;
+    if (next_pick(&r)) return r;
+    return mac_pick_open_file(title, filter_spec);
+}
+fs::path pick_save_file(void*, const wchar_t* title, const wchar_t* default_name, const wchar_t*, const wchar_t* filter_spec)
+{
+    fs::path r;
+    if (next_pick(&r)) return r;
+    return mac_pick_save_file(title, default_name, filter_spec);
+}
+#else
 fs::path pick_folder(void* hwnd, const wchar_t* title, const fs::path& start)
 {
     fs::path r;
@@ -754,8 +851,11 @@ fs::path exe_path()
     return fs::path(b);
 }
 
+#endif
+
 fs::path exe_dir() { return exe_path().parent_path(); }
 
+#ifdef _WIN32
 bool process_running_under(const fs::path& dir)
 {
     const std::wstring base = widen(lower(u8(dir)) + "\\");
@@ -779,3 +879,4 @@ uint64_t free_space(const fs::path& dir)
     ULARGE_INTEGER a;
     return GetDiskFreeSpaceExW(dir.c_str(), &a, nullptr, nullptr) ? a.QuadPart : 0;
 }
+#endif

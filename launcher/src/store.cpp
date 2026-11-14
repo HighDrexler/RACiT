@@ -1,7 +1,13 @@
 #include "store.h"
 #include "iso.h"
+#include "platform.h"
 
+#ifdef _WIN32
 #include <windows.h>
+#else
+#include <unistd.h>
+extern char** environ;
+#endif
 
 #include <algorithm>
 #include <cctype>
@@ -240,9 +246,14 @@ std::string Store::import_iso(const fs::path& iso, Progress* p, std::string* sum
     p->total = need;
     std::error_code ec;
     fs::create_directories(game_copy(), ec);
+#ifdef _WIN32
     ULARGE_INTEGER free_{};
     if (GetDiskFreeSpaceExW(game_copy().c_str(), &free_, nullptr, nullptr) && free_.QuadPart < need + (512ull << 20))
         return "Not enough space: the game needs " + format_size(need) + ", " + format_size(free_.QuadPart) + " free on this drive.";
+#else
+    if (const uint64_t room = free_space(game_copy()); room && room < need + (512ull << 20))
+        return "Not enough space: the game needs " + format_size(need) + ", " + format_size(room) + " free on this drive.";
+#endif
     // An EBOOT.elf already in the launcher's copy is kept for the new one.
     const fs::path old_elf = game_copy() / L"PS3_GAME" / L"USRDIR" / L"EBOOT.elf";
     bool k = false;
@@ -334,7 +345,7 @@ std::vector<fs::path> Store::find_old_installs() const
     const fs::path parent = root.parent_path();
     for (auto& d : fs::directory_iterator(parent, ec)) {
         if (!d.is_directory(ec) || fs::equivalent(d.path(), root, ec)) continue;
-        if (fs::exists(d.path() / L"RaCACiT.exe", ec) && fs::exists(d.path() / L"settings.txt", ec))
+        if (fs::exists(d.path() / RACIT_GAME_EXE, ec) && fs::exists(d.path() / L"settings.txt", ec))
             v.push_back({ version_of_name(u8(d.path().filename())), d.path() });
     }
     std::sort(v.begin(), v.end(), [](auto& a, auto& b) { return a.first > b.first; });
@@ -394,7 +405,7 @@ std::string Store::migrate_from(const fs::path& old, Progress* p, std::string* s
     bool installed = false;
     for (auto& b : builds()) if (b.version == have) installed = true;
     if (installed) s += " Build v" + std::to_string(have) + " is installed already (kept).";
-    else if (fs::exists(old / L"RaCACiT.exe", ec) && install_build_folder(old, &ver, builds().empty()).empty())
+    else if (fs::exists(old / RACIT_GAME_EXE, ec) && install_build_folder(old, &ver, builds().empty()).empty())
         s += " Build v" + std::to_string(ver) + " installed.";
     refresh_art();
     if (summary) *summary = s;
@@ -412,7 +423,7 @@ std::vector<fs::path> Store::find_old_launchers() const
     std::vector<Found> v;
     std::error_code ec;
     auto consider = [&](const fs::path& d) {
-        if (!fs::exists(d / L"RaCACiT Launcher.exe", ec) || !fs::exists(d / L"data" / L"settings.txt", ec)) return;
+        if (!fs::exists(d / RACIT_LAUNCHER_FILE, ec) || !fs::exists(d / L"data" / L"settings.txt", ec)) return;
         if (fs::equivalent(d, root, ec)) return;
         for (const auto& f : v) if (fs::equivalent(f.dir, d, ec)) return;
         v.push_back({ u8(d.filename()).find("0.8") != std::string::npos,
@@ -562,7 +573,7 @@ std::vector<BuildInfo> Store::builds() const
     for (auto& d : fs::directory_iterator(builds_dir(), ec)) {
         if (!d.is_directory(ec)) continue;
         const std::string n = u8(d.path().filename());
-        if (n.size() < 2 || n[0] != 'v' || !fs::exists(d.path() / L"RaCACiT.exe", ec)) continue;
+        if (n.size() < 2 || n[0] != 'v' || !fs::exists(d.path() / RACIT_GAME_EXE, ec)) continue;
         BuildInfo b; b.version = atoi(n.c_str() + 1); b.dir = d.path();
         std::string rd = read_text(d.path() / L"README.txt", 400);
         b.notes_first_line = trim(rd.substr(0, rd.find('\n')));
@@ -584,7 +595,7 @@ bool Store::set_current(int version) { return write_text_atomic(builds_dir() / L
 std::string Store::install_build_folder(const fs::path& from, int* version, bool make_current)
 {
     std::error_code ec;
-    if (!fs::exists(from / L"RaCACiT.exe", ec)) return "No RaCACiT.exe in " + u8(from);
+    if (!fs::exists(from / RACIT_GAME_EXE, ec)) return "No RaCACiT.exe in " + u8(from);
     int v = atoi(trim(read_text(from / L"version.txt", 64)).c_str());
     if (!v) v = version_of_name(u8(from.filename()));
     if (!v) {   // "... Windows build v65 ..." in the README
@@ -597,11 +608,19 @@ std::string Store::install_build_folder(const fs::path& from, int* version, bool
     const fs::path tmp = builds_dir() / (L".v" + std::to_wstring(v) + L".new");
     delete_tree(tmp);
     fs::create_directories(tmp, ec);
-    for (const wchar_t* f : { L"RaCACiT.exe", L"README.txt", L"version.txt", L"RaCACiT.map" })
+    for (const wchar_t* f : { RACIT_GAME_EXE, L"README.txt", L"version.txt", L"RaCACiT.map" })
         if (fs::exists(from / f, ec)) {
             fs::copy_file(from / f, tmp / f, fs::copy_options::overwrite_existing, ec);
             if (ec) { delete_tree(tmp); return "Copying " + narrow(f) + " failed: " + ec.message(); }
         }
+#ifdef __APPLE__
+    // The libraries the Mac build runs with (Vulkan loader, MoltenVK, SDL), beside it in lib/.
+    if (fs::is_directory(from / L"lib", ec)) {
+        Progress lp;
+        const std::string r = copy_tree(from / L"lib", tmp / L"lib", &lp);
+        if (!r.empty()) { delete_tree(tmp); return "Copying lib failed: " + r; }
+    }
+#endif
     write_text_atomic(tmp / L"version.txt", std::to_string(v) + "\r\n");
     delete_tree(dst);
     fs::rename(tmp, dst, ec);
@@ -690,7 +709,12 @@ std::string Store::fetch_latest_release(ReleaseInfo* out)
     // The asset: a .zip with "launcher" in its name. A .7z is listed for the message only.
     for (const Json& a : j["assets"].a) {
         const std::string n = a.str("name"), low = lower(n), url = a.str("browser_download_url");
+#ifdef __APPLE__
+        // The Mac release's zip: "launcher" and "mac" in its name (RACiT-vX-launcher-macos.zip).
+        const bool zip = low.size() > 4 && low.compare(low.size() - 4, 4, ".zip") == 0 && low.find("mac") != std::string::npos;
+#else
         const bool zip = low.size() > 4 && low.compare(low.size() - 4, 4, ".zip") == 0;
+#endif
         if (out->asset.empty() && zip && low.find("launcher") != std::string::npos && release_download_ok(url)) {
             out->asset = n; out->url = url; out->size = (uint64_t)a.num("size");
             const std::string d = lower(a.str("digest"));
@@ -735,6 +759,11 @@ void Store::clean_update_leftovers()
 {
     delete_tree(root / L".update");
     // The launcher this one replaced: it may still be on its way out.
+#ifdef __APPLE__
+    // The .app this one replaced: nothing runs from it any more.
+    fs::path old = app_bundle_path(); old += L".old";
+    delete_tree(old);
+#else
     fs::path old = exe_path(); old += L".old";
     std::error_code ec;
     if (!fs::exists(old, ec)) return;
@@ -744,6 +773,7 @@ void Store::clean_update_leftovers()
             Sleep(250);
         }
     }).detach();
+#endif
 }
 
 std::string Store::download_release(const ReleaseInfo& rel, Progress* p)
@@ -794,6 +824,14 @@ static bool release_part(const std::string& rel_name)
 {
     const std::string n = lower(rel_name);
     if (n == "readme.txt") return true;
+#ifdef __APPLE__
+    // Finder's and ditto's AppleDouble files (._name: a file's extended attributes) are no
+    // part of a release, and inside the .app they would break its signature.
+    const size_t leaf = n.rfind('/');
+    if (n.compare(leaf == std::string::npos ? 0 : leaf + 1, 2, "._") == 0) return false;
+    // The launcher is a bundle: everything in RaCACiT Launcher.app/.
+    if (n.rfind("racacit launcher.app/", 0) == 0) return n.size() > 21;
+#endif
     if (n.find('/') == std::string::npos) return n.size() > 4 && n.compare(n.size() - 4, 4, ".exe") == 0 && n.find("launcher") != std::string::npos;
     if (n.rfind("mods/", 0) == 0) return n.size() > 5 && n.find('/', 5) != std::string::npos;
     if (n.rfind("builds/v", 0) == 0) {
@@ -805,8 +843,13 @@ static bool release_part(const std::string& rel_name)
 
 static bool looks_like_program(const fs::path& p)
 {
+#ifdef __APPLE__
+    const std::string h = read_text(p, 4);   // Mach-O: 64-bit arm64, or universal (read_text may read more)
+    return h.size() >= 4 && (h.compare(0, 4, "\xCF\xFA\xED\xFE", 4) == 0 || h.compare(0, 4, "\xCA\xFE\xBA\xBE", 4) == 0);
+#else
     const std::string h = read_text(p, 2);
     return h.size() >= 2 && h[0] == 'M' && h[1] == 'Z';
+#endif
 }
 
 std::string Store::install_release(const ReleaseInfo& rel, Progress* p, std::string* summary, bool* restart)
@@ -857,17 +900,29 @@ std::string Store::install_release(const ReleaseInfo& rel, Progress* p, std::str
         top_build = std::max(top_build, v);
     }
     for (const auto& b : new_builds)
-        if (!looks_like_program(b / L"RaCACiT.exe")) return stop("The release's build " + u8(b.filename()) + " has no game program. Nothing was changed.");
+        if (!looks_like_program(b / RACIT_GAME_EXE)) return stop("The release's build " + u8(b.filename()) + " has no game program. Nothing was changed.");
     fs::path new_launcher;
+#ifdef __APPLE__
+    // The launcher is the .app; its program is Contents/MacOS/RaCACiT Launcher.
+    auto program_of = [](const fs::path& app) { return app / L"Contents" / L"MacOS" / L"RaCACiT Launcher"; };
+    if (fs::is_directory(fresh / RACIT_LAUNCHER_FILE, ec)) new_launcher = fresh / RACIT_LAUNCHER_FILE;
+    if (new_builds.empty() && new_launcher.empty()) return stop("That release holds no game build and no launcher. Nothing was changed.");
+    const fs::path self = app_bundle_path().parent_path() == root ? app_bundle_path() : root / RACIT_LAUNCHER_FILE;
+    if (!new_launcher.empty() && sha256_file(program_of(new_launcher)) == sha256_file(program_of(self))) new_launcher.clear();   // the same one
+    if (!new_launcher.empty()) {
+        if (!looks_like_program(program_of(new_launcher))) return stop("The release's launcher is not a program. Nothing was changed.");
+        const int code = run_argv({ u8(program_of(new_launcher)), "--self-test" }, fresh, &p->cancel);
+#else
     for (auto& f : fs::directory_iterator(fresh, ec))
         if (f.is_regular_file(ec) && lower(u8(f.path().extension())) == ".exe") new_launcher = f.path();
     if (new_builds.empty() && new_launcher.empty()) return stop("That release holds no game build and no launcher. Nothing was changed.");
     // The launcher in the zip must at least start on this PC before it replaces this one.
-    const fs::path self = exe_path().parent_path() == root ? exe_path() : root / L"RaCACiT Launcher.exe";
+    const fs::path self = exe_path().parent_path() == root ? exe_path() : root / RACIT_LAUNCHER_FILE;
     if (!new_launcher.empty() && sha256_file(new_launcher) == sha256_file(self)) new_launcher.clear();   // the same one
     if (!new_launcher.empty()) {
         if (!looks_like_program(new_launcher)) return stop("The release's launcher is not a program. Nothing was changed.");
         const int code = run_hidden(L"\"" + new_launcher.wstring() + L"\" --self-test", fresh, &p->cancel);
+#endif
         if (p->cancel) return stop("cancelled");
         if (code != 0) return stop("The release's new launcher did not start on this PC (" + std::to_string(code) + "). Nothing was changed.");
     }
@@ -916,7 +971,11 @@ std::string Store::install_release(const ReleaseInfo& rel, Progress* p, std::str
     if (ok && !new_launcher.empty()) {
         // A running exe can be renamed but not deleted: this one goes aside beside itself, and the next
         // start deletes it. The new launcher takes its name, whatever the player calls it.
+#ifdef __APPLE__
+        delete_tree(self_old);   // a bundle (a folder) the running launcher can be renamed out of
+#else
         DeleteFileW(self_old.c_str());
+#endif
         ok = put(new_launcher, self, self_old);
     }
     if (!ok) {
@@ -1333,7 +1392,11 @@ std::string Store::launch(void** process)
          * to logs\backup_failed.txt. */
         const std::string r = backup_saves("play", nullptr);
         if (!r.empty()) {
+#ifdef _WIN32
             if (FILE* f = _wfopen((logs() / L"backup_failed.txt").c_str(), L"ab")) {
+#else
+            if (FILE* f = fopen((logs() / L"backup_failed.txt").c_str(), "ab")) {
+#endif
                 fprintf(f, "%s  backup on Play failed: %s\r\n", stamp_now().c_str(), r.c_str());
                 fclose(f);
             }
@@ -1372,6 +1435,9 @@ std::string Store::launch(void** process)
             if (m.id == id && m.problem.empty() && m.has_files) { if (!modlist.empty()) modlist += L";"; modlist += fwd(m.dir / L"files"); }
     if (!modlist.empty()) set[L"RACACIT_MODS"] = modlist;
 
+#ifdef __APPLE__
+    return launch_mac(g, b, set, process);
+#else
     std::wstring env;
     if (wchar_t* cur = GetEnvironmentStringsW()) {
         for (wchar_t* e = cur; *e; e += wcslen(e) + 1) {
@@ -1401,7 +1467,47 @@ std::string Store::launch(void** process)
     CloseHandle(pi.hThread);
     *process = pi.hProcess;
     return {};
+#endif
 }
+
+#ifdef __APPLE__
+// The macOS build reads no settings.txt of its own and writes its output to stdout: the
+// same environment as on Windows, the game folder named outright (PS3_VFS_ROOT), the
+// Vulkan loader and MoltenVK beside the build (builds/vNN/lib, unless settings.txt names
+// others), and stdout + stderr into data/log.txt.
+std::string Store::launch_mac(const GameInfo& g, const BuildInfo& b, std::map<std::wstring, std::wstring>& set, void** process)
+{
+    std::error_code ec;
+    auto ours = [&](const wchar_t* k) { for (auto& kv : set) if (_wcsicmp(kv.first.c_str(), k) == 0) return true; return false; };
+    set[L"PS3_VFS_ROOT"] = g.root.wstring();
+    const fs::path lib = b.dir / L"lib";
+    if (!ours(L"PS3RECOMP_VULKAN_LIBRARY") && fs::exists(lib / L"libvulkan.1.dylib", ec))
+        set[L"PS3RECOMP_VULKAN_LIBRARY"] = (lib / L"libvulkan.1.dylib").wstring();
+    if (!ours(L"VK_DRIVER_FILES") && fs::exists(lib / L"MoltenVK_icd.json", ec))
+        set[L"VK_DRIVER_FILES"] = (lib / L"MoltenVK_icd.json").wstring();
+
+    std::vector<std::string> env;
+    for (char** e = environ; e && *e; e++) {
+        const char* eq = strchr(*e + 1, '=');
+        const std::wstring k = widen(eq ? std::string(*e, (size_t)(eq - *e)) : std::string(*e));
+        bool mine = false;
+        for (auto& kv : set) if (_wcsicmp(kv.first.c_str(), k.c_str()) == 0) mine = true;
+        if (!mine) env.push_back(*e);
+    }
+    for (auto& kv : set) env.push_back(narrow(kv.first) + "=" + narrow(kv.second));
+
+    const fs::path exe = b.dir / RACIT_GAME_EXE;
+    const fs::path eboot = g.root / L"PS3_GAME" / L"USRDIR" / L"EBOOT.elf";
+    fs::remove(b.dir / L"log.txt", ec);
+    launched_dir = b.dir;
+    clear_quarantine(b.dir);
+    std::string why;
+    ChildProcess* c = child_start({ u8(exe), u8(eboot) }, &env, b.dir, log(), &why);
+    if (!c) return "Could not start " + u8(exe) + " (" + why + ").";
+    *process = c;
+    return {};
+}
+#endif
 
 void Store::collect_log()
 {
