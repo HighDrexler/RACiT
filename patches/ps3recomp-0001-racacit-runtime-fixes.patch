@@ -19882,7 +19882,7 @@ index ad21361..bf55d13 100644
   * refs is rewritten in place with the unique prefix.  The occurrence map
   * remains valid until the next call using the same remap object. */
 diff --git a/libs/video/rsx_vp_decompiler.c b/libs/video/rsx_vp_decompiler.c
-index edd01d6..31def54 100644
+index edd01d6..4a21d1c 100644
 --- a/libs/video/rsx_vp_decompiler.c
 +++ b/libs/video/rsx_vp_decompiler.c
 @@ -31,6 +31,7 @@
@@ -19984,7 +19984,7 @@ index edd01d6..31def54 100644
                           rhs, saturate ? " _v = saturate(_v);" : "");
                  emit(&b, line);
                  /* SCA writes the output register when the VEC unit does not
-@@ -605,11 +646,50 @@ static int rsx_vp_decompile_impl(
+@@ -605,11 +646,60 @@ static int rsx_vp_decompile_impl(
           * text came out NaN, which the FP's NaN guard turned into black. */
          /* Scalar logic per component: glslang's HLSL front end (the Metal
           * path) does not take || on vectors. */
@@ -20012,11 +20012,21 @@ index edd01d6..31def54 100644
 +         * Dekker's product from Veltkamp halves. Only multiplies and adds,
 +         * which Vulkan requires correctly rounded -- an FMA (mad) need not be
 +         * fused there, and an unfused one would make the error term wrong. */
++#ifdef __APPLE__
++        /* HLSL mad becomes SPIR-V Fma and then Metal fma(), which Metal
++         * defines as correctly rounded, so the exact product error is one
++         * instruction instead of the Veltkamp split below. Same result; the
++         * split more than halved forest frame rates through MoltenVK. */
++        "float vp_mul_err(float a, float b, float p) {\n"
++        "    precise float e = mad(a, b, -p);\n"
++        "    return (a == 0.0 || b == 0.0) ? 0.0 : e; }\n"
++#else
 +        "float vp_mul_err(float a, float b, float p) {\n"
 +        "    precise float ca = 4097.0 * a; precise float ah = ca - (ca - a); precise float al = a - ah;\n"
 +        "    precise float cb = 4097.0 * b; precise float bh = cb - (cb - b); precise float bl = b - bh;\n"
 +        "    precise float e = ((ah * bh - p) + ah * bl + al * bh) + al * bl;\n"
 +        "    return (a == 0.0 || b == 0.0) ? 0.0 : e; }\n"
++#endif
 +        /* (p, s) += a*b: p the running rounded sum, s the running error */
 +        "void vp_dot_step(inout float p, inout float s, float a, float b) {\n"
 +        "    precise float h = vp_mul1(a, b); precise float r = vp_mul_err(a, b, h);\n"
@@ -20038,7 +20048,7 @@ index edd01d6..31def54 100644
  
      for (u32 vtu = 0; vtu < 4; vtu++) {
          if (!((vtex_mask >> vtu) & 1u)) continue;
-@@ -642,7 +722,7 @@ static int rsx_vp_decompile_impl(
+@@ -642,7 +732,7 @@ static int rsx_vp_decompile_impl(
          }
      }
      emit(&o,
@@ -20047,7 +20057,7 @@ index edd01d6..31def54 100644
          "    [unroll] for (int _i=0;_i<32;_i++) r[_i]=(float4)0;\n"
          "    [unroll] for (int _j=0;_j<16;_j++) o[_j]=float4(0,0,0,1);\n"
          "    int4 a0 = (int4)0; int4 a1 = (int4)0;\n"
-@@ -659,7 +739,12 @@ static int rsx_vp_decompile_impl(
+@@ -659,7 +749,12 @@ static int rsx_vp_decompile_impl(
      emit(&o,
          "    VSOutput Out;\n"
          "    float4 _p = o[0];\n"
