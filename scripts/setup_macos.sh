@@ -9,7 +9,12 @@ PATCH="$ROOT/patches/ps3recomp-0001-racacit-runtime-fixes.patch"
 
 [ "$(uname -s)" = Darwin ] || { echo "Run this setup on macOS."; exit 1; }
 mkdir -p "$ROOT/tools" "$ROOT/input"
-if [ ! -e "$RUNTIME" ]; then
+if [ ! -e "$RUNTIME/.git" ]; then
+  mkdir -p "$RUNTIME"
+  if [ -n "$(ls -A "$RUNTIME")" ]; then
+    echo "Runtime directory is not a Git checkout. Use an empty directory or the pinned runtime checkout." >&2
+    exit 1
+  fi
   git init -q "$RUNTIME"
   git -C "$RUNTIME" remote add origin https://github.com/sp00nznet/ps3recomp.git
 fi
