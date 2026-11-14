@@ -19,6 +19,21 @@ OUT="$ROOT/out"
 RECOMP="$ROOT/game/src/recomp"
 SPU="$ROOT/game/spu"
 PY="${PY:-python3 -I}"
+JOBS="${CMAKE_BUILD_PARALLEL_LEVEL:-}"
+BUILD_DIR="${BUILD_DIR:-$ROOT/game/build}"
+
+# The same explicit count bounds both lifters and the native compiler.
+case "$JOBS" in
+  "") ;;
+  *[!0-9]*)
+    echo "CMAKE_BUILD_PARALLEL_LEVEL must be a positive integer or empty." >&2
+    exit 1 ;;
+  *)
+    if [[ ! "$JOBS" =~ [1-9] ]]; then
+      echo "CMAKE_BUILD_PARALLEL_LEVEL must be a positive integer or empty." >&2
+      exit 1
+    fi ;;
+esac
 
 [ -f "$ELF" ] || { echo "No ELF at $ELF — put your decrypted EBOOT.ELF in input/"; exit 1; }
 # Profiles identify both the disc region and the executable update.
@@ -47,13 +62,15 @@ fi
 
 echo "== 3/5 PPU lift"
 # names.json (name_pass.py) only adds comments above lifted functions.
-NAMES=()
-[ -f "$OUT/names.json" ] && NAMES=(--names "$OUT/names.json")
-PS3RECOMP_CHUNK_LINES=${PS3RECOMP_CHUNK_LINES:-100000} $PY "$PS3R/tools/ppu_lifter.py" "$ELF" \
-  --functions "$FUNCS" \
-  --hle-stubs "$OUT/$BASE.imports.json" \
-  "${NAMES[@]}" \
-  --output "$RECOMP"
+LIFT_ARGS=("$ELF" --functions "$FUNCS"
+           --hle-stubs "$OUT/$BASE.imports.json" --output "$RECOMP")
+if [ -n "$JOBS" ]; then
+  LIFT_ARGS+=(--jobs "$JOBS")
+fi
+if [ -f "$OUT/names.json" ]; then
+  LIFT_ARGS+=(--names "$OUT/names.json")
+fi
+PS3RECOMP_CHUNK_LINES=${PS3RECOMP_CHUNK_LINES:-100000} $PY "$PS3R/tools/ppu_lifter.py" "${LIFT_ARGS[@]}"
 
 $PY "$ROOT/scripts/patch_lift.py" "$RECOMP"
 
@@ -85,9 +102,17 @@ $PY "$ROOT/scripts/patch_lift.py" || true
 [ "${SKIP_DESKTOP:-0}" = 1 ] && { echo "Lifted: $RECOMP and $SPU"; exit 0; }
 
 echo "== 5/5 Desktop build"
-cmake -S "$ROOT/game" -B "$ROOT/game/build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
-  -DPS3RECOMP_DIR="$PS3R" -DRECOMP_DIR="$RECOMP" \
-  -DPS3RECOMP_VULKAN_INCLUDE_DIR="$ROOT/tools/Vulkan-Headers/include" -DPS3RECOMP_RSX_VULKAN=ON \
-  -DCMAKE_PREFIX_PATH="$ROOT/tools/sdl2"
-cmake --build "$ROOT/game/build" -j"$(nproc)"
-echo "Done: $ROOT/game/build/RaCACiTRecomp"
+CMAKE_ARGS=(-DPS3RECOMP_DIR="$PS3R" -DRECOMP_DIR="$RECOMP" -DPS3RECOMP_RSX_VULKAN=ON)
+if [ -n "${PS3RECOMP_VULKAN_INCLUDE_DIR:-}" ]; then
+  CMAKE_ARGS+=(-DPS3RECOMP_VULKAN_INCLUDE_DIR="$PS3RECOMP_VULKAN_INCLUDE_DIR")
+elif [ -d "$ROOT/tools/Vulkan-Headers/include" ]; then
+  CMAKE_ARGS+=(-DPS3RECOMP_VULKAN_INCLUDE_DIR="$ROOT/tools/Vulkan-Headers/include")
+fi
+if [ -n "${CMAKE_PREFIX_PATH:-}" ]; then
+  CMAKE_ARGS+=(-DCMAKE_PREFIX_PATH="$CMAKE_PREFIX_PATH")
+elif [ -d "$ROOT/tools/sdl2" ]; then
+  CMAKE_ARGS+=(-DCMAKE_PREFIX_PATH="$ROOT/tools/sdl2")
+fi
+cmake -S "$ROOT/game" -B "$BUILD_DIR" -G "${CMAKE_GENERATOR:-Ninja}" -DCMAKE_BUILD_TYPE=Release "${CMAKE_ARGS[@]}"
+cmake --build "$BUILD_DIR" --parallel "${JOBS:-$(getconf _NPROCESSORS_ONLN)}"
+echo "Done: $BUILD_DIR/RaCACiTRecomp"
