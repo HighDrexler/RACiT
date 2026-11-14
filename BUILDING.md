@@ -55,7 +55,7 @@ them. CMake discovers the loader library and SDL uses that same library.
 The ordinary pipeline lifts the NA disc executable and builds the game for the
 host architecture. Supply the same private `input/EBOOT.ELF` and
 `input/libsre.prx` described above, plus the complete decrypted disc directory
-containing `PS3_GAME` for play. The graphical launcher currently targets Windows.
+containing `PS3_GAME` for play. The launcher builds for macOS too (below).
 
 ```bash
 # Prepare the pinned ps3recomp runtime with this repository's runtime patch.
@@ -92,6 +92,33 @@ runs guest code on its own large-stack thread. It defaults to safe MoltenVK
 shader math and synchronous pipelines to preserve complete rendering passes.
 `PS3RECOMP_VK_WINDOW=0` selects the existing offscreen mode. Save progress through
 the game's normal save/checkpoint system before closing the window.
+
+### macOS launcher and release
+
+The launcher is the same program as on Windows (`launcher/src`; the Mac parts are
+`*_mac.mm`, `app_mac.*` and `#ifdef __APPLE__`): an SDL window drawn with CoreGraphics
+and CoreText. It needs the Xcode command line tools and Homebrew's `sdl2` (sdl2-compat
+with SDL3), `vulkan-loader` and `molten-vk`.
+
+```bash
+# RaCACiT Launcher.app -> launcher/build/ (SDL inside it, ad-hoc signed)
+bash launcher/build_macos.sh
+# A release folder and zip -> out/macos/: the .app, builds/v<N>/RaCACiT (the game build
+# above) with its libraries in builds/v<N>/lib (Vulkan loader, MoltenVK and its ICD
+# file, SDL2/SDL3, glslang, SPIRV-Tools), README.txt and mods/. Nothing loads from Homebrew.
+bash scripts/package_macos.sh --version <N>
+```
+
+Players open the `.app` once with System Settings > Privacy & Security > Open Anyway
+(the Mac counterpart of SmartScreen's "Run anyway"); the launcher then sets up the game
+exactly as on Windows. Play passes the build the same environment the Windows launcher
+does, plus `PS3_VFS_ROOT`, `PS3RECOMP_VULKAN_LIBRARY` and `VK_DRIVER_FILES` for the
+bundled loader and MoltenVK, and writes its output to `data/log.txt`. Homebrew's
+libraries carry the macOS version they were built on as their minimum (the script lists
+them); build SDL, MoltenVK and the loader with `MACOSX_DEPLOYMENT_TARGET` set for a
+release that runs on older macOS. The launcher's binary
+(`RaCACiT Launcher.app/Contents/MacOS/RaCACiT Launcher`) with `--snapshot <dir>`, and
+optionally `--root <folder>`, draws every screen to PNGs with no window.
 
 ## Where things are
 

@@ -38,6 +38,19 @@ SET UP
 4. Play. Settings (display, graphics, controller) can be changed any time
    from the main menu, or in the game: F1, the touchpad on a DualSense, or
    hold Select (View) for a moment on any other controller.
+ON A MAC (Apple Silicon, macOS)
+The same launcher and the same steps, in the Mac release (RACiT-<version>-macos):
+  1. Unzip it anywhere (about 27 GB free on that drive) and open "RaCACiT Launcher.app".
+     macOS stops an app from the internet that is not notarized: open it, close the
+     warning, then System Settings > Privacy & Security > "Open Anyway" (once).
+  2. and 3. as above: the .iso (with its .dkey beside it) or the dumped game's USRDIR,
+     then EBOOT.elf. RPCS3 has a Mac version (rpcs3.net, Apple Silicon); its Utilities >
+     Decrypt PS3 Binaries makes EBOOT.elf the same way.
+  4. Play. The launcher starts builds/vNN/RaCACiT, which brings its own Vulkan (MoltenVK)
+     and SDL; nothing else to install. Needs macOS on an M1 or later.
+The folders below sit beside the .app as they sit beside the .exe on Windows (paths
+use / there: data/settings.txt). The launcher goes to the Dock while the game runs.
+
 Coming from RACiT Launcher 0.8? Set up offers to bring it over (or lets you pick
 its folder): its saves, settings, save backups and shader caches are copied, and
 its game is played from where it is, so keep that folder or import the .iso again.
