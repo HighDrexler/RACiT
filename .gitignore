@@ -17,4 +17,5 @@ game/spu/
 game/build*/
 launcher/build/
 tools/
+/user-data/
 __pycache__/
