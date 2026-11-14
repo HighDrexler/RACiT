@@ -33,34 +33,66 @@ Usage: scripts/patch_lift.py [game/src/recomp]
 import glob, os, re, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, 'scripts'))
+from game_version import identify_profile
 
 
 # An update of the same title can have a different code and data layout.
 # Check the decrypted executable before any generated source is touched.
-def check_game_profile(elf, selected='auto'):
-    import hashlib, json
-    with open(os.path.join(ROOT, 'versions', 'profiles.json'), encoding='utf-8') as f:
-        profiles = json.load(f)['profiles']
-    digest = hashlib.sha256()
-    with open(elf, 'rb') as f:
-        for block in iter(lambda: f.read(1024 * 1024), b''):
-            digest.update(block)
-    checksum = digest.hexdigest()
-    actual = next((p for p in profiles if p['elf_sha256'] == checksum), None)
-    if actual is None:
-        sys.exit('Unrecognized EBOOT.ELF (SHA-256 ' + checksum + '). No matching game profile; generation stopped.')
-    if selected != 'auto' and selected != actual['id']:
-        sys.exit('Selected ' + selected + ' but the executable is ' + actual['id'] + '. Generation stopped.')
-    if not actual['buildable']:
-        sys.exit('Recognized ' + actual['id'] + ', but this source tree cannot build it: ' + actual['status'])
-    print('Game profile: ' + actual['id'] + ' (SHA-256 ' + checksum + ')')
+def check_game_profile(elf, selected='auto', require_buildable=True, quiet=False):
+    try:
+        actual = identify_profile(elf, selected, require_buildable=require_buildable)
+    except ValueError as error:
+        sys.exit(str(error) + '. Generation stopped.')
+    if not quiet:
+        print('Game profile: ' + actual['id'] + ' (SHA-256 ' + actual['elf_sha256'] + ')')
+    return actual
 
 if len(sys.argv) > 1 and sys.argv[1] == '--check-profile':
     if len(sys.argv) not in (3, 4):
         sys.exit('usage: patch_lift.py --check-profile EBOOT.ELF [PROFILE_ID|auto]')
     check_game_profile(sys.argv[2], sys.argv[3] if len(sys.argv) == 4 else 'auto')
     sys.exit(0)
-RECOMP = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "game", "src", "recomp")
+
+if len(sys.argv) > 1 and sys.argv[1] == '--identify-profile':
+    if len(sys.argv) not in (3, 4):
+        sys.exit('usage: patch_lift.py --identify-profile EBOOT.ELF [PROFILE_ID|auto]')
+    profile = check_game_profile(sys.argv[2], sys.argv[3] if len(sys.argv) == 4 else 'auto',
+                                 require_buildable=False, quiet=True)
+    print(profile['id'])
+    sys.exit(0)
+
+# Existing callers may still patch the disc lift by directory alone. The
+# pipeline supplies the executable so updates select their own complete recipe.
+if len(sys.argv) > 1 and sys.argv[1] == '--apply-update-hooks':
+    if len(sys.argv) != 4:
+        sys.exit('usage: patch_lift.py --apply-update-hooks RECOMP EBOOT.ELF')
+    sys.path.insert(0, os.path.join(ROOT, 'scripts'))
+    from update120_hooks import apply_update120_hooks
+    apply_update120_hooks(sys.argv[2], sys.argv[3])
+    sys.exit(0)
+
+import argparse
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('recomp', nargs='?', default=os.path.join(ROOT, 'game', 'src', 'recomp'))
+parser.add_argument('--elf', help='decrypted executable used for this lift')
+parser.add_argument('--profile', default=os.environ.get('RACACIT_GAME_PROFILE', 'auto'))
+options = parser.parse_args()
+RECOMP = options.recomp
+if options.elf:
+    profile = check_game_profile(options.elf, options.profile, require_buildable=False)
+    if profile['id'] == 'BCUS98124-1.20':
+        sys.path.insert(0, os.path.join(ROOT, 'scripts'))
+        from update120_hooks import apply_update120_hooks
+        apply_update120_hooks(RECOMP, options.elf)
+        import subprocess
+        subprocess.run([sys.executable, os.path.join(ROOT, 'scripts', 'fix_vmx_alias.py'), RECOMP],
+                       check=True)
+        sys.exit(0)
+    if profile['id'] != 'BCUS98124-1.00':
+        sys.exit('No PPU hook implementation for ' + profile['id'])
+elif options.profile != 'auto':
+    parser.error('--profile requires --elf to verify the selected executable')
 
 DECLS = '''
 /* racacit: guest setjmp/longjmp support (scripts/patch_lift.py) */
@@ -522,6 +554,54 @@ def patch_file(path):
             src = src[:i] + decl + src[i:]
         changed = True
 
+    # Desktop follow-camera distances: preserve the game's orbit/collision and pitch bounds.
+    sp = func_span(src, 'func_000459D4')
+    if sp and 'racit_camera_take' not in src[sp[0]:sp[2]]:
+        a, body, end = sp
+        fn = src[a:end]
+        changes = (
+            ('void func_000459D4(ppu_context* ctx) {',
+             'void func_000459D4(ppu_context* ctx) {\n        double mouse_angles[2] = {};\n        const int mouse_direct = racit_camera_take(mouse_angles,(uint64_t)((double)SDL_GetPerformanceCounter()*1000000000.0/(double)SDL_GetPerformanceFrequency()));'),
+            ('        ctx->lr = 0x00045D6C; func_00633C34(ctx); DRAIN_TRAMPOLINE(ctx);',
+             '        if (mouse_direct) ctx->fpr[1] = -mouse_angles[0];\n        ctx->lr = 0x00045D6C; func_00633C34(ctx); DRAIN_TRAMPOLINE(ctx);'),
+            ('        ctx->fpr[3] = ppu_fp_single(ppu_fsub(ctx->fpr[31], ctx->fpr[1]));',
+             '''        if (mouse_direct) {
+            uint32_t lb=vm_read32(ctx->gpr[30]-0x7F24), hb=vm_read32(ctx->gpr[30]-0x7F1C);
+            float lo,hi; memcpy(&lo,&lb,4); memcpy(&hi,&hb,4);
+            const double target=mouse_angles[1]-ctx->fpr[1];
+            ctx->fpr[31]=fmin(fmax(target,lo),hi)+ctx->fpr[1];
+        }
+        ctx->fpr[3] = ppu_fp_single(ppu_fsub(ctx->fpr[31], ctx->fpr[1]));'''),
+        )
+        for old, new in changes:
+            assert fn.count(old) == 1, 'desktop camera: original code does not match'
+            fn = fn.replace(old, new, 1)
+        src = src[:a] + fn + src[end:]
+        i = src.index('\n', src.index('#include')) + 1
+        src = src[:i] + ('extern "C" int racit_camera_take(double*, unsigned long long);\n'
+                        'extern "C" unsigned long long SDL_GetPerformanceCounter(void);\n'
+                        'extern "C" unsigned long long SDL_GetPerformanceFrequency(void);\n') + src[i:]
+        changed = True
+
+    # Desktop menu movies use two separate frame paths in BCUS98124 disc 1.00.
+    # Publish outside ActionScript execution, preserving the guest context.
+    for entry, offsets in (('func_004C6F6C', (4,)),
+                           ('func_004ADB3C', (8, 4))):
+        sp = func_span(src, entry)
+        if sp and 'racit_publish_menu_keyboard(' not in src[sp[0]:sp[2]]:
+            a, body, end = sp
+            fn = src[a:end]
+            marker = 'void %s(ppu_context* ctx) {\n' % entry
+            assert fn.count(marker) == 1, 'menu frame: original code does not match'
+            calls = ''.join('        racit_publish_menu_keyboard(ctx, %d);\n' % offset
+                            for offset in offsets)
+            fn = fn.replace(marker, marker + calls, 1)
+            src = src[:a] + fn + src[end:]
+            if '#include "menu_keycaps.h"' not in src:
+                i = src.index('\n', src.index('#include')) + 1
+                src = src[:i] + '#include "menu_keycaps.h"\n' + src[i:]
+            changed = True
+
     # 19. Boot straight to PRESS START (game/stubs.cpp racacit_front_end_cards): right
     #     after func_004C8898 hands the Scaleform main menu its startMode (the movie's
     #     SetVariable, name from r30 - 0x7F28), the intro cards' list is emptied.
@@ -570,7 +650,7 @@ print(f'{n} file(s) patched')
 #     sounds out of its mix. The controller has its own player now
 #     (tools/ps3recomp/libs/audio/ds_player.c): an older patched lift has
 #     those hook calls removed.
-SPU_DIR = os.path.join(ROOT, 'game', 'spu')
+SPU_DIR = os.environ.get('RACACIT_SPU_DIR', os.path.join(ROOT, 'game', 'spu'))
 for lift in ('sub_BFD480_04000', 'spu_0001_at_00BED400'):
     p = os.path.join(SPU_DIR, lift, 'spu_recomp.c')
     if not os.path.exists(p):

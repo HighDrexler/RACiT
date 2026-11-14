@@ -175,9 +175,11 @@ if(PORT_ENABLE_SPU)
 endif()
 
 # Real libsre (cellSpurs) LLE -- present only after scripts/lift_libsre.py.
+set(PRX_DIR "${CMAKE_CURRENT_SOURCE_DIR}/prx" CACHE PATH
+    "Directory holding firmware-derived PPU sources for this game build")
 file(GLOB LIBSRE_SOURCES CONFIGURE_DEPENDS
-    "${CMAKE_CURRENT_SOURCE_DIR}/prx/libsre/*.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/prx/libsre_module.c")
+    "${PRX_DIR}/libsre/*.cpp"
+    "${PRX_DIR}/libsre_module.c")
 if(LIBSRE_SOURCES)
     message(STATUS "libsre LLE:      enabled")
 endif()
@@ -203,11 +205,15 @@ if(RACACIT_DISCORD_APP_ID)
     set_source_files_properties(discord_rpc.cpp PROPERTIES
         COMPILE_DEFINITIONS "RACACIT_DISCORD_APP_ID=${RACACIT_DISCORD_APP_ID}")
 endif()
+set(HOST_DIR "${CMAKE_CURRENT_SOURCE_DIR}" CACHE PATH
+    "Directory holding version-selected main.cpp and stubs.cpp")
 target_sources(${PROJECT_NAME} PRIVATE
-    main.cpp
+    "${HOST_DIR}/main.cpp"
     ${ZLIB_SOURCES}
-    stubs.cpp
+    "${HOST_DIR}/stubs.cpp"
     button_prompts.cpp
+    desktop_mouse.cpp
+    menu_archive.cpp
     discord_rpc.cpp
     ${LIBSRE_SOURCES}
     ${PS3RECOMP_SCAFFOLD}
@@ -284,6 +290,11 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 target_link_libraries(${PROJECT_NAME} PRIVATE
     ps3recomp_runtime
 )
+if(APPLE)
+    find_package(ZLIB REQUIRED)
+    target_link_libraries(${PROJECT_NAME} PRIVATE ZLIB::ZLIB)
+    target_link_libraries(ps3recomp_runtime PRIVATE ZLIB::ZLIB)
+endif()
 if(ANDROID)
     # SDL_main / SDL_AndroidGetExternalStoragePath, and logcat.
     target_link_libraries(${PROJECT_NAME} PRIVATE SDL2::SDL2 log android)
@@ -354,7 +365,7 @@ endif()
 if(PS3RECOMP_RSX_VULKAN)
     # On main.cpp alone: a target-wide define would change the command line of
     # every lifted translation unit and rebuild hours of generated code.
-    set_property(SOURCE main.cpp APPEND PROPERTY COMPILE_DEFINITIONS RACACIT_HAVE_VULKAN=1)
+    set_property(SOURCE "${HOST_DIR}/main.cpp" APPEND PROPERTY COMPILE_DEFINITIONS RACACIT_HAVE_VULKAN=1)
 endif()
 
 # The lifted translation units are machine-generated and can run to hundreds of

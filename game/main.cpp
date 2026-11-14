@@ -195,7 +195,7 @@ extern "C" int  rsx_d3d12_backend_pump_messages(void);
 #  define rsx_backend_present rsx_d3d12_backend_present
 #  define rsx_backend_pump    rsx_d3d12_backend_pump_messages
 #  define RSX_BACKEND_NAME    "D3D12"
-#elif defined(__APPLE__)
+#elif defined(__APPLE__) && !defined(RACACIT_HAVE_VULKAN)
 extern "C" int  rsx_metal_backend_init(uint32_t w, uint32_t h, const char* title);
 extern "C" void rsx_metal_backend_present(void);
 extern "C" int  rsx_metal_backend_pump_messages(void);
@@ -793,6 +793,7 @@ static DWORD WINAPI frame_clock(LPVOID)
 /* Derive the directory holding PS3_GAME from the EBOOT path
  * <root>/PS3_GAME/USRDIR/EBOOT.elf -> <root>. $PS3_VFS_ROOT overrides. */
 static char s_vfs_root[1024];
+extern bool racit_menu_archive_init();
 
 static void derive_vfs_root(const char* eboot)
 {
@@ -1525,6 +1526,15 @@ extern "C" int racacit_entry(void)
 
 int main(int argc, char** argv)
 {
+#if defined(__APPLE__) && defined(RACACIT_HAVE_VULKAN)
+    /* Preserve IEEE shader guards before SDL or the Vulkan loader starts.
+     * Pending asynchronous pipelines currently skip draws in this backend. */
+    setenv("MVK_CONFIG_FAST_MATH_ENABLED", "0", 0);
+    setenv("RACACIT_ASYNC_PIPELINES", "0", 0);
+    setenv("RACACIT_HLE_SPURS", "1", 0);
+    setenv("RACACIT_KBM", "1", 0);
+    setenv("PS3RECOMP_VK_WINDOW", "1", 0);
+#endif
 #ifdef __ANDROID__
     android_setup(&argc, &argv);
 #endif
@@ -1577,6 +1587,7 @@ int main(int argc, char** argv)
         ppu_inl_clip_hole = 1;
     }
 
+    if (!racit_menu_archive_init()) return 1;
     uint32_t entry = ppu_load_elf(argv[1]);
     if (!entry) {
         fprintf(stderr, "ERROR: could not load %s\n", argv[1]);
@@ -1617,6 +1628,25 @@ int main(int argc, char** argv)
     /* Install the guest-callback hook, then start the frame clock. It no-ops
      * until the title registers its vblank and flip handlers during init. */
     g_ps3_guest_caller = harness_guest_caller;
+#if defined(__APPLE__) && defined(RACACIT_HAVE_VULKAN)
+    /* Cocoa creates and pumps windows on the process main thread. */
+    const char* window = getenv("PS3RECOMP_VK_WINDOW");
+    if (window && strcmp(window, "1") == 0) {
+        static uint32_t window_entry;
+        window_entry = entry;
+        HANDLE guest = CreateThread(NULL, 16u * 1024 * 1024,
+            [](LPVOID argument) -> DWORD {
+                int result = ppu_run(*(uint32_t*)argument, STACK_TOP);
+                fprintf(stderr, "[boot] windowed guest returned %d\n", result);
+                fflush(stdout); fflush(stderr);
+                _exit(g_sys_process_exit_called ? (int)g_sys_process_exit_code : result);
+                return 0;
+            }, &window_entry, 0, NULL);
+        if (!guest) return 1;
+        frame_clock(NULL);
+        return 0;
+    }
+#endif
     CreateThread(NULL, 4u * 1024 * 1024, frame_clock, NULL, 0, NULL);
     if (getenv("PS3_PEEK")) CreateThread(NULL, 0, peek_thread, NULL, 0, NULL);
 

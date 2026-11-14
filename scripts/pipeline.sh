@@ -5,29 +5,51 @@
 # Default input is input/EBOOT.ELF (your own decrypted dump).
 #
 # Stages:
-#   1. ppu_loader       -> out/  (function table, imports, image)
+#   1. ppu_loader       -> out/<profile>/  (function table, imports, image)
 #   2. ghidra (optional)-> analysis/ghidra/  (names, only if Ghidra output exists)
-#   3. ppu_lifter       -> game/src/recomp/
-#   4. SPU extract+lift -> game/spu/<image>/spu_recomp.c
-#   5. desktop build    -> game/build/
+#   3. ppu_lifter       -> out/<profile>/recomp/
+#   4. SPU extract+lift -> out/<profile>/spu/<image>/spu_recomp.c
+#   5. desktop build    -> out/<profile>/build/
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PS3R="$ROOT/tools/ps3recomp"
 ELF="${1:-$ROOT/input/EBOOT.ELF}"
-OUT="$ROOT/out"
-RECOMP="$ROOT/game/src/recomp"
-SPU="$ROOT/game/spu"
 PY="${PY:-python3 -I}"
+JOBS="${JOBS:-${CMAKE_BUILD_PARALLEL_LEVEL:-}}"
+
+# The same explicit count bounds both lifters and the native compiler.
+case "$JOBS" in
+  "") ;;
+  *[!0-9]*)
+    echo "CMAKE_BUILD_PARALLEL_LEVEL must be a positive integer or empty." >&2
+    exit 1 ;;
+  *)
+    if [[ ! "$JOBS" =~ [1-9] ]]; then
+      echo "CMAKE_BUILD_PARALLEL_LEVEL must be a positive integer or empty." >&2
+      exit 1
+    fi ;;
+esac
 
 [ -f "$ELF" ] || { echo "No ELF at $ELF — put your decrypted EBOOT.ELF in input/"; exit 1; }
 # Profiles identify both the disc region and the executable update.
 $PY "$ROOT/scripts/patch_lift.py" --check-profile "$ELF" "${RACACIT_GAME_PROFILE:-auto}"
-mkdir -p "$OUT" "$RECOMP" "$SPU"
+PROFILE="$($PY "$ROOT/scripts/patch_lift.py" --identify-profile "$ELF" "${RACACIT_GAME_PROFILE:-auto}")"
+OUT="$ROOT/out/$PROFILE"
+RECOMP="$OUT/recomp"
+SPU="$OUT/spu"
+PRX="$OUT/prx"
+HOST="$OUT/host"
+BUILD="${BUILD_DIR:-$OUT/build}"
+export RACACIT_GAME_PROFILE="$PROFILE" RACACIT_OUT="$OUT" RACACIT_SPU_DIR="$SPU" RACACIT_PRX_DIR="$PRX"
+export RACACIT_ELF="$ELF"
+mkdir -p "$OUT" "$RECOMP" "$SPU" "$PRX" "$HOST"
+$PY "$ROOT/scripts/prepare_game_host.py" "$ELF" "$HOST" --profile "$PROFILE"
 
 echo "== 1/5 Loader"
 $PY "$PS3R/tools/ppu_loader.py" "$ELF" --output "$OUT"
 BASE="$(basename "${ELF%.*}")"
+export RACACIT_ELF_STEM="$BASE"
 FUNCS="$OUT/$BASE.functions.json"
 if ! $PY -c "import json,sys;d=json.load(open(sys.argv[1]));f=d.get('functions',d) if isinstance(d,dict) else d;sys.exit(0 if f else 1)" "$FUNCS"; then
   echo "   Loader found no OPD functions — falling back to heuristic find_functions.py"
@@ -36,7 +58,7 @@ if ! $PY -c "import json,sys;d=json.load(open(sys.argv[1]));f=d.get('functions',
 fi
 
 echo "== 2/5 Ghidra names (optional)"
-if [ -f "$ROOT/analysis/ghidra/functions.json" ]; then
+if [ "$PROFILE" = BCUS98124-1.00 ] && [ -f "$ROOT/analysis/ghidra/functions.json" ]; then
   $PY "$PS3R/tools/ghidra_names.py" "$ROOT/analysis/ghidra" -o "$OUT/ghidra_names.json" \
     || echo "   ghidra_names failed; continuing with func_ADDR names"
   $PY "$ROOT/scripts/name_pass.py" \
@@ -47,15 +69,21 @@ fi
 
 echo "== 3/5 PPU lift"
 # names.json (name_pass.py) only adds comments above lifted functions.
-NAMES=()
-[ -f "$OUT/names.json" ] && NAMES=(--names "$OUT/names.json")
-PS3RECOMP_CHUNK_LINES=${PS3RECOMP_CHUNK_LINES:-100000} $PY "$PS3R/tools/ppu_lifter.py" "$ELF" \
-  --functions "$FUNCS" \
-  --hle-stubs "$OUT/$BASE.imports.json" \
-  "${NAMES[@]}" \
-  --output "$RECOMP"
+LIFT_STAGE="$(mktemp -d "$OUT/.lift.XXXXXXXX")"
+trap 'rm -rf -- "$LIFT_STAGE"' EXIT
+PPU_STAGE="$LIFT_STAGE/recomp"
+export RACACIT_SPU_DIR="$LIFT_STAGE/spu" RACACIT_PRX_DIR="$LIFT_STAGE/prx"
+mkdir -p "$PPU_STAGE" "$RACACIT_SPU_DIR" "$RACACIT_PRX_DIR"
+LIFT_ARGS=("$ELF" --functions "$FUNCS" --hle-stubs "$OUT/$BASE.imports.json" --output "$PPU_STAGE")
+if [ -n "$JOBS" ]; then
+  LIFT_ARGS+=(--jobs "$JOBS")
+fi
+if [ -f "$OUT/names.json" ]; then
+  LIFT_ARGS+=(--names "$OUT/names.json")
+fi
+PS3RECOMP_CHUNK_LINES=${PS3RECOMP_CHUNK_LINES:-100000} $PY "$PS3R/tools/ppu_lifter.py" "${LIFT_ARGS[@]}"
 
-$PY "$ROOT/scripts/patch_lift.py" "$RECOMP"
+$PY "$ROOT/scripts/patch_lift.py" "$PPU_STAGE" --elf "$ELF" --profile "$PROFILE"
 
 echo "== 4/5 SPU images"
 $PY "$PS3R/tools/extract_spu_images.py" "$ELF" --output "$OUT/spu_images" \
@@ -79,15 +107,56 @@ $PY "$ROOT/scripts/lift_spu_jobs.py" "$ELF" --extra
 # every module added to the list since ran in the SPU interpreter (v91: 109 of
 # 144, the AsyncMoby animation and FXVis effect modules among them).
 $PY "$ROOT/scripts/lift_spu_jobs.py" "$ELF" --sub
-$PY "$ROOT/scripts/patch_lift.py" || true
+$PY "$ROOT/scripts/patch_lift.py" "$PPU_STAGE" --elf "$ELF" --profile "$PROFILE"
+
+# Publish the patched sources without touching files CMake can reuse.
+publish_lift() {
+  local staged="$1" destination="$2" source target
+  mkdir -p "$destination"
+  for source in "$staged"/*; do
+    [ -e "$source" ] || continue
+    target="$destination/${source##*/}"
+    if [ -d "$source" ]; then
+      publish_lift "$source" "$target"
+    elif ! cmp -s "$source" "$target"; then
+      mv -f -- "$source" "$target"
+    fi
+  done
+}
+
+# Prune obsolete compiler inputs before moving files out of staging.
+for target in "$RECOMP"/ppu_recomp.c "$RECOMP"/ppu_recomp_*.c "$RECOMP"/ppu_recomp_*.cpp \
+              "$SPU"/*/spu_recomp.c "$PRX"/libsre/*.cpp; do
+  [ -f "$target" ] || continue
+  if [ ! -f "$LIFT_STAGE/${target#"$OUT/"}" ]; then
+    rm -- "$target"
+  fi
+done
+publish_lift "$PPU_STAGE" "$RECOMP"
+publish_lift "$RACACIT_SPU_DIR" "$SPU"
+publish_lift "$RACACIT_PRX_DIR" "$PRX"
+export RACACIT_SPU_DIR="$SPU" RACACIT_PRX_DIR="$PRX"
 
 # SKIP_DESKTOP=1: lift only (Windows: the build is windows/, see README).
 [ "${SKIP_DESKTOP:-0}" = 1 ] && { echo "Lifted: $RECOMP and $SPU"; exit 0; }
 
 echo "== 5/5 Desktop build"
-cmake -S "$ROOT/game" -B "$ROOT/game/build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
-  -DPS3RECOMP_DIR="$PS3R" -DRECOMP_DIR="$RECOMP" \
-  -DPS3RECOMP_VULKAN_INCLUDE_DIR="$ROOT/tools/Vulkan-Headers/include" -DPS3RECOMP_RSX_VULKAN=ON \
-  -DCMAKE_PREFIX_PATH="$ROOT/tools/sdl2"
-cmake --build "$ROOT/game/build" -j"$(nproc)"
-echo "Done: $ROOT/game/build/RaCACiTRecomp"
+CMAKE_ARGS=(-DPS3RECOMP_DIR="$PS3R" -DRECOMP_DIR="$RECOMP" -DSPU_DIR="$SPU"
+            -DPRX_DIR="$PRX" -DHOST_DIR="$HOST" -DPS3RECOMP_RSX_VULKAN=ON)
+if [ -n "${PS3RECOMP_VULKAN_INCLUDE_DIR:-}" ]; then
+  CMAKE_ARGS+=(-DPS3RECOMP_VULKAN_INCLUDE_DIR="$PS3RECOMP_VULKAN_INCLUDE_DIR")
+elif [ -d "$ROOT/tools/Vulkan-Headers/include" ]; then
+  CMAKE_ARGS+=(-DPS3RECOMP_VULKAN_INCLUDE_DIR="$ROOT/tools/Vulkan-Headers/include")
+fi
+if [ -n "${CMAKE_PREFIX_PATH:-}" ]; then
+  CMAKE_ARGS+=(-DCMAKE_PREFIX_PATH="$CMAKE_PREFIX_PATH")
+elif [ -d "$ROOT/tools/sdl2" ]; then
+  CMAKE_ARGS+=(-DCMAKE_PREFIX_PATH="$ROOT/tools/sdl2")
+fi
+cmake -S "$ROOT/game" -B "$BUILD" -G "${CMAKE_GENERATOR:-Ninja}" -DCMAKE_BUILD_TYPE=Release "${CMAKE_ARGS[@]}"
+if [ -n "$JOBS" ]; then
+  cmake --build "$BUILD" --parallel "$JOBS"
+else
+  cmake --build "$BUILD"
+fi
+echo "Done: $BUILD/RaCACiTRecomp"
