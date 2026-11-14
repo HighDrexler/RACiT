@@ -522,6 +522,35 @@ def patch_file(path):
             src = src[:i] + decl + src[i:]
         changed = True
 
+    # Desktop follow-camera distances: preserve the game's orbit/collision and pitch bounds.
+    sp = func_span(src, 'func_000459D4')
+    if sp and 'racit_camera_take' not in src[sp[0]:sp[2]]:
+        a, body, end = sp
+        fn = src[a:end]
+        changes = (
+            ('void func_000459D4(ppu_context* ctx) {',
+             'void func_000459D4(ppu_context* ctx) {\n        double mouse_angles[2] = {};\n        const int mouse_direct = racit_camera_take(mouse_angles,(uint64_t)((double)SDL_GetPerformanceCounter()*1000000000.0/(double)SDL_GetPerformanceFrequency()));'),
+            ('        ctx->lr = 0x00045D6C; func_00633C34(ctx); DRAIN_TRAMPOLINE(ctx);',
+             '        if (mouse_direct) ctx->fpr[1] = -mouse_angles[0];\n        ctx->lr = 0x00045D6C; func_00633C34(ctx); DRAIN_TRAMPOLINE(ctx);'),
+            ('        ctx->fpr[3] = ppu_fp_single(ppu_fsub(ctx->fpr[31], ctx->fpr[1]));',
+             '''        if (mouse_direct) {
+            uint32_t lb=vm_read32(ctx->gpr[30]-0x7F24), hb=vm_read32(ctx->gpr[30]-0x7F1C);
+            float lo,hi; memcpy(&lo,&lb,4); memcpy(&hi,&hb,4);
+            const double target=mouse_angles[1]-ctx->fpr[1];
+            ctx->fpr[31]=fmin(fmax(target,lo),hi)+ctx->fpr[1];
+        }
+        ctx->fpr[3] = ppu_fp_single(ppu_fsub(ctx->fpr[31], ctx->fpr[1]));'''),
+        )
+        for old, new in changes:
+            assert fn.count(old) == 1, 'desktop camera: original code does not match'
+            fn = fn.replace(old, new, 1)
+        src = src[:a] + fn + src[end:]
+        i = src.index('\n', src.index('#include')) + 1
+        src = src[:i] + ('extern "C" int racit_camera_take(double*, unsigned long long);\n'
+                        'extern "C" unsigned long long SDL_GetPerformanceCounter(void);\n'
+                        'extern "C" unsigned long long SDL_GetPerformanceFrequency(void);\n') + src[i:]
+        changed = True
+
     # 19. Boot straight to PRESS START (game/stubs.cpp racacit_front_end_cards): right
     #     after func_004C8898 hands the Scaleform main menu its startMode (the movie's
     #     SetVariable, name from r30 - 0x7F28), the intro cards' list is emptied.
