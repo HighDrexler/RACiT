@@ -16716,10 +16716,10 @@ index cbec250..4359a3b 100644
   * PSO identity should use rsx_fp_structural_hash in buffered mode. */
 diff --git a/libs/video/rsx_host_ui.c b/libs/video/rsx_host_ui.c
 new file mode 100644
-index 0000000..b2a2271
+index 0000000..81976d3
 --- /dev/null
 +++ b/libs/video/rsx_host_ui.c
-@@ -0,0 +1,2192 @@
+@@ -0,0 +1,2188 @@
 +/*
 + * ps3recomp - host settings menu and on-screen display. See rsx_host_ui.h.
 + */
@@ -18627,6 +18627,8 @@ index 0000000..b2a2271
 +    UNLOCK();
 +}
 +
++#include "rsx_perf_graph.h"
++
 +int rsx_host_ui_build(const rsx_ui_font* f, int sw, int sh, rsx_ui_vtx* out, int cap)
 +{
 +    if (!f || !f->pixels || sw <= 0 || sh <= 0) return 0;
@@ -18636,13 +18638,7 @@ index 0000000..b2a2271
 +    const float px = (float)f->px, lh = (float)f->line_h;
 +
 +    if (s_sv_active) { sv_build(&o, sw, sh); return o.n; }
-+    if (opt.fps && !s_open) {
-+        char b[64]; LOCK(); memcpy(b, s_fps_text, sizeof b); UNLOCK();
-+        if (!b[0]) snprintf(b, sizeof b, "-- FPS");
-+        const float x = px * 0.6f, y = px * 0.5f, w = text_w(f, b);
-+        rect(&o, x - px * 0.4f, y - px * 0.15f, x + w + px * 0.4f, y + lh + px * 0.1f, rgba(0, 0, 0, 150));
-+        text(&o, x, y, b, rgba(255, 230, 120, 255));
-+    }
++    if (opt.fps && !s_open) racit_perf_overlay(&o, f);
 +    if (!s_open) { tr_popup(&o, sw, sh); return o.n; }
 +
 +    /* Dim the game, then a centred panel. */
@@ -19327,6 +19323,51 @@ index d04b34e..5fef4f7 100644
  }
  
  static const rsx_draw_backend s_engine_backend = {
+diff --git a/libs/video/rsx_perf_graph.h b/libs/video/rsx_perf_graph.h
+new file mode 100644
+index 0000000..809a855
+--- /dev/null
++++ b/libs/video/rsx_perf_graph.h
+@@ -0,0 +1,39 @@
++/* Uses the existing present-interval ring; no sampling thread or file output. */
++static void racit_perf_overlay(ui_out* out, const rsx_ui_font* font)
++{
++    double frames[128]; unsigned count;
++    char summary[64];
++    LOCK();
++    memcpy(summary, s_fps_text, sizeof summary);
++    count = s_ft_n < N_OF(s_ft) ? s_ft_n : N_OF(s_ft);
++    for (unsigned i = 0; i < count; ++i)
++        frames[i] = s_ft[(s_ft_n - count + i) % N_OF(s_ft)];
++    UNLOCK();
++    if (!summary[0]) snprintf(summary, sizeof summary, "-- FPS / -- ms");
++    const float px = (float)font->px, x = px * .6f, y = px * .5f;
++    const float width = px * 21, height = px * 2.4f, line = (float)font->line_h;
++    rect(out, 0, 0, x + width + px, y + line * 3 + height * 2 + px,
++         rgba(0, 0, 0, 180));
++    text(out, x, y, summary, rgba(255, 230, 120, 255));
++    for (int graph = 0; graph < 2; ++graph) {
++        const float top = y + line * (graph ? 3 : 2) + height * graph;
++        double maximum = graph ? 33.333 : 120.0;
++        for (unsigned i = 0; i < count; ++i) {
++            double value = graph ? frames[i] : frames[i] > 0 ? 1000.0 / frames[i] : 0;
++            if (value > maximum) maximum = value;
++        }
++        char label[64];
++        snprintf(label, sizeof label, graph ? "Frametime: 0 - %.1f ms" : "FPS: 0 - %.0f", maximum);
++        text(out, x, top - line, label, rgba(210, 220, 235, 255));
++        rect(out, x, top, x + width, top + height, rgba(35, 42, 52, 210));
++        const float guide = top + height * (1.f - (float)((graph ? 16.666667 : 60.0) / maximum));
++        rect(out, x, guide, x + width, guide + 1, rgba(125, 130, 140, 180));
++        for (unsigned i = 0; i < count; ++i) {
++            const double value = graph ? frames[i] : frames[i] > 0 ? 1000.0 / frames[i] : 0;
++            const float left = x + width * (float)(128 - count + i) / 128.f;
++            rect(out, left, top + height * (1.f - (float)(value / maximum)),
++                 left + width / 128.f, top + height,
++                 graph ? rgba(100, 190, 255, 240) : rgba(120, 230, 160, 240));
++        }
++    }
++}
 diff --git a/libs/video/rsx_shader_spirv.cpp b/libs/video/rsx_shader_spirv.cpp
 index f9725b8..a92a63a 100644
 --- a/libs/video/rsx_shader_spirv.cpp
@@ -27372,7 +27413,6 @@ index acbaf12..6ca46a3 100644
  }
  
 diff --git a/runtime/ppu/ppu_loader.cpp b/runtime/ppu/ppu_loader.cpp
-index e73a151..3b53957 100644
 --- a/runtime/ppu/ppu_loader.cpp
 +++ b/runtime/ppu/ppu_loader.cpp
 @@ -377,8 +377,9 @@ static void sc_trace(uint64_t num, ppu_context* ctx, uint64_t a3, uint64_t a4,
