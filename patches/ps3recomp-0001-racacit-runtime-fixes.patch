@@ -19882,7 +19882,7 @@ index ad21361..bf55d13 100644
   * refs is rewritten in place with the unique prefix.  The occurrence map
   * remains valid until the next call using the same remap object. */
 diff --git a/libs/video/rsx_vp_decompiler.c b/libs/video/rsx_vp_decompiler.c
-index edd01d6..31def54 100644
+index edd01d6..e1ed2be 100644
 --- a/libs/video/rsx_vp_decompiler.c
 +++ b/libs/video/rsx_vp_decompiler.c
 @@ -31,6 +31,7 @@
@@ -19931,16 +19931,82 @@ index edd01d6..31def54 100644
  void rsx_vp_set_branch_base(u32 start_slot) { s_vp_branch_base = start_slot; }
  
  /* BRA BRI CAL CLI RET BRB CLB (scalar opcodes). */
-@@ -410,7 +438,7 @@ static int rsx_vp_decompile_impl(
+@@ -339,6 +367,61 @@ static int rsx_vp_decompile_impl(
+         }
+         leader[0] = 1;
+     }
++    /* Which DP3/DPH/DP4 need the exact (Dot2) form. The exactness is there
++     * for the position: depth z-fought where world coordinates are large (see
++     * vp_dot4). A dot that never reaches o[0] -- lighting, texture
++     * coordinates, colours -- gets the plain sum of the same products (0*x
++     * rule kept), about a tenth of the work. A backward slice from the writes
++     * to o[0] over the temps; programs with flow control or condition codes
++     * keep the exact form everywhere. RSX_VP_EXACT_DOTS=1 restores it for
++     * all programs. */
++    static u8 exact_dot[RSX_VP_MAX_INSTR + 1];
++    memset(exact_dot, 1, sizeof exact_dot);
++    {
++        static int all_exact = -1;
++        if (all_exact < 0) { const char* e = getenv("RSX_VP_EXACT_DOTS"); all_exact = e && *e == '1'; }
++        u32 rd[RSX_VP_MAX_INSTR][2], vt[RSX_VP_MAX_INSTR], st[RSX_VP_MAX_INSTR];
++        u8 vpos[RSX_VP_MAX_INSTR], spos[RSX_VP_MAX_INSTR], vfull[RSX_VP_MAX_INSTR], sfull[RSX_VP_MAX_INSTR];
++        int n = 0, simple = !has_flow && !all_exact, sees_pos = 0;
++        u32 o2 = 0;
++        while (simple && o2 + 16 <= max_bytes && n < RSX_VP_MAX_INSTR) {
++            const u32 e0 = rd_le(ucode + o2), e1 = rd_le(ucode + o2 + 4);
++            const u32 e2 = rd_le(ucode + o2 + 8), e3 = rd_le(ucode + o2 + 12);
++            o2 += 16;
++            if (((e0 >> 13) & 1) || ((e0 >> 14) & 1)) { simple = 0; break; }   /* CC test / update */
++            const u32 vop = (e1 >> 22) & 0x1F, sop = (e1 >> 27) & 0x1F;
++            const int vm = (e3 >> 13) & 0xF, sm = (e3 >> 17) & 0xF;
++            const u32 sr0 = ((e2 >> 23) & 0x1FF) | ((e1 & 0xFF) << 9), sr1 = (e2 >> 6) & 0x1FFFF;
++            const u32 sr2 = ((e3 >> 21) & 0x7FF) | ((e2 & 0x3F) << 11);
++            const u32 dout = (e3 >> 2) & 0x1F, dtmp = (e0 >> 15) & 0x3F, stmp = (e3 >> 7) & 0x3F;
++            const int vres = (e0 >> 30) & 1;
++            #define TMPBIT(sr) ((((sr) & 3u) <= 1u) ? (1u << (((sr) >> 2) & 31u)) : 0u)
++            const int von = vm && vop != 0, son = sm && sop != 0;
++            rd[n][0] = von ? (TMPBIT(sr0) | TMPBIT(sr1) | TMPBIT(sr2)) : 0u;
++            rd[n][1] = son ? TMPBIT(sr2) : 0u;
++            #undef TMPBIT
++            vt[n] = (von && dtmp != 0x3F) ? (dtmp & 31u) : 32u;
++            st[n] = (son && stmp != 0x3F) ? (stmp & 31u) : 32u;
++            vpos[n] = von && vres && dout != 0x1F && (dout & 15u) == 0;
++            spos[n] = son && !vres && dout != 0x1F && (dout & 15u) == 0;
++            vfull[n] = vm == 0xF; sfull[n] = sm == 0xF;
++            sees_pos |= vpos[n] | spos[n];
++            n++;
++            if (e3 & 1u) break;
++        }
++        if (simple && sees_pos) {
++            u32 need = 0;
++            for (int i = n - 1; i >= 0; i--) {
++                const int vneed = vpos[i] || (vt[i] < 32u && ((need >> vt[i]) & 1u));
++                const int sneed = spos[i] || (st[i] < 32u && ((need >> st[i]) & 1u));
++                exact_dot[i] = (u8)vneed;
++                if (vt[i] < 32u && vfull[i]) need &= ~(1u << vt[i]);
++                if (st[i] < 32u && sfull[i] && st[i] != vt[i]) need &= ~(1u << st[i]);
++                if (vneed) need |= rd[i][0];
++                if (sneed) need |= rd[i][1];
++            }
++        }
++    }
+     int block_open = 0;
+ 
+     u32 off = 0; int instrs = 0;
+@@ -409,9 +492,9 @@ static int rsx_vp_decompile_impl(
+             case 0x02: snprintf(rhs,sizeof rhs,"vp_mul((%s),(%s))",A,B); break;  /* MUL */
              case 0x03: snprintf(rhs,sizeof rhs,"(%s)+(%s)",A,C); break;        /* ADD: src0 + src2 */
              case 0x04: snprintf(rhs,sizeof rhs,"vp_mul((%s),(%s))+(%s)",A,B,C); break; /* MAD */
-             case 0x05: snprintf(rhs,sizeof rhs,"vp_dot3((%s),(%s))",A,B); break; /* DP3 */
+-            case 0x05: snprintf(rhs,sizeof rhs,"vp_dot3((%s),(%s))",A,B); break; /* DP3 */
 -            case 0x06: snprintf(rhs,sizeof rhs,"(vp_dot3((%s),(%s))+(%s).w)",A,B,B); break; /* DPH */
-+            case 0x06: snprintf(rhs,sizeof rhs,"vp_dot4(float4((%s).xyz,1.0),(%s))",A,B); break; /* DPH: dot3 + b.w */
-             case 0x07: snprintf(rhs,sizeof rhs,"vp_dot4((%s),(%s))",A,B); break; /* DP4 */
+-            case 0x07: snprintf(rhs,sizeof rhs,"vp_dot4((%s),(%s))",A,B); break; /* DP4 */
++            case 0x05: snprintf(rhs,sizeof rhs,"%s((%s),(%s))",exact_dot[instrs-1]?"vp_dot3":"vp_dot3f",A,B); break; /* DP3 */
++            case 0x06: snprintf(rhs,sizeof rhs,"%s(float4((%s).xyz,1.0),(%s))",exact_dot[instrs-1]?"vp_dot4":"vp_dot4f",A,B); break; /* DPH: dot3 + b.w */
++            case 0x07: snprintf(rhs,sizeof rhs,"%s((%s),(%s))",exact_dot[instrs-1]?"vp_dot4":"vp_dot4f",A,B); break; /* DP4 */
              case 0x08: snprintf(rhs,sizeof rhs,"float4(1,(%s).y*(%s).y,(%s).z,(%s).w)",A,B,A,B); break; /* DST */
              case 0x09: snprintf(rhs,sizeof rhs,"min((%s),(%s))",A,B); break;   /* MIN */
-@@ -457,7 +485,7 @@ static int rsx_vp_decompile_impl(
+             case 0x0A: snprintf(rhs,sizeof rhs,"max((%s),(%s))",A,B); break;   /* MAX */
+@@ -457,7 +540,7 @@ static int rsx_vp_decompile_impl(
              if (handled) {
                  char m[6]; mask_str(vmx,vmy,vmz,vmw,m);
                  char line[600];
@@ -19949,7 +20015,7 @@ index edd01d6..31def54 100644
                           rhs, saturate ? " _v = saturate(_v);" : "");
                  emit(&b, line);
                  if (vec_result && dst_out != 0x1F)
-@@ -501,9 +529,22 @@ static int rsx_vp_decompile_impl(
+@@ -501,9 +584,22 @@ static int rsx_vp_decompile_impl(
                           "        if (%s) { if (_csp > 0) { _csp--; _pc = _cs[_csp]; } else _pc = -1; } else _pc = %d;\n",
                           c, next);
              else {                                         /* BRB/CLB: boolean-register branches */
@@ -19975,7 +20041,7 @@ index edd01d6..31def54 100644
              }
          }
          /* ---- scalar ALU (reads SRC2) ---- */
-@@ -535,7 +576,7 @@ static int rsx_vp_decompile_impl(
+@@ -535,7 +631,7 @@ static int rsx_vp_decompile_impl(
              if (rhs[0]) {
                  char m[6]; mask_str(smx,smy,smz,smw,m);
                  char line[600];
@@ -19984,7 +20050,7 @@ index edd01d6..31def54 100644
                           rhs, saturate ? " _v = saturate(_v);" : "");
                  emit(&b, line);
                  /* SCA writes the output register when the VEC unit does not
-@@ -605,11 +646,50 @@ static int rsx_vp_decompile_impl(
+@@ -605,11 +701,53 @@ static int rsx_vp_decompile_impl(
           * text came out NaN, which the FP's NaN guard turned into black. */
          /* Scalar logic per component: glslang's HLSL front end (the Metal
           * path) does not take || on vectors. */
@@ -20023,6 +20089,9 @@ index edd01d6..31def54 100644
 +        "    precise float t = p + h; precise float z = t - p;\n"
 +        "    precise float q = (p - (t - z)) + (h - z);\n"
 +        "    p = t; precise float s2 = s + (q + r); s = s2; }\n"
++        /* The plain forms, for dots that never reach the position. */
++        "float vp_dot3f(float4 a, float4 b) { float4 m = vp_mul(a, b); return m.x + m.y + m.z; }\n"
++        "float vp_dot4f(float4 a, float4 b) { float4 m = vp_mul(a, b); return m.x + m.y + m.z + m.w; }\n"
 +        "float vp_dot3(float4 a, float4 b) {\n"
 +        "    precise float p = vp_mul1(a.x, b.x); precise float s = vp_mul_err(a.x, b.x, p);\n"
 +        "    vp_dot_step(p, s, a.y, b.y); vp_dot_step(p, s, a.z, b.z);\n"
@@ -20038,7 +20107,7 @@ index edd01d6..31def54 100644
  
      for (u32 vtu = 0; vtu < 4; vtu++) {
          if (!((vtex_mask >> vtu) & 1u)) continue;
-@@ -642,7 +722,7 @@ static int rsx_vp_decompile_impl(
+@@ -642,7 +780,7 @@ static int rsx_vp_decompile_impl(
          }
      }
      emit(&o,
@@ -20047,7 +20116,7 @@ index edd01d6..31def54 100644
          "    [unroll] for (int _i=0;_i<32;_i++) r[_i]=(float4)0;\n"
          "    [unroll] for (int _j=0;_j<16;_j++) o[_j]=float4(0,0,0,1);\n"
          "    int4 a0 = (int4)0; int4 a1 = (int4)0;\n"
-@@ -659,7 +739,12 @@ static int rsx_vp_decompile_impl(
+@@ -659,7 +797,12 @@ static int rsx_vp_decompile_impl(
      emit(&o,
          "    VSOutput Out;\n"
          "    float4 _p = o[0];\n"
