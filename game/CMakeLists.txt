@@ -208,6 +208,7 @@ target_sources(${PROJECT_NAME} PRIVATE
     ${ZLIB_SOURCES}
     stubs.cpp
     button_prompts.cpp
+    menu_archive.cpp
     discord_rpc.cpp
     ${LIBSRE_SOURCES}
     ${PS3RECOMP_SCAFFOLD}
