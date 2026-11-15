@@ -1796,3 +1796,55 @@ extern "C" void racacit_snd_play_hook(ppu_context* ctx, int tag)
     }
     __sync_lock_release(&mu);
 }
+
+/* ---------------------------------------------------------------------------
+ * Update 1.20's space-mission bits resync in the disc build. Five bits at
+ * G+0x13D94 (func_002252A4 ORs one in; at 0x1F it unlocks entry 0x1E of the
+ * trophy-style table through func_0029DB40) are set on the disc only by a
+ * level-script command, so a save that finished those missions without the
+ * script setting a bit could never complete the mask. Update 1.20's
+ * func_0047B7E8 (an init method) re-derives two of them from saved mission
+ * flags, read through the game's named-flag lookup (disc func_00245AB4):
+ *   ss4_mission_convoy_completed                     -> bit 8
+ *   ss1_mission_radioactive_space_completed and
+ *   ss1_mission_tow_complete                         -> bit 1
+ * Called at the disc function's return; the flag names (absent from the disc
+ * executable) sit below the guest stack pointer during the calls, and every
+ * register is put back after them. RACACIT_U120_BITS_LOG=1 logs each run.
+ * -------------------------------------------------------------------------*/
+void func_00245AB4(ppu_context* ctx);   /* named flag -> r3 (byte) */
+void func_002252A4(ppu_context* ctx);   /* G+0x13D94 |= r3 */
+extern "C" void racacit_u120_space_bits(ppu_context* ctx)
+{
+    uint64_t gpr[32], lr = ctx->lr, ctr = ctx->ctr; double fpr[32]; u128 vr[32];
+    const uint32_t cr = ctx->cr, xer = ctx->xer, fpscr = ctx->fpscr, vscr = ctx->vscr;
+    memcpy(gpr, ctx->gpr, sizeof gpr); memcpy(fpr, ctx->fpr, sizeof fpr); memcpy(vr, ctx->vr, sizeof vr);
+    const uint32_t sp = (uint32_t)ctx->gpr[1], nsp = (sp - 0x400u) & ~15u, data = nsp + 0x100u;
+    vm_write32(nsp, 0); vm_write32(nsp + 4u, sp);   /* back chain */
+    auto flag = [&](const char* name) -> int {
+        uint32_t i = 0;
+        for (; name[i]; i++) vm_write8(data + i, (uint8_t)name[i]);
+        vm_write8(data + i, 0);
+        ctx->gpr[1] = nsp; ctx->gpr[2] = gpr[2]; ctx->gpr[3] = data; ctx->gpr[4] = 0; ctx->lr = 0x0047B828u;
+        func_00245AB4(ctx); racacit_guest_drain(ctx);
+        return (ctx->gpr[3] & 0xFFu) != 0;
+    };
+    auto set_bit = [&](uint32_t bit) {
+        ctx->gpr[1] = nsp; ctx->gpr[2] = gpr[2]; ctx->gpr[3] = bit; ctx->lr = 0x0047B828u;
+        func_002252A4(ctx); racacit_guest_drain(ctx);
+    };
+    const int convoy = flag("ss4_mission_convoy_completed");
+    if (convoy) set_bit(8u);
+    const int radio = flag("ss1_mission_radioactive_space_completed");
+    const int tow = radio ? flag("ss1_mission_tow_complete") : 0;
+    if (radio && tow) set_bit(1u);
+    static int log = -1;
+    if (log < 0) log = getenv("RACACIT_U120_BITS_LOG") ? 1 : 0;
+    if (log) {
+        const uint32_t g = vm_read32(vm_read32((uint32_t)gpr[2] - 0x7300u) - 0x7FD4u);
+        fprintf(stderr, "[u120-bits] convoy %d radioactive %d tow %d -> mask 0x%02X%c",
+                convoy, radio, tow, vm_read8(g + 0x13D94u), 10);
+    }
+    memcpy(ctx->gpr, gpr, sizeof gpr); memcpy(ctx->fpr, fpr, sizeof fpr); memcpy(ctx->vr, vr, sizeof vr);
+    ctx->cr = cr; ctx->lr = lr; ctx->ctr = ctr; ctx->xer = xer; ctx->fpscr = fpscr; ctx->vscr = vscr;
+}

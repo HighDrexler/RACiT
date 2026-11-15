@@ -548,6 +548,30 @@ def patch_file(path):
         else:
             print('patch_lift #19: func_004C8898: startMode SetVariable not found once (%d)' % len(hits))
 
+    # 22. Update 1.20's space-mission bits resync in the disc build (game/stubs.cpp
+    #     racacit_u120_space_bits): update 1.20's func_0047B7E8, an init method,
+    #     re-derives two of the five mission bits at G+0x13D94 from saved mission
+    #     flags; the disc only sets them from a level script, so a save that missed
+    #     one could never complete the mask (entry 0x1E). Called at the disc
+    #     function's only return, anchored on its own epilogue.
+    sp = func_span(src, 'func_0047B7E8')
+    if sp and 'racacit_u120_space_bits' not in src[sp[0]:sp[2]]:
+        a_, body_, end_ = sp
+        fn = src[a_:end_]
+        tail = ('        ctx->gpr[1] = ctx->gpr[1] + (int64_t)(0x90);\n'
+                '        return;')
+        if fn.count(tail) == 1 and fn.count('return;') == 1 and 'vm_write8(ctx->gpr[29] + 0x1B8, ' in fn:
+            fn = fn.replace(tail, '        ctx->gpr[1] = ctx->gpr[1] + (int64_t)(0x90);\n'
+                                  '        racacit_u120_space_bits(ctx);   /* racacit: 1.20 mission bits resync */\n'
+                                  '        return;', 1)
+            src = src[:a_] + fn + src[end_:]
+            if 'void racacit_u120_space_bits' not in src:
+                i = src.index('\n', src.index('#include')) + 1
+                src = src[:i] + 'extern "C" void racacit_u120_space_bits(ppu_context* ctx);\n' + src[i:]
+            changed = True
+        else:
+            print('patch_lift #22: func_0047B7E8: epilogue not found once; left unchanged')
+
     if (('racacit_jb_push(' in src or 'racacit_longjmp(' in src)
             and 'racacit: guest setjmp' not in src):
         # declarations after the first include
