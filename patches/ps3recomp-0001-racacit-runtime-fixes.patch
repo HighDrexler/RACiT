@@ -9864,7 +9864,7 @@ index dab4380..6132681 100644
  /* ---- decoded state getters -------------------------------------------- */
  
 diff --git a/libs/video/rsx_draw_engine.c b/libs/video/rsx_draw_engine.c
-index 5c50e4a..864ac24 100644
+index 5c50e4a..b85611a 100644
 --- a/libs/video/rsx_draw_engine.c
 +++ b/libs/video/rsx_draw_engine.c
 @@ -11,6 +11,7 @@
@@ -12361,7 +12361,7 @@ index 5c50e4a..864ac24 100644
      g.n_pipelines++;
      *out_fixed = fixed;
      return handle;
-@@ -1216,16 +3031,754 @@ static void dc_fetch(const rsx_vertex_layout_plan* layout, int allow_remap)
+@@ -1216,16 +3031,788 @@ static void dc_fetch(const rsx_vertex_layout_plan* layout, int allow_remap)
          dc.fetch_ok = 0;
          return;
      }
@@ -12644,7 +12644,10 @@ index 5c50e4a..864ac24 100644
 +#define ENG_VB_WAYS     4u
 +#define ENG_VB_MAX_SPAN (1u << 18)
 +#define ENG_VB_BUDGET   (96ull << 20)
-+typedef struct { u64 key; u32 lo, hi, gpu, epoch, frame, bytes; u8* cpu; } eng_vb_entry;
++/* content/checked: with no write watch (macOS), the block's vertex bytes are
++ * hashed when it is built and compared again at most once a frame -- the
++ * rule textures follow -- instead of the watch's "written since". */
++typedef struct { u64 key; u32 lo, hi, gpu, epoch, frame, bytes; u8* cpu; u64 content; u32 checked; } eng_vb_entry;
 +static eng_vb_entry* s_vb;
 +static int s_vb_on = -1;
 +static u32* s_vb_occ; static u32 s_vb_occ_cap;
@@ -12658,7 +12661,7 @@ index 5c50e4a..864ac24 100644
 +{
 +    if (s_vb_on < 0) {
 +        const char* e = getenv("RSX_ENG_VBLOCK");
-+        s_vb_on = (e && *e == '2' ? 2 : !(e && *e == '0')) && g.be->draw_cached_vi && g.be->geom_upload && g.be->geom_release && rsx_ww_on();
++        s_vb_on = (e && *e == '2' ? 2 : !(e && *e == '0')) && g.be->draw_cached_vi && g.be->geom_upload && g.be->geom_release;
 +        if (s_vb_on && e && *e == '2') s_vb_on = 2;
 +        if (s_vb_on) s_vb = (eng_vb_entry*)calloc(ENG_VB_SETS * ENG_VB_WAYS, sizeof *s_vb);
 +        if (!s_vb) s_vb_on = 0;
@@ -12828,6 +12831,31 @@ index 5c50e4a..864ac24 100644
 +    return n;
 +}
 +
++/* The vertex bytes of the n ranges, as one hash (no index bytes: a block
++ * outlives the draws whose indices it served). */
++static u64 eng_vb_content(u32 n, const u8* rloc, const u32* roff, const u32* rlen)
++{
++    u64 h = 0x76626C6B636E74ull;
++    for (u32 i = 0; i < n; i++) {
++        const u8* p = eng_guest_ptr(NULL, rloc[i], roff[i], rlen[i]);
++        if (!p) return 0;
++        h = eng_hash_long(p, rlen[i], h ^ ((u64)rloc[i] << 32 | roff[i]));
++    }
++    return h | 1u;
++}
++
++/* No write watch: is the whole block [lo, hi] still what it was built from?
++ * Hashed at most once a frame. */
++static int eng_vb_unchanged(const rsx_vertex_layout_plan* layout, eng_vb_entry* e)
++{
++    if (e->checked == g.frames + 1u) return 1;
++    u8 rloc[ENG_GEOM_RANGES]; u32 roff[ENG_GEOM_RANGES], rlen[ENG_GEOM_RANGES];
++    const u32 n = eng_vb_ranges(layout, e->lo, e->hi, rloc, roff, rlen, 0, 0);
++    if (!n || eng_vb_content(n, rloc, roff, rlen) != e->content) return 0;
++    e->checked = g.frames + 1u;
++    return 1;
++}
++
 +static void eng_vb_drop(eng_vb_entry* e)
 +{
 +    if (e->gpu) g.be->geom_release(g.be->user, e->gpu);
@@ -12872,7 +12900,9 @@ index 5c50e4a..864ac24 100644
 +    eng_vb_entry* e = NULL;
 +    for (u32 w = 0; w < ENG_VB_WAYS; w++) if (set[w].key == key) { e = &set[w]; break; }
 +    u8 rloc[ENG_GEOM_RANGES]; u32 roff[ENG_GEOM_RANGES], rlen[ENG_GEOM_RANGES];
-+    int hit = e && e->lo <= a && b <= e->hi && eng_vb_ranges(layout, a, b, rloc, roff, rlen, 1, e->epoch);
++    int hit = e && e->lo <= a && b <= e->hi &&
++              (rsx_ww_on() ? eng_vb_ranges(layout, a, b, rloc, roff, rlen, 1, e->epoch) != 0
++                           : eng_vb_unchanged(layout, e));
 +    if (hit && eng_verify(4) && e->cpu && eng_vb_convert(layout, a, b)) {
 +        const u32 st = layout->stride, nb = (b - a + 1u) * st;
 +        if (memcmp(e->cpu + (size_t)(a - e->lo) * st, s_vb_verts, nb) != 0) {
@@ -12894,7 +12924,10 @@ index 5c50e4a..864ac24 100644
 +        }
 +        if (hi - lo >= ENG_VB_MAX_SPAN) return -1;
 +        const u32 now = rsx_ww_epoch();
-+        if (!eng_vb_ranges(layout, lo, hi, rloc, roff, rlen, 0, 0)) return -1;
++        const u32 nr = eng_vb_ranges(layout, lo, hi, rloc, roff, rlen, 0, 0);
++        if (!nr) return -1;
++        const u64 content = rsx_ww_on() ? 0 : eng_vb_content(nr, rloc, roff, rlen);
++        if (!rsx_ww_on() && !content) return -1;
 +        if (!eng_vb_convert(layout, lo, hi)) return -1;
 +        const u32 vbytes = (hi - lo + 1u) * layout->stride;
 +        u32 cls = 256u; while (cls < vbytes && cls < 0x80000000u) cls <<= 1;   /* what the heap rounds it to */
@@ -12916,6 +12949,7 @@ index 5c50e4a..864ac24 100644
 +        }
 +        if (e->key) eng_vb_drop(e);
 +        e->key = key; e->lo = lo; e->hi = hi; e->gpu = gpu; e->epoch = now; e->bytes = cls;
++        e->content = content; e->checked = g.frames + 1u;
 +        if (eng_verify(4)) { e->cpu = (u8*)malloc(vbytes); if (e->cpu) memcpy(e->cpu, s_vb_verts, vbytes); }
 +        s_vb_held += cls;
 +        s_vb_builds++; s_vb_conv_bytes += vbytes;
@@ -13119,7 +13153,7 @@ index 5c50e4a..864ac24 100644
  /* ---- sink ---------------------------------------------------------------- */
  
  static void sink_begin(void* user, const rsx_dispatch* r, u32 prim)
-@@ -1234,11 +3787,26 @@ static void sink_begin(void* user, const rsx_dispatch* r, u32 prim)
+@@ -1234,11 +3821,26 @@ static void sink_begin(void* user, const rsx_dispatch* r, u32 prim)
      dc_reset();
  }
  
@@ -13147,7 +13181,7 @@ index 5c50e4a..864ac24 100644
      dc.arr[dc.n_arr].first = first;
      dc.arr[dc.n_arr].count = count;
      dc.n_arr++;
-@@ -1256,7 +3824,7 @@ static void sink_inline_array(void* user, const rsx_dispatch* r,
+@@ -1256,7 +3858,7 @@ static void sink_inline_array(void* user, const rsx_dispatch* r,
      dc.inl = data;
      dc.inl_bytes = bytes;
      dc.n_packets++;
@@ -13156,7 +13190,7 @@ index 5c50e4a..864ac24 100644
      dc.arr[dc.n_arr].first = 0;
      dc.arr[dc.n_arr].count = bytes / stride;
      dc.n_arr++;
-@@ -1266,7 +3834,7 @@ static void sink_draw_index(void* user, const rsx_dispatch* r, u32 first, u32 co
+@@ -1266,7 +3868,7 @@ static void sink_draw_index(void* user, const rsx_dispatch* r, u32 first, u32 co
  {
      (void)user; (void)r;
      dc.n_packets++;
@@ -13165,7 +13199,7 @@ index 5c50e4a..864ac24 100644
      dc.idx[dc.n_idx].first = first;
      dc.idx[dc.n_idx].count = count;
      dc.n_idx++;
-@@ -1278,55 +3846,543 @@ static void sink_draw_index(void* user, const rsx_dispatch* r, u32 first, u32 co
+@@ -1278,55 +3880,543 @@ static void sink_draw_index(void* user, const rsx_dispatch* r, u32 first, u32 co
   * render-to-texture read back through a texture unit), a unit naming a
   * tracked zeta in DEPTH24_D8 samples its snapshot, and everything else is a
   * guest upload (rsx_live_draw.c:5986-6062). */
@@ -13727,7 +13761,7 @@ index 5c50e4a..864ac24 100644
      }
      return mask;
  }
-@@ -1350,12 +4406,156 @@ static u32 sink_bind_vertex_textures(
+@@ -1350,12 +4440,156 @@ static u32 sink_bind_vertex_textures(
      return bound;
  }
  
@@ -13884,7 +13918,7 @@ index 5c50e4a..864ac24 100644
      /* Everything that becomes triangles -- lists, strips, fans, quads, quad
       * strips and polygons -- is REBUILT into one triangle list through an
       * index buffer. A host strip topology cannot express a restart cut, which
-@@ -1368,41 +4568,68 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -1368,41 +4602,68 @@ static void sink_end(void* user, const rsx_dispatch* r)
      int scratch = 0;
      const int rebuild = eng_topology_rebuild(prim, 0, &scratch) != 0;
      if (!rebuild) {
@@ -13971,7 +14005,7 @@ index 5c50e4a..864ac24 100644
  
      /* Textures before any pipeline or target binding: a cache refresh can
       * replace a resource, and the backend is free to submit while doing it. */
-@@ -1414,28 +4641,44 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -1414,28 +4675,44 @@ static void sink_end(void* user, const rsx_dispatch* r)
      memset(samplers, 0, sizeof samplers);
      memset(vtextures, 0, sizeof vtextures);
      memset(vsamplers, 0, sizeof vsamplers);
@@ -14027,7 +14061,7 @@ index 5c50e4a..864ac24 100644
  
      /* The transform constant block, then the viewport epilogue the vertex
       * program's tail multiplies by: RSX window coordinates mapped into the
-@@ -1451,13 +4694,217 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -1451,13 +4728,217 @@ static void sink_end(void* user, const rsx_dispatch* r)
          xf[5] = -((vp.translate[1] - H * 0.5f) / (H * 0.5f));
          xf[6] = vp.translate[2];
      }
@@ -14248,7 +14282,7 @@ index 5c50e4a..864ac24 100644
      if (g.fp_cb_cap < fp_bytes) {
          u8* n = (u8*)realloc(g.fp_cb, fp_bytes);
          if (!n) return;
-@@ -1469,8 +4916,47 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -1469,8 +4950,47 @@ static void sink_end(void* user, const rsx_dispatch* r)
          memcpy(g.fp_cb, g.fp_constants.values, g.fp_constants.count * 16u);
      { float* alpha = (float*)(g.fp_cb + nslots * 16u);
        alpha[0] = rsx_fp_alpha_ref(rs.alpha_ref_raw, rs.alpha_ref_format);
@@ -14297,7 +14331,7 @@ index 5c50e4a..864ac24 100644
      /* The depth attachment is cleared the first time it is bound, so a title
       * that never clears its shadow zeta still tests against something. */
      const u32 depth_handle = (zslot != ENG_INVALID) ? g.zdepths[zslot].handle : 0;
-@@ -1482,15 +4968,50 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -1482,15 +5002,50 @@ static void sink_end(void* user, const rsx_dispatch* r)
          g.zdepths[zslot].had_write = 0;
      }
  
@@ -14352,7 +14386,7 @@ index 5c50e4a..864ac24 100644
  
      /* The guest scissor intersected with the surface. The nv40 reset is a
       * full 4096x4096 window and a never-written register reads 0 here, which
-@@ -1501,8 +5022,8 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -1501,8 +5056,8 @@ static void sink_end(void* user, const rsx_dispatch* r)
          u32 sw = g.surfaces[target].w, sh = g.surfaces[target].h;
          const u32 h = rsx_dsp_reg(&g.rsx, M_SCISSOR_HORIZONTAL);
          const u32 v = rsx_dsp_reg(&g.rsx, M_SCISSOR_VERTICAL);
@@ -14363,7 +14397,7 @@ index 5c50e4a..864ac24 100644
          if (gw > 0 && gh > 0) {
              u32 right = sx + sw, bottom = sy + sh;
              if (gx > sx) sx = gx;
-@@ -1517,17 +5038,342 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -1517,17 +5072,342 @@ static void sink_end(void* user, const rsx_dispatch* r)
      /* Dynamic, and deliberately outside the pipeline key. */
      g.be->set_stencil_ref(g.be->user,
                            rsx_dsp_reg(&g.rsx, M_STENCIL_FUNC_REF) & 0xFFu);
@@ -14711,7 +14745,7 @@ index 5c50e4a..864ac24 100644
  }
  
  static void sink_clear(void* user, const rsx_dispatch* r, u32 mask)
-@@ -1536,6 +5382,14 @@ static void sink_clear(void* user, const rsx_dispatch* r, u32 mask)
+@@ -1536,6 +5416,14 @@ static void sink_clear(void* user, const rsx_dispatch* r, u32 mask)
      if (!g.ready) return;
      u32 targets[RSX_BE_MAX_COLOR_TARGETS];
      const u32 n_targets = eng_current_target_set(targets);
@@ -14726,7 +14760,7 @@ index 5c50e4a..864ac24 100644
      if (!n_targets) return;
  
      if (mask & (RSX_CLEAR_COLOR_R | RSX_CLEAR_COLOR_G |
-@@ -1550,31 +5404,60 @@ static void sink_clear(void* user, const rsx_dispatch* r, u32 mask)
+@@ -1550,31 +5438,60 @@ static void sink_clear(void* user, const rsx_dispatch* r, u32 mask)
          /* Every target the set names, not only A: a deferred pass clears its
           * whole G-buffer in one CLEAR_SURFACE, and B, C and D would otherwise
           * keep whatever the last frame left in them. */
@@ -14794,7 +14828,7 @@ index 5c50e4a..864ac24 100644
          }
      }
  }
-@@ -1585,16 +5468,534 @@ static void sink_clear(void* user, const rsx_dispatch* r, u32 mask)
+@@ -1585,16 +5502,534 @@ static void sink_clear(void* user, const rsx_dispatch* r, u32 mask)
   * scene's draws having executed (rsx_live_draw.c:7557-7570). */
  static u32 eng_present_surface(u32 buffer_id)
  {
@@ -15333,7 +15367,7 @@ index 5c50e4a..864ac24 100644
  static void eng_present(u32 buffer_id)
  {
      if (!g.ready) return;
-@@ -1609,9 +6010,46 @@ static void eng_present(u32 buffer_id)
+@@ -1609,9 +6044,46 @@ static void eng_present(u32 buffer_id)
                      i, g.surfaces[i].location, g.surfaces[i].offset,
                      g.surfaces[i].w, g.surfaces[i].h, g.surfaces[i].handle);
      }
@@ -15380,7 +15414,7 @@ index 5c50e4a..864ac24 100644
      g.last_guest_draws = g.guest_draws;
      g.guest_draws = 0;
  }
-@@ -1661,6 +6099,8 @@ int rsx_draw_engine_init(u32 width, u32 height)
+@@ -1661,6 +6133,8 @@ int rsx_draw_engine_init(u32 width, u32 height)
      g.height = height ? height : 720;
      g.vp_cb = (u8*)calloc(1, ENG_VP_CB_BYTES);
      if (!g.vp_cb) return -1;
@@ -15389,7 +15423,7 @@ index 5c50e4a..864ac24 100644
      if (g.be->init && g.be->init(g.be->user, g.width, g.height) != 0) {
          free(g.vp_cb); g.vp_cb = NULL;
          return -1;
-@@ -1697,8 +6137,13 @@ void rsx_draw_engine_shutdown(void)
+@@ -1697,8 +6171,13 @@ void rsx_draw_engine_shutdown(void)
      if (g.ready && g.be->shutdown) g.be->shutdown(g.be->user);
  
      rsx_draw_engine_set_guest_memory(NULL, NULL);
@@ -15404,7 +15438,7 @@ index 5c50e4a..864ac24 100644
      memset(&dc, 0, sizeof dc);
      free(g.tex_staging); free(g.vp_cb); free(g.fp_cb); free(g.indices);
      const rsx_draw_backend* be = g.be;
-@@ -1719,6 +6164,25 @@ void rsx_draw_engine_method(u32 method, u32 arg)
+@@ -1719,6 +6198,25 @@ void rsx_draw_engine_method(u32 method, u32 arg)
      rsx_dispatch_method(&g.rsx, m, arg);
  }
  
@@ -15430,7 +15464,7 @@ index 5c50e4a..864ac24 100644
  void rsx_draw_engine_set_display_buffer(u32 buffer_id, u32 location, u32 offset,
                                          u32 pitch, u32 width, u32 height)
  {
-@@ -1745,10 +6209,363 @@ void rsx_draw_engine_present(void)
+@@ -1745,10 +6243,363 @@ void rsx_draw_engine_present(void)
       * a runner that both consumes 0xE944 and calls here would otherwise
       * re-present a double-buffered title's OTHER scanout. Presenting twice is
       * harmless either way -- the engine never clears the surface, so a second
