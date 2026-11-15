@@ -473,6 +473,8 @@ static void add_options(const std::vector<std::string>& sections)
 // The game's keyboard and mouse bindings (cellPad.c k_kb, the same names and defaults):
 // RACACIT_BIND_<BUTTON>=<keys> in settings.txt, up to 4 keys a button, "none" for none.
 // A key on several buttons presses them all.
+// The quick select keys act only while the ring is open (TRIANGLE held), and a key on one of
+// them presses nothing else then: 1-4 stay the d-pad the rest of the time.
 struct Bind { const char* name; const char* group; const char* label; const char* def; };
 static const Bind k_binds[] = {
     { "CROSS", "Buttons", "Cross (A): jump", "Space,Return" },
@@ -500,6 +502,18 @@ static const Bind k_binds[] = {
     { "RS_DOWN", "Camera keys (right stick; the mouse turns it too)", "Camera down", "K" },
     { "RS_LEFT", "Camera keys (right stick; the mouse turns it too)", "Camera left", "J" },
     { "RS_RIGHT", "Camera keys (right stick; the mouse turns it too)", "Camera right", "L" },
+    { "QS_1", "Quick select keys (only while the ring is open)", "Slot 1 (top)", "1" },
+    { "QS_2", "Quick select keys (only while the ring is open)", "Slot 2 (then clockwise)", "2" },
+    { "QS_3", "Quick select keys (only while the ring is open)", "Slot 3", "3" },
+    { "QS_4", "Quick select keys (only while the ring is open)", "Slot 4", "4" },
+    { "QS_5", "Quick select keys (only while the ring is open)", "Slot 5", "5" },
+    { "QS_6", "Quick select keys (only while the ring is open)", "Slot 6", "6" },
+    { "QS_7", "Quick select keys (only while the ring is open)", "Slot 7", "7" },
+    { "QS_8", "Quick select keys (only while the ring is open)", "Slot 8", "8" },
+    { "QS_PREV", "Quick select keys (only while the ring is open)", "Previous slot", "Z" },
+    { "QS_NEXT", "Quick select keys (only while the ring is open)", "Next slot", "X" },
+    { "QS_PREV_RING", "Quick select keys (only while the ring is open)", "Previous ring (L1)", "R" },
+    { "QS_NEXT_RING", "Quick select keys (only while the ring is open)", "Next ring (R1)", "T" },
 };
 static const int k_max_keys = 4;
 

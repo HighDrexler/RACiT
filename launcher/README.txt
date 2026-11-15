@@ -85,6 +85,10 @@ KEYBOARD AND MOUSE
   L3 V                                  R3 middle click / B
   Pause Esc / P                         Map Tab / M
   D-pad arrow keys, or 1 2 3 4 (up, right, down, left)
+  In quick select (Q held): 1 to 8 pick a slot (1 at the top, then
+  clockwise), Z / X the previous / next slot, R / T the previous / next ring;
+  the mouse points at a slot, left / right click or the wheel change rings.
+  Let go of Q to equip.
   In the game, F1 opens the settings (on a controller: the touchpad, or hold
   Select).
   Settings > Key bindings changes any of them: pick a button, then press the
