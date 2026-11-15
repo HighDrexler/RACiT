@@ -554,6 +554,47 @@ def patch_file(path):
         i = src.index('\n', src.index('#include')) + 1
         src = src[:i] + DECLS + src[i:]
         changed = True
+    # 20. Update 1.20's hero part masks in the disc build (game/stubs.cpp
+    #     racacit_u120_part_masks). func_004C3C44 unpacks the hero's appearance
+    #     (armor style, skin, group and its three row choices) and func_004C46FC
+    #     turns it into part masks. Update 1.20 changed three things here:
+    #     func_004C3C44's default for an unset row 3 of group 1 (0 -> 3, as
+    #     groups 0 and 2 already had), func_004C46FC's bound on row 3 (3 -> 4)
+    #     and the masks it builds (the stubs.cpp hook, called where its mask
+    #     paths meet). Every anchor is the disc's own code, so another
+    #     executable's lift is left alone.
+    sp = func_span(src, 'func_004C3C44')
+    if sp and 'racacit: 1.20 default' not in src[sp[0]:sp[2]]:
+        a_, body_, end_ = sp
+        fn = src[a_:end_]
+        li = '        ctx->gpr[5] = (int64_t)(int32_t)(0);\n'
+        st = '        vm_write32(ctx->gpr[1] + 0x78, ctx->gpr[5]);\n'
+        if fn.count(li) == 1 and fn.count(st) == 1 and fn.count('vm_write32(ctx->gpr[1] + 0x78, ') == 3 \
+                and fn.index(li) < fn.index(st) \
+                and 'ctx->gpr[5] =' not in fn[fn.index(li) + len(li):fn.index(st)]:
+            fn = fn.replace(li, '        ctx->gpr[5] = (int64_t)(int32_t)(3);   /* racacit: 1.20 default (was 0) */\n', 1)
+            src = src[:a_] + fn + src[end_:]
+            changed = True
+        else:
+            print('patch_lift #20: func_004C3C44: group 1 row 3 default not found once; left unchanged')
+    sp = func_span(src, 'func_004C46FC')
+    if sp and 'racacit_u120_part_masks' not in src[sp[0]:sp[2]]:
+        a_, body_, end_ = sp
+        fn = src[a_:end_]
+        bound = ('        ctx->gpr[28] = vm_read32(ctx->gpr[9] + 0x0);\n'
+                 '        { uint64_t a = (uint32_t)ctx->gpr[28]; uint64_t b = (uint64_t)0x3;')
+        join = '\nloc_004C4C68:\n'
+        if fn.count(bound) == 1 and fn.count(join) == 1 and fn.index(bound) < fn.index(join):
+            fn = fn.replace(bound, bound.replace('(uint64_t)0x3;', '(uint64_t)0x4; /* racacit: 1.20 bound (was 3) */'), 1)
+            fn = fn.replace(join, join + '        racacit_u120_part_masks(ctx);   /* racacit */\n', 1)
+            src = src[:a_] + fn + src[end_:]
+            if 'void racacit_u120_part_masks' not in src:
+                i = src.index('\n', src.index('#include')) + 1
+                src = src[:i] + 'extern "C" void racacit_u120_part_masks(ppu_context* ctx);\n' + src[i:]
+            changed = True
+        else:
+            print('patch_lift #20: func_004C46FC: row bound or mask join not found once; left unchanged')
+
     if changed:
         open(path, 'w').write(src)
     return changed

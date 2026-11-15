@@ -1796,3 +1796,95 @@ extern "C" void racacit_snd_play_hook(ppu_context* ctx, int tag)
     }
     __sync_lock_release(&mu);
 }
+
+/* ---------------------------------------------------------------------------
+ * Update 1.20's hero part masks in the disc build
+ *
+ * func_004C46FC builds the 64-bit part masks (+0x118) of the hero's model
+ * and of the companion model func_00330774 returns, from the appearance
+ * globals func_004C3C44 unpacked (r2 - 0x5500 -> -0x7FFC): +0xF4 armor style
+ * (0..4, also +0x170), +0xF8 skin (1..7, 0 none), +0xFC group (0..2) and its
+ * three row choices at +0xD0 + group * 0xC. Update 1.20 (func_004C4D9C)
+ * changed what that produces:
+ *  - skin 7 adds bit 2 to its skin bits and takes reduced armor parts
+ *    (style 1 and 0: 0x2A8, 2: 0x20A8, 3: 0x220A8, 4: 0x2220A8), all with the
+ *    head test (the hero's +0x2000000 / +2 by func_0061D018);
+ *  - armor style 3 no longer takes the head test;
+ *  - group 1: row 3's columns give 0x200/0x400/0x800 (the disc swapped the
+ *    last two);
+ *  - groups 0 and 2: row 2's columns 1 and 2 swap, and an unset row (3) adds
+ *    no part (the disc read the byte after the row's three).
+ * patch_lift.py calls this where func_004C46FC's mask paths meet
+ * (loc_004C4C68) and it writes both masks as 1.20 would; the rows' bound (4
+ * in 1.20, 3 on the disc) and func_004C3C44's default are patched in place.
+ * Everything here is a disc 1.00 address: only that lift calls it.
+ * -----------------------------------------------------------------------*/
+extern "C" uint64_t vm_read64(uint64_t a);
+static inline uint64_t racacit_bit64(uint32_t b) { return (b & 64u) ? 0 : (1ull << (b & 63u)); }
+extern "C" void racacit_u120_part_masks(ppu_context* ctx)
+{
+    const uint32_t toc = (uint32_t)ctx->gpr[2];
+    const uint32_t tb = vm_read32(toc - 0x5500u);
+    const uint32_t G = vm_read32(tb - 0x7FFCu);
+    const uint32_t H = vm_read32((uint32_t)ctx->gpr[27] + 0x14u);
+    const uint32_t style = vm_read32(G + 0xF4u), skin = vm_read32(G + 0xF8u), group = vm_read32(G + 0xFCu);
+    const uint32_t rows = G + 0xD0u + group * 0xCu;
+    /* func_0061D018: 1 when the word at (r2 - 0x5088 -> -0x8000) + 4 is 0 */
+    const int32_t hw = (int32_t)vm_read32(vm_read32(vm_read32(toc - 0x5088u) - 0x8000u) + 4u);
+    const int head = hw == 0;
+
+    uint64_t m;
+    bool direct = false, full = true;
+    uint64_t sk = 0;
+    switch (skin) {
+    case 1: sk = 0x2000000000000000ull; break;
+    case 2: m = 0x8000000000000000ull; direct = true; break;
+    case 3: m = 0x1000000000000000ull; direct = true; break;
+    case 4: m = 0x0800000000000000ull | (head ? 0x2000000ull : 2ull) | 1ull; direct = true; break;
+    case 5: m = 0x4000000000000000ull; direct = true; break;
+    case 6: m = 0x80000000ull; direct = true; break;
+    case 7: sk = 0x0000002000000004ull; full = false; break;
+    default: break;
+    }
+    if (!direct) {
+        bool test = true, one = true;
+        switch ((int32_t)style) {
+        case 2: m = sk | (full ? 0x121A8u : 0x20A8u); break;
+        case 3: m = sk | (full ? 0x1321A8u : 0x220A8u); test = !full; break;
+        case 4: m = sk | (full ? 0x12321A8u : 0x2220A8u); test = one = !full; break;
+        case 1: m = sk | (full ? 0x3A8u : 0x2A8u); break;
+        default: m = sk | (full ? 0x2ACu : 0x2A8u); break;
+        }
+        if (test) m |= head ? 0x2000000ull : 2ull;
+        if (one) m |= 1ull;
+        m |= 0x40ull;   /* +0x170 (the style) is the same in both versions: left as written */
+    }
+    vm_write64(H + 0x118u, m);
+
+    const uint32_t r0 = vm_read32(rows), r1 = vm_read32(rows + 4u), r2 = vm_read32(rows + 8u);
+    if (group == 1) {
+        m |= 0x100ull << 32;
+        if (r2 == 0) m |= 0x200ull << 32;
+        else if (r2 == 1) m |= 0x400ull << 32;
+        else if (r2 == 2) m |= 0x800ull << 32;
+        m |= racacit_bit64(44u + (r1 + 2u) % 3u);
+        vm_write64(H + 0x118u, m);
+    } else if (group == 0 || group == 2) {
+        /* func_00330774(group): the model the group's choices go on */
+        const uint32_t mb = vm_read32(toc - 0x6F60u);
+        const uint32_t idx = vm_read32(vm_read32(mb - 0x8000u) + group * 4u + 4u);
+        const uint32_t mt = vm_read32(mb - 0x7FFCu);
+        if (idx >= vm_read32(mt + 0x18u)) return;
+        const uint32_t P = vm_read32(mt) + idx * 0x180u;
+        const uint32_t t = vm_read32(vm_read32(P + 0x54u) + 0x94u);
+        const uint32_t T = vm_read32(tb - 0x7FCCu);
+        const uint32_t a0 = vm_read32(T + group * 12u), a1 = vm_read32(T + group * 12u + 4u),
+                       a2 = vm_read32(T + group * 12u + 8u), none = vm_read32(T + 0x24u + group * 4u);
+        uint64_t pm = racacit_bit64(vm_read8(t + a0 + r0)) | 1ull;
+        if (r1 == 0) pm |= racacit_bit64(vm_read8(t + a1));
+        else if (r1 == 1) pm |= racacit_bit64(vm_read8(t + a1 + 2u));
+        else if (r1 == 2) pm |= racacit_bit64(vm_read8(t + a1 + 1u));
+        if ((int32_t)r2 != (int32_t)none) pm |= racacit_bit64(vm_read8(t + a2 + r2));
+        vm_write64(P + 0x118u, pm);
+    }
+}
