@@ -32054,7 +32054,7 @@ index 931d3b3..86e94a3 100644
 +#undef SPU_DRAIN_AT_RETURN
  }
 diff --git a/runtime/spu/spu_helpers.h b/runtime/spu/spu_helpers.h
-index 0fca7f5..a1b2905 100644
+index 0fca7f5..b049fd7 100644
 --- a/runtime/spu/spu_helpers.h
 +++ b/runtime/spu/spu_helpers.h
 @@ -117,24 +117,98 @@ static inline u128 spu_mpy(u128 a, u128 b)  { u128 r; for(int i=0;i<4;i++) r._s3
@@ -32423,7 +32423,7 @@ index 0fca7f5..a1b2905 100644
  /* ---- shift / rotate immediate (word lanes) ---- */
  static inline u128 spu_shli(u128 a, int sh)  { u128 r; sh&=0x3F; for(int i=0;i<4;i++) r._u32[i]=(sh>31)?0:(a._u32[i]<<sh); return r; }
  static inline u128 spu_shlhi(u128 a, int sh) { u128 r; sh&=0x1F; for(int i=0;i<8;i++) r._u16[i]=(sh>15)?0:(uint16_t)(a._u16[i]<<sh); return r; }
-@@ -257,42 +531,403 @@ static inline u128 spu_rothi(u128 a, int sh) { u128 r; sh&=15; for(int i=0;i<8;i
+@@ -257,42 +531,423 @@ static inline u128 spu_rothi(u128 a, int sh) { u128 r; sh&=15; for(int i=0;i<8;i
  static inline u128 spu_rotmi(u128 a, int i7)  { u128 r; int sh=(0-i7)&0x3F; for(int i=0;i<4;i++) r._u32[i]=(sh>31)?0:(a._u32[i]>>sh); return r; }
  static inline u128 spu_rotmai(u128 a, int i7) { u128 r; int sh=(0-i7)&0x3F; for(int i=0;i<4;i++) r._s32[i]=(sh>31)?(a._s32[i]>>31):(a._s32[i]>>sh); return r; }
  static inline u128 spu_rotmhi(u128 a, int i7) { u128 r; int sh=(0-i7)&0x1F; for(int i=0;i<8;i++) r._u16[i]=(sh>15)?0:(uint16_t)(a._u16[i]>>sh); return r; }
@@ -32820,6 +32820,26 @@ index 0fca7f5..a1b2905 100644
 +             _mm_fmsub_ps(va, vb, vc))
 +SPU_XF_FMA_V(spu_fnms, z - x * y, _mm_sub_pd(z, _mm_mul_pd(x, y)), _mm256_sub_pd(z, _mm256_mul_pd(x, y)),
 +             _mm_fnmadd_ps(va, vb, vc))
++#elif defined(__aarch64__) && !defined(SPU_NEON_FMA_DOUBLE)
++/* One native fused single-precision op, as the x86 FMA3 path: the SPU
++ * threads run with FZ and round toward zero (FPCR), and truncating to
++ * double and then to single is truncating once, so the fused result is the
++ * double form's. Lanes that come out at exponent 255 or +-FLT_MAX go exact.
++ * SPU_NEON_FMA_DOUBLE keeps the double form below. */
++#define SPU_XF_FMA_N(name, EXPR, NATIVE) \
++    static inline __attribute__((noinline)) u128 name##_exact(u128 a, u128 b, u128 c) { u128 r; SPU_XF_COUNT(1); \
++        for (int i = 0; i < 4; i++) { const double x = spu_xf_get(a._u32[i]), y = spu_xf_get(b._u32[i]), \
++            z = spu_xf_get(c._u32[i]); r._u32[i] = spu_xf_put(EXPR); } \
++        return r; } \
++    static inline __attribute__((always_inline)) u128 name(u128 a, u128 b, u128 c) { u128 r; \
++        const float32x4_t va = vld1q_f32(a._f32), vb = vld1q_f32(b._f32), vc = vld1q_f32(c._f32); \
++        const float32x4_t vr = NATIVE; \
++        vst1q_f32(r._f32, vr); \
++        if (__builtin_expect(!spu_xf_bad_n(vreinterpretq_u32_f32(vr)), 1)) return r; \
++        return name##_exact(a, b, c); }
++SPU_XF_FMA_N(spu_fma, x * y + z, vfmaq_f32(vc, va, vb))
++SPU_XF_FMA_N(spu_fms, x * y - z, vfmaq_f32(vnegq_f32(vc), va, vb))
++SPU_XF_FMA_N(spu_fnms, z - x * y, vfmsq_f32(vc, va, vb))
 +#elif defined(__aarch64__)
 +/* The four lanes in double, two at a time; the product of two singles is
 + * exact there, the sum rounds once (toward zero, FPCR), then to single. */
@@ -32848,7 +32868,7 @@ index 0fca7f5..a1b2905 100644
  
  /* ---- SPU double-precision (2 doubles/reg; dword i = words 2i(high),2i+1(low)).
   * Reassemble via _u32 -- our u128 is host-LE, so a naive _f64[i] would SWAP the
-@@ -317,7 +952,7 @@ static inline u128 spu_dfnma(u128 a, u128 b, u128 t) { u128 r; for(int i=0;i<2;i
+@@ -317,7 +972,7 @@ static inline u128 spu_dfnma(u128 a, u128 b, u128 t) { u128 r; for(int i=0;i<2;i
  static inline u128 spu_dfceq(u128 a, u128 b)  { u128 r; for(int i=0;i<2;i++){ uint64_t m=(spu__dget(a,i)==spu__dget(b,i))?~0ull:0ull; r._u32[i*2]=(uint32_t)(m>>32); r._u32[i*2+1]=(uint32_t)m; } return r; }
  static inline u128 spu_dfcmeq(u128 a, u128 b) { u128 r; for(int i=0;i<2;i++){ double x=spu__dget(a,i),y=spu__dget(b,i); if(x<0)x=-x; if(y<0)y=-y; uint64_t m=(x==y)?~0ull:0ull; r._u32[i*2]=(uint32_t)(m>>32); r._u32[i*2+1]=(uint32_t)m; } return r; }
  /* Singles occupy preferred words 0 and 2 when converting doubleword lanes. */
@@ -32857,7 +32877,7 @@ index 0fca7f5..a1b2905 100644
  static inline u128 spu_frds(u128 a) { u128 r; memset(&r,0,sizeof r); for(int i=0;i<2;i++) r._f32[i*2]=(float)spu__dget(a,i); return r; }
  /* mpyhhu: high-16 x high-16 of each word, unsigned, full 32-bit product. */
  static inline u128 spu_mpyhhu(u128 a, u128 b){ u128 r; for(int i=0;i<4;i++) r._u32[i]=(uint32_t)a._u16[2*i+1]*(uint32_t)b._u16[2*i+1]; return r; }
-@@ -344,18 +979,34 @@ static inline u128 spu_shl(u128 a, u128 b)   { u128 r; for(int i=0;i<4;i++){ uin
+@@ -344,18 +999,34 @@ static inline u128 spu_shl(u128 a, u128 b)   { u128 r; for(int i=0;i<4;i++){ uin
  static inline u128 spu_shlh(u128 a, u128 b)  { u128 r; for(int i=0;i<8;i++){ uint32_t sh=b._u16[i]&0x1F; r._u16[i]=(sh>15)?0:(uint16_t)(a._u16[i]<<sh); } return r; }
  static inline u128 spu_rot(u128 a, u128 b)   { u128 r; for(int i=0;i<4;i++){ uint32_t sh=b._u32[i]&31; r._u32[i]= sh ? ((a._u32[i]<<sh)|(a._u32[i]>>(32-sh))) : a._u32[i]; } return r; }
  static inline u128 spu_roth(u128 a, u128 b)  { u128 r; for(int i=0;i<8;i++){ uint32_t sh=b._u16[i]&15; r._u16[i]= sh ? (uint16_t)((a._u16[i]<<sh)|(a._u16[i]>>(16-sh))) : a._u16[i]; } return r; }
@@ -32898,7 +32918,7 @@ index 0fca7f5..a1b2905 100644
  
  /* ---- Phase 2: rotmahi ---- */
  static inline u128 spu_rotmahi(u128 a, int i7) { u128 r; int sh=(0-i7)&0x1F; for(int i=0;i<8;i++) r._s16[i]=(sh>15)?(a._s16[i]>>15):(a._s16[i]>>sh); return r; }
-@@ -409,8 +1060,24 @@ static inline u128 spu_mpyh(u128 a, u128 b) { u128 r; for(int i=0;i<4;i++) r._s3
+@@ -409,8 +1080,24 @@ static inline u128 spu_mpyh(u128 a, u128 b) { u128 r; for(int i=0;i<4;i++) r._s3
  static inline u128 spu_mpyhh(u128 a, u128 b){ u128 r; for(int i=0;i<4;i++) r._s32[i]=(int32_t)a._s16[2*i+1] * (int32_t)b._s16[2*i+1]; return r; }
  static inline u128 spu_mpys(u128 a, u128 b) { u128 r; for(int i=0;i<4;i++){ int32_t p=(int32_t)a._s16[2*i]*(int32_t)b._s16[2*i]; r._s32[i]=(int16_t)(p>>16); } return r; }
  static inline u128 spu_mpyui(u128 a, int32_t imm) { u128 r; for(int i=0;i<4;i++) r._u32[i]=(uint32_t)a._u16[2*i]*(uint32_t)(uint16_t)imm; return r; }
@@ -32925,7 +32945,7 @@ index 0fca7f5..a1b2905 100644
  static const uint32_t spu_frest_fraction_lut[32] = {
      0x7FFBE0, 0x7F87A6, 0x70EF72, 0x708B40, 0x638B12, 0x633AEA, 0x5792C4, 0x574AA0,
      0x4CCA7E, 0x4C9262, 0x430A44, 0x42D62A, 0x3A2E12, 0x39FDFA, 0x3215E4, 0x31F1D2,
-@@ -429,7 +1096,7 @@ static const uint32_t spu_frsqest_fraction_lut[64] = {
+@@ -429,7 +1116,7 @@ static const uint32_t spu_frsqest_fraction_lut[64] = {
      0x4180D7, 0x4180D7, 0x3E24CC, 0x3E24CC, 0x3AF4C3, 0x3AF4C3, 0x37E8BA, 0x37E8BA
  };
  
@@ -32934,7 +32954,7 @@ index 0fca7f5..a1b2905 100644
      u128 r;
      for (int i = 0; i < 4; i++) {
          uint32_t bits = a._u32[i];
-@@ -444,7 +1111,7 @@ static inline u128 spu_frsqest(u128 a) {
+@@ -444,7 +1131,7 @@ static inline u128 spu_frsqest(u128 a) {
  }
  /* frest: reciprocal estimate (refined by the following spu_fi Newton step).
   * Full-precision 1/x is exact after fi and >= HW-estimate accuracy. */
@@ -32943,7 +32963,7 @@ index 0fca7f5..a1b2905 100644
      u128 r;
      for (int i = 0; i < 4; i++) {
          uint32_t bits = a._u32[i];
-@@ -473,6 +1140,35 @@ static inline u128 spu_frest(u128 a) {
+@@ -473,6 +1160,35 @@ static inline u128 spu_frest(u128 a) {
      return r;
  }
  
@@ -32979,7 +32999,7 @@ index 0fca7f5..a1b2905 100644
  /* ---- Phase 3: sign extension ----
   * LE host: low sub-lane = _u8[2i] / _s16[2i] / _s32[2i] (the byte/half/word
   * at the *lower* storage address). Same caveat as the mpy family. */
-@@ -550,11 +1246,17 @@ static inline u128 spu_fsmbi(int32_t imm) {
+@@ -550,11 +1266,17 @@ static inline u128 spu_fsmbi(int32_t imm) {
   * the right host index. Verified to compose correctly with the fixed shufb for
   * both cbd-generated and immediate/LS-constant controls. */
  static inline u128 spu_cbd_pos(int pos) {
@@ -32997,7 +33017,7 @@ index 0fca7f5..a1b2905 100644
      u128 r; for(int t=0;t<16;t++) r._u8[SPU_W(t)] = (uint8_t)(0x10 + t);
      int p = (pos & 0xF) & ~1;                       /* SPU halfword byte positions p, p+1 */
      r._u8[SPU_W(p)]   = 0x02;                        /* a SPU byte 2 (hi byte of preferred hw) */
-@@ -562,12 +1264,18 @@ static inline u128 spu_chd_pos(int pos) {
+@@ -562,12 +1284,18 @@ static inline u128 spu_chd_pos(int pos) {
      return r;
  }
  static inline u128 spu_cwd_pos(int pos) {
@@ -33016,7 +33036,7 @@ index 0fca7f5..a1b2905 100644
      u128 r; for(int t=0;t<16;t++) r._u8[SPU_W(t)] = (uint8_t)(0x10 + t);
      int p = (pos & 0xF) & ~7;
      for(int k=0;k<8;k++) r._u8[SPU_W(p+k)] = (uint8_t)k;   /* a SPU bytes 0..7 (preferred dword) */
-@@ -588,17 +1296,29 @@ static inline u128 spu_rotma(u128 a, u128 b)  { u128 r; for(int i=0;i<4;i++){ ui
+@@ -588,17 +1316,29 @@ static inline u128 spu_rotma(u128 a, u128 b)  { u128 r; for(int i=0;i<4;i++){ ui
  static inline u128 spu_rothm(u128 a, u128 b)  { u128 r; for(int i=0;i<8;i++){ uint32_t sh=(0-b._u16[i])&0x1F; r._u16[i]=(sh>15)?0:(uint16_t)(a._u16[i]>>sh); } return r; }
  static inline u128 spu_rothma(u128 a, u128 b) { u128 r; for(int i=0;i<8;i++){ uint32_t sh=(0-b._u16[i])&0x1F; r._s16[i]=(sh>15)?(a._s16[i]>>15):(a._s16[i]>>sh); } return r; }
  static inline u128 spu_rothmi(u128 a, int i7) { u128 r; int sh=(0-i7)&0x1F; for(int i=0;i<8;i++) r._u16[i]=(sh>15)?0:(uint16_t)(a._u16[i]>>sh); return r; }
