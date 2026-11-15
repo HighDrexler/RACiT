@@ -522,6 +522,27 @@ def patch_file(path):
             src = src[:i] + decl + src[i:]
         changed = True
 
+    # Keyboard menu prompts (game/menu_keycaps.h): the menu movies have two
+    # separate frame paths in BCUS98124 disc 1.00. Publish the key labels before
+    # each frame, outside ActionScript execution, preserving the guest context.
+    # Does nothing unless RACACIT_MENU_ARCHIVE names a prepared archive.
+    for entry, offsets in (('func_004C6F6C', (4,)),
+                           ('func_004ADB3C', (8, 4))):
+        sp = func_span(src, entry)
+        if sp and 'racit_publish_menu_keyboard(' not in src[sp[0]:sp[2]]:
+            a, body, end = sp
+            fn = src[a:end]
+            marker = 'void %s(ppu_context* ctx) {\n' % entry
+            assert fn.count(marker) == 1, 'menu frame: original code does not match'
+            calls = ''.join('        racit_publish_menu_keyboard(ctx, %d);\n' % offset
+                            for offset in offsets)
+            fn = fn.replace(marker, marker + calls, 1)
+            src = src[:a] + fn + src[end:]
+            if '#include "menu_keycaps.h"' not in src:
+                i = src.index('\n', src.index('#include')) + 1
+                src = src[:i] + '#include "menu_keycaps.h"\n' + src[i:]
+            changed = True
+
     # 19. Boot straight to PRESS START (game/stubs.cpp racacit_front_end_cards): right
     #     after func_004C8898 hands the Scaleform main menu its startMode (the movie's
     #     SetVariable, name from r30 - 0x7F28), the intro cards' list is emptied.

@@ -80,3 +80,13 @@ RACACIT_GAME_PROFILE=BCUS98124-1.00 PY="$PWD/tools/venv/Scripts/python -I" SKIP_
 This branch builds the existing **BCUS98124 disc 1.00** layout. It also recognizes **BCES00511 disc 1.00** and **BCUS98124 update 1.20**, and stops with an explanation because their ports are not included here. Unknown executables and explicit profile mismatches stop before generation. There is no force option that applies another version's hooks.
 
 This is the identity and preflight prerequisite, not a completed multiple-version port. European-disc generation is proposed separately in [PR #26](https://github.com/HighDrexler/RACiT/pull/26); its fingerprint comes from that proposal and has not been checked against a local PAL dump. Both NA fingerprints were measured on decrypted original executables. Enabling another profile requires its own complete hook/data/SPU mappings, separate generated/build outputs, launcher selection, and runtime/save checks. Keep saves separate until cross-version compatibility has been checked. Do not infer an address offset from a neighbouring function: updates can change function bodies and data layouts.
+
+## Keyboard prompts in the menus
+
+The title screen, main menu and pause menus can show the keyboard keys bound to each button (`RACACIT_BIND_<BUTTON>`, or the default bindings) instead of PlayStation button pictures. This is off unless you prepare a menu archive and point the player at it.
+
+Prepare a separate archive from your own game dump with `python scripts/prepare_menu_keycaps.py ORIGINAL_GLOBAL_CACHED.PSARC PREPARED_GLOBAL_CACHED.PSARC` (the original is `PS3_GAME/USRDIR/packed/game/global_cached.psarc`). The output directory must exist. The tool checks the bundled menu source (`game/menu_keycaps.as`) against its compiled actions (`game/menu_keycaps.actions.bin`), appends those actions to every menu movie that uses the game's `ButtonPrompt` class, leaves the original archive unchanged, and records a receipt beside the prepared file. Running it again verifies and reuses a matching output; a changed input or output needs a fresh output path.
+
+Set `RACACIT_MENU_ARCHIVE` to the prepared file. The player checks its header before booting and redirects only read-only opens of `packed/game/global_cached.psarc` to it. Leave the variable unset to use the original archive; the menu hooks then do nothing.
+
+With no controller attached the menus show keycaps. Once a controller is attached, the last device used decides: a key or mouse press shows keycaps, a controller button or stick shows the button pictures. This decision is separate from the in-game R1/R2 font swap in `game/button_prompts.cpp`, which is unchanged. The menu hooks target BCUS98124 disc 1.00.
