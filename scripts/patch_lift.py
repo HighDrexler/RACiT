@@ -548,6 +548,30 @@ def patch_file(path):
         else:
             print('patch_lift #19: func_004C8898: startMode SetVariable not found once (%d)' % len(hits))
 
+    # 21. Update 1.20's level heap budget in the disc build (game/stubs.cpp
+    #     racacit_u120_level_budget). func_0032C7A4, the level loader, extends the
+    #     level pool so a level gets at least 0x740000 past its image; update 1.20
+    #     (func_0032C800) raised that to 0x820000, and to 0x8A0000 on the five
+    #     space sectors. The two loads of the constant are the anchor, so another
+    #     executable's lift is left alone.
+    sp = func_span(src, 'func_0032C7A4')
+    if sp and 'racacit_u120_level_budget' not in src[sp[0]:sp[2]]:
+        a_, body_, end_ = sp
+        fn = src[a_:end_]
+        two = ('        ctx->gpr[0] = (int64_t)(int32_t)((uint32_t)0x74 << 16);\n'
+               '        ctx->gpr[19] = (int64_t)(int32_t)((uint32_t)0x74 << 16);\n')
+        if fn.count(two) == 1 and fn.count('0x74 << 16') == 2:
+            fn = fn.replace(two,
+                '        { const uint32_t b_ = racacit_u120_level_budget(ctx);   /* racacit: 1.20 level budget (was 0x740000) */\n'
+                '          ctx->gpr[0] = (int64_t)(int32_t)b_; ctx->gpr[19] = (int64_t)(int32_t)b_; }\n', 1)
+            src = src[:a_] + fn + src[end_:]
+            if 'uint32_t racacit_u120_level_budget' not in src:
+                i = src.index('\n', src.index('#include')) + 1
+                src = src[:i] + 'extern "C" uint32_t racacit_u120_level_budget(ppu_context* ctx);\n' + src[i:]
+            changed = True
+        else:
+            print('patch_lift #21: func_0032C7A4: level budget loads not found once; left unchanged')
+
     if (('racacit_jb_push(' in src or 'racacit_longjmp(' in src)
             and 'racacit: guest setjmp' not in src):
         # declarations after the first include

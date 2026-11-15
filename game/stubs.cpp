@@ -1796,3 +1796,20 @@ extern "C" void racacit_snd_play_hook(ppu_context* ctx, int tag)
     }
     __sync_lock_release(&mu);
 }
+
+/* ---------------------------------------------------------------------------
+ * Update 1.20's level heap budget in the disc build (patch_lift step 21).
+ * func_0032C7A4, the level loader, extends the level pool so a level gets at
+ * least a fixed budget past its image: 0x740000 on the disc for every level.
+ * Update 1.20 (func_0032C800) raised it to 0x820000, and to 0x8A0000 on the
+ * five space sectors (levels 3, 6, 10, 15 and 18). The current level is the
+ * read func_00299EB4 makes through the TOC.
+ * -------------------------------------------------------------------------*/
+extern "C" uint32_t racacit_u120_level_budget(ppu_context* ctx)
+{
+    const uint32_t t = vm_read32(ctx->gpr[2] - 0x72C8);
+    switch (vm_read32(vm_read32(t - 0x7FFC))) {
+    case 3: case 6: case 10: case 15: case 18: return 0x8A0000u;
+    default: return 0x820000u;
+    }
+}
