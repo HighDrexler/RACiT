@@ -19882,7 +19882,7 @@ index ad21361..bf55d13 100644
   * refs is rewritten in place with the unique prefix.  The occurrence map
   * remains valid until the next call using the same remap object. */
 diff --git a/libs/video/rsx_vp_decompiler.c b/libs/video/rsx_vp_decompiler.c
-index edd01d6..4a21d1c 100644
+index edd01d6..3cc8ac1 100644
 --- a/libs/video/rsx_vp_decompiler.c
 +++ b/libs/video/rsx_vp_decompiler.c
 @@ -31,6 +31,7 @@
@@ -19893,7 +19893,45 @@ index edd01d6..4a21d1c 100644
  
  /* ---- little-endian word read (RPCS3-capture native order) --------------- */
  static u32 rd_le(const u8* p)
-@@ -132,9 +133,36 @@ static void emit_store(Out* b, const char* dst_fmt, u32 idx, const char* m)
+@@ -66,8 +67,37 @@ u32 rsx_vp_program_size_instrs(const u8* ucode, u32 max_bytes)
+ 
+ /* ---- output appender --------------------------------------------------- */
+ typedef struct { char* p; u32 cap; u32 len; int overflow; } Out;
++/* Apple: no `precise` (SPIR-V NoContraction) in the vertex programs.
++ * SPIRV-Cross, inside MoltenVK, implements it by calling an optnone helper
++ * (spvFAdd/spvFSub/spvFMul) for every add, subtract and multiply -- a median
++ * of 260 calls per vertex program in A Crack in Time -- and those calls were
++ * most of the GPU's frame. The exact dots (vp_dot3/vp_dot4) stay exact
++ * without it on Apple GPUs: the product error is an explicit fma (mad), and
++ * Metal's compiler neither fused p + a*b nor reordered the TwoSum terms in
++ * any math mode (checked on 1M cases where fusing would change the sum,
++ * fast, relaxed and safe). RSX_VP_PRECISE=1 keeps `precise`. */
++static int vp_keep_precise(void)
++{
++#if defined(__APPLE__)
++    static int k = -1;
++    if (k < 0) { const char* e = getenv("RSX_VP_PRECISE"); k = e && *e == '1'; }
++    return k;
++#else
++    return 1;
++#endif
++}
++
+ static void emit(Out* o, const char* s)
+ {
++    if (!vp_keep_precise() && strstr(s, "precise ")) {
++        for (const char* q = s; *q; ) {
++            if (!strncmp(q, "precise ", 8)) { q += 8; continue; }
++            if (o->len + 2 > o->cap) { o->overflow = 1; return; }
++            o->p[o->len++] = *q++;
++        }
++        o->p[o->len] = '\0';
++        return;
++    }
+     u32 n = (u32)strlen(s);
+     if (o->len + n + 1 > o->cap) { o->overflow = 1; return; }
+     memcpy(o->p + o->len, s, n); o->len += n; o->p[o->len] = '\0';
+@@ -132,9 +162,36 @@ static void emit_store(Out* b, const char* dst_fmt, u32 idx, const char* m)
  }
  
  /* ---- flow control -------------------------------------------------------- */
@@ -19931,7 +19969,7 @@ index edd01d6..4a21d1c 100644
  void rsx_vp_set_branch_base(u32 start_slot) { s_vp_branch_base = start_slot; }
  
  /* BRA BRI CAL CLI RET BRB CLB (scalar opcodes). */
-@@ -410,7 +438,7 @@ static int rsx_vp_decompile_impl(
+@@ -410,7 +467,7 @@ static int rsx_vp_decompile_impl(
              case 0x03: snprintf(rhs,sizeof rhs,"(%s)+(%s)",A,C); break;        /* ADD: src0 + src2 */
              case 0x04: snprintf(rhs,sizeof rhs,"vp_mul((%s),(%s))+(%s)",A,B,C); break; /* MAD */
              case 0x05: snprintf(rhs,sizeof rhs,"vp_dot3((%s),(%s))",A,B); break; /* DP3 */
@@ -19940,7 +19978,7 @@ index edd01d6..4a21d1c 100644
              case 0x07: snprintf(rhs,sizeof rhs,"vp_dot4((%s),(%s))",A,B); break; /* DP4 */
              case 0x08: snprintf(rhs,sizeof rhs,"float4(1,(%s).y*(%s).y,(%s).z,(%s).w)",A,B,A,B); break; /* DST */
              case 0x09: snprintf(rhs,sizeof rhs,"min((%s),(%s))",A,B); break;   /* MIN */
-@@ -457,7 +485,7 @@ static int rsx_vp_decompile_impl(
+@@ -457,7 +514,7 @@ static int rsx_vp_decompile_impl(
              if (handled) {
                  char m[6]; mask_str(vmx,vmy,vmz,vmw,m);
                  char line[600];
@@ -19949,7 +19987,7 @@ index edd01d6..4a21d1c 100644
                           rhs, saturate ? " _v = saturate(_v);" : "");
                  emit(&b, line);
                  if (vec_result && dst_out != 0x1F)
-@@ -501,9 +529,22 @@ static int rsx_vp_decompile_impl(
+@@ -501,9 +558,22 @@ static int rsx_vp_decompile_impl(
                           "        if (%s) { if (_csp > 0) { _csp--; _pc = _cs[_csp]; } else _pc = -1; } else _pc = %d;\n",
                           c, next);
              else {                                         /* BRB/CLB: boolean-register branches */
@@ -19975,7 +20013,7 @@ index edd01d6..4a21d1c 100644
              }
          }
          /* ---- scalar ALU (reads SRC2) ---- */
-@@ -535,7 +576,7 @@ static int rsx_vp_decompile_impl(
+@@ -535,7 +605,7 @@ static int rsx_vp_decompile_impl(
              if (rhs[0]) {
                  char m[6]; mask_str(smx,smy,smz,smw,m);
                  char line[600];
@@ -19984,7 +20022,7 @@ index edd01d6..4a21d1c 100644
                           rhs, saturate ? " _v = saturate(_v);" : "");
                  emit(&b, line);
                  /* SCA writes the output register when the VEC unit does not
-@@ -605,11 +646,60 @@ static int rsx_vp_decompile_impl(
+@@ -605,11 +675,60 @@ static int rsx_vp_decompile_impl(
           * text came out NaN, which the FP's NaN guard turned into black. */
          /* Scalar logic per component: glslang's HLSL front end (the Metal
           * path) does not take || on vectors. */
@@ -20048,7 +20086,7 @@ index edd01d6..4a21d1c 100644
  
      for (u32 vtu = 0; vtu < 4; vtu++) {
          if (!((vtex_mask >> vtu) & 1u)) continue;
-@@ -642,7 +732,7 @@ static int rsx_vp_decompile_impl(
+@@ -642,7 +761,7 @@ static int rsx_vp_decompile_impl(
          }
      }
      emit(&o,
@@ -20057,7 +20095,7 @@ index edd01d6..4a21d1c 100644
          "    [unroll] for (int _i=0;_i<32;_i++) r[_i]=(float4)0;\n"
          "    [unroll] for (int _j=0;_j<16;_j++) o[_j]=float4(0,0,0,1);\n"
          "    int4 a0 = (int4)0; int4 a1 = (int4)0;\n"
-@@ -659,7 +749,12 @@ static int rsx_vp_decompile_impl(
+@@ -659,7 +778,12 @@ static int rsx_vp_decompile_impl(
      emit(&o,
          "    VSOutput Out;\n"
          "    float4 _p = o[0];\n"
