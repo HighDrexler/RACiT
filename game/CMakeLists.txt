@@ -228,6 +228,9 @@ endif()
 #   SPU_LS_DIAG=0       -- local-store accesses without the runtime's watch and
 #                          probe hooks (diagnostics; each was a possible call on
 #                          every access, which spills the register file).
+#   SPU_LS_IN_CONTEXT=1 -- (Apple arm64) local-store accesses at ctx->ls_store, so
+#                          an SPU store is visibly not a register-file store
+#                          (spu_context.h); this title creates no raw SPUs.
 #   -O3                 -- the SPU job code is the main thread's critical path
 #                          (it waits on the job chain every frame).
 if(SPU_SOURCES)
@@ -252,6 +255,10 @@ if(SPU_SOURCES)
             endif()
         else()
             set_source_files_properties(${SPU_SOURCES} PROPERTIES COMPILE_OPTIONS "-O2")
+            if(APPLE)
+                set_source_files_properties(${SPU_SOURCES} PROPERTIES
+                    COMPILE_DEFINITIONS "SPU_USE_DISPATCH_MT;SPU_LS_DIAG=0;SPU_LS_IN_CONTEXT=1")
+            endif()
         endif()
     endif()
 endif()

@@ -348,7 +348,13 @@ def main():
                             # SPU registers in C locals where no call sits in a
                             # loop: opt-in (RACACIT_SPU_REGCACHE=1) -- slower
                             # in Tombli, no gain in Galacton.
-                            *(["--reg-cache"] if os.environ.get("RACACIT_SPU_REGCACHE") == "1" else [])],
+                            *(["--reg-cache"] if os.environ.get("RACACIT_SPU_REGCACHE") == "1" else []),
+                            # One float range check per straight-line run of
+                            # float ops (arm64: SPU_FX_BLOCKS in spu_helpers.h;
+                            # other hosts compile the lifted lines unchanged).
+                            *([] if os.environ.get("RACACIT_SPU_FXBLOCKS") == "0" else ["--fx-blocks"]),
+                            # lqd/shufb/stqd to one address as one fused store
+                            *([] if os.environ.get("RACACIT_SPU_STFUSE") == "0" else ["--st-fuse"])],
                            capture_output=True, text=True)
         open(os.path.join(out_raw, name + ".lift.log"), "w").write(r.stdout + r.stderr)
         if r.returncode:
