@@ -1796,3 +1796,45 @@ extern "C" void racacit_snd_play_hook(ppu_context* ctx, int tag)
     }
     __sync_lock_release(&mu);
 }
+
+/* ---------------------------------------------------------------------------
+ * Frame-rate unlock, step 1: the game clock (patch_lift step 23).
+ *
+ * The engine steps by real elapsed time: Clock_Tick (func_0066A424, r3 =
+ * the clock at 0xF70D00) advances its timers by the timebase delta, clamped
+ * to [min_dt, max_dt] (clock+0x04 / +0x08). Every level load (func_0032AD18)
+ * sets min_dt to 1/60 s, so above 60 FPS each frame would still advance
+ * 1/60 s of game time and the game would run fast. The frame end also sleeps
+ * until 0.9 * min_dt has passed (a 66.7 FPS cap in the sync modes gameplay
+ * uses).
+ *
+ * RACACIT_FPS_CAP=<fps> above 60 lowers min_dt to 1/(2*cap) at every tick,
+ * which also undoes the level-load reset and shortens that sleep. Unset or
+ * <= 60, nothing changes. RACACIT_CLOCK_LOG=1 (or a cap) logs game time and
+ * real time against wall time every 5 s: both must stay 1.000.
+ * -------------------------------------------------------------------------*/
+extern "C" void racacit_clock_tick(ppu_context* ctx)
+{
+    static int cap = -1;
+    if (cap < 0) { const char* e = getenv("RACACIT_FPS_CAP"); cap = e ? atoi(e) : 0; }
+    static int log = -1;
+    if (log < 0) log = (cap > 60 || getenv("RACACIT_CLOCK_LOG")) ? 1 : 0;
+    const uint32_t clk = (uint32_t)ctx->gpr[3];
+    if (cap > 60) {
+        const float want = 1.0f / (2.0f * (float)cap);
+        if (racacit_rdf(clk + 0x04u) > want) racacit_wrf(clk + 0x04u, want);
+    }
+    if (!log) return;
+    static unsigned long long w0; static float r0, g0; static uint32_t n0;
+    const unsigned long long w = (unsigned long long)std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    const float r = racacit_rdf(clk + 0x24u), g = racacit_rdf(clk + 0x84u);
+    const uint32_t n = vm_read32(clk + 0xD0u);
+    if (!w0) { w0 = w; r0 = r; g0 = g; n0 = n; return; }
+    if (w - w0 < 5000000ull) return;
+    const double dw = (double)(w - w0) / 1e6;
+    fprintf(stderr, "[clock] 5 s: real %.3f game %.3f (x wall), %.1f ticked frames/s, min_dt %.5f max_dt %.4f mode %u%c",
+            (r - r0) / dw, (g - g0) / dw, (double)(n - n0) / dw, racacit_rdf(clk + 0x04u), racacit_rdf(clk + 0x08u),
+            vm_read32(clk), 10);
+    w0 = w; r0 = r; g0 = g; n0 = n;
+}
