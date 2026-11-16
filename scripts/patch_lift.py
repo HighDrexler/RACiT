@@ -628,6 +628,22 @@ def patch_file(path):
         else:
             print('patch_lift #19: func_004C8898: startMode SetVariable not found once (%d)' % len(hits))
 
+    # 23. Frame-rate unlock, the game clock (game/stubs.cpp racacit_clock_tick;
+    #     docs in its comment): at the head of func_0066A424 (Clock_Tick, r3 =
+    #     the clock), which every level load leaves with a 1/60 s minimum step.
+    #     Does nothing unless RACACIT_FPS_CAP is above 60.
+    sp = func_span(src, 'func_0066A424')
+    if sp and 'racacit_clock_tick' not in src[sp[0]:sp[2]]:
+        a_, body_, end_ = sp
+        if 'ppu_timebase_now()' not in src[body_:end_]:
+            sys.exit('patch_lift #23: func_0066A424 does not read the timebase: not the game clock on this disc. '
+                     'Stopping rather than hooking the wrong function.')
+        src = src[:body_] + '        racacit_clock_tick(ctx);   /* racacit: frame-rate unlock */\n' + src[body_:]
+        if 'void racacit_clock_tick' not in src:
+            i = src.index('\n', src.index('#include')) + 1
+            src = src[:i] + 'extern "C" void racacit_clock_tick(ppu_context* ctx);\n' + src[i:]
+        changed = True
+
     if (('racacit_jb_push(' in src or 'racacit_longjmp(' in src)
             and 'racacit: guest setjmp' not in src):
         # declarations after the first include
