@@ -371,6 +371,13 @@ set(RACACIT_HOT_PPU "")
 if(WIN32 AND NOT MSVC AND EXISTS "${CMAKE_CURRENT_LIST_DIR}/hot_ppu.h")
     set(RACACIT_HOT_PPU "-include;${CMAKE_CURRENT_LIST_DIR}/hot_ppu.h")
 endif()
+# macOS: the same idea through the linker. macos.order lists the functions a
+# profile of the gameplay route sampled (lifted PPU and SPU code and the runtime
+# they call), hottest first; ld64 places them together. Names missing from a
+# build are skipped. Only where code sits changes.
+if(APPLE AND EXISTS "${CMAKE_CURRENT_LIST_DIR}/macos.order")
+    target_link_options(${PROJECT_NAME} PRIVATE "LINKER:-order_file,${CMAKE_CURRENT_LIST_DIR}/macos.order")
+endif()
 if(MSVC)
     set_source_files_properties(${RECOMP_SOURCES} PROPERTIES
         COMPILE_OPTIONS "/w;/bigobj")
