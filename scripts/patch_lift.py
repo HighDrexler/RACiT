@@ -618,6 +618,24 @@ def patch_file(path):
                 src = src[:i] + decl + '\n' + src[i:]
         changed = True
 
+    # 25. Frame-rate unlock, the CPU frame limiter (game/stubs.cpp
+    #     racacit_frame_limit): at the head of func_005C4C00, which waits for a
+    #     1/59.94 s deadline in the states that use it. Above a 60 FPS cap the
+    #     hook runs the same deadline logic at 1/cap and returns; otherwise it
+    #     returns 0 and the original runs.
+    sp = func_span(src, 'func_005C4C00')
+    if sp and 'racacit_frame_limit' not in src[sp[0]:sp[2]]:
+        a_, body_, end_ = sp
+        fn = src[body_:end_]
+        if 'ctx->gpr[2] + -0x5120' not in fn or 'ctx->gpr[30] + -0x7FF8' not in fn or '+ 0x2D8)' not in fn:
+            sys.exit('patch_lift #25: func_005C4C00 does not read the display deadline: not the frame limiter '
+                     'on this disc. Stopping rather than hooking the wrong function.')
+        src = src[:body_] + '        if (racacit_frame_limit(ctx)) return;   /* racacit: frame-rate unlock */\n' + src[body_:]
+        if 'int racacit_frame_limit' not in src:
+            i = src.index('\n', src.index('#include')) + 1
+            src = src[:i] + 'extern "C" int racacit_frame_limit(ppu_context* ctx);\n' + src[i:]
+        changed = True
+
     if (('racacit_jb_push(' in src or 'racacit_longjmp(' in src)
             and 'racacit: guest setjmp' not in src):
         # declarations after the first include

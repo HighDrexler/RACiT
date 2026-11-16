@@ -1885,3 +1885,43 @@ extern "C" void racacit_clock_tick(ppu_context* ctx)
             vm_read32(clk), 10);
     w0 = w; r0 = r; g0 = g; n0 = n;
 }
+
+/* ---------------------------------------------------------------------------
+ * Frame-rate unlock, step 3: the CPU frame limiter func_005C4C00 (1.20
+ * func_005C54A0). It waits until a timebase deadline at display+0x2D8
+ * (display = TOC-0x5120 -> -0x7FF8 on both versions), then advances it by
+ * f1 x display+0x20 (the refresh period, 1/59.94 s), or restarts it from now
+ * if the frame was late; display+0x2E0 keeps the slack. With RACACIT_FPS_CAP
+ * above 60 this replaces it at its head with the same logic at a 1/cap period
+ * (f1 keeps half-rate states at half rate) and a host sleep instead of the
+ * game's 50 us polls. Returns 0 (run the original) otherwise.
+ * -------------------------------------------------------------------------*/
+#include <thread>
+extern "C" uint64_t ppu_timebase_now(void);
+static uint64_t racacit_rd64(uint32_t ea) { return ((uint64_t)vm_read32(ea) << 32) | vm_read32(ea + 4u); }
+static void racacit_wr64(uint32_t ea, uint64_t v) { vm_write32(ea, (uint32_t)(v >> 32)); vm_write32(ea + 4u, (uint32_t)v); }
+extern "C" int racacit_frame_limit(ppu_context* ctx)
+{
+    const int cap = racacit_fps_cap();
+    if (cap <= 60) return 0;
+    const uint32_t disp = vm_read32(vm_read32((uint32_t)ctx->gpr[2] - 0x5120u) - 0x7FF8u);
+    const uint64_t tb_hz = 79800000ull;
+    const uint64_t period = (uint64_t)(ctx->fpr[1] / (double)cap * (double)tb_hz);
+    uint64_t now = ppu_timebase_now();
+    uint64_t dl = racacit_rd64(disp + 0x2D8u);
+    if (now < dl) {
+        racacit_wr64(disp + 0x2E0u, dl - now);
+        while (now < dl) {
+            const uint64_t left_us = (dl - now) * 1000000ull / tb_hz;
+            if (left_us > 200)
+                std::this_thread::sleep_for(std::chrono::microseconds(left_us - 100));
+            now = ppu_timebase_now();
+        }
+        dl += period;
+    } else {
+        racacit_wr64(disp + 0x2E0u, 0);
+        dl = now + period;
+    }
+    racacit_wr64(disp + 0x2D8u, dl);
+    return 1;
+}
