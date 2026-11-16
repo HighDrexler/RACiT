@@ -570,7 +570,7 @@ def patch_file(path):
                 src = src[:i] + 'extern "C" uint32_t racacit_u120_level_budget(ppu_context* ctx);\n' + src[i:]
             changed = True
         else:
-            print('patch_lift #21: func_0032C7A4: level budget loads not found once; left unchanged')
+            sys.exit('patch_lift #21: func_0032C7A4: level budget loads not found once. The function is in this lift but not the code update 1.20\'s port expects (another disc?): stopping rather than building without the fix.')
 
     if (('racacit_jb_push(' in src or 'racacit_longjmp(' in src)
             and 'racacit: guest setjmp' not in src):
