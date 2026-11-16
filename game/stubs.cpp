@@ -1815,6 +1815,52 @@ extern "C" void racacit_snd_play_hook(ppu_context* ctx, int tag)
  * <= 60, nothing changes. RACACIT_CLOCK_LOG=1 (or a cap) logs game time and
  * real time against wall time every 5 s: both must stay 1.000.
  * -------------------------------------------------------------------------*/
+/* Frame-rate unlock: a frame counter at 60 per second of unpaused time for
+ * the code that counts frames as time (docs/design/frame-unlock-audit.md
+ * section 2.A). clock+0xD0 counts ticks with dt != 0; v60 advances by the
+ * unscaled dt (clock+0x44) of each such tick in 1/60 s steps, seeded from
+ * clock+0xD0, so at 60 FPS the two move together. racacit_frame60_at(base)
+ * is that counter when `base` is the game clock and a cap above 60 is set,
+ * otherwise the plain load it replaces. */
+static uint32_t s_f60_clk, s_f60_last, s_f60_v; static float s_f60_acc; static int s_f60_seeded, s_f60_new = 1;
+static int racacit_fps_cap(void) { static int c = -1; if (c < 0) { const char* e = getenv("RACACIT_FPS_CAP"); c = e ? atoi(e) : 0; } return c; }
+static void racacit_frame60_tick(uint32_t clk)
+{
+    s_f60_clk = clk;
+    const uint32_t d0 = vm_read32(clk + 0xD0u);
+    if (!s_f60_seeded) { s_f60_v = s_f60_last = d0; s_f60_seeded = 1; return; }
+    if (d0 < s_f60_last) { s_f60_v = s_f60_last = d0; s_f60_acc = 0.0f; return; }   /* Clock_Init reset it (level load): follow */
+    if (d0 == s_f60_last) return;                 /* paused: the real counter did not move either */
+    s_f60_last = d0;
+    s_f60_acc += racacit_rdf(clk + 0x44u);        /* the previous tick's unscaled dt */
+    const uint32_t before = s_f60_v;
+    while (s_f60_acc >= 1.0f / 60.0f) { s_f60_v++; s_f60_acc -= 1.0f / 60.0f; }
+    s_f60_new = s_f60_v != before;
+}
+/* "Every N frames" gates (audit section 2.B): 1 on frames where the 60 Hz
+ * counter advanced, so a gate fires at most once per 1/60 s of game time;
+ * always 1 without a cap above 60. */
+static unsigned long long s_g60_calls, s_g60_pass;
+extern "C" int racacit_new60(void)
+{
+    const int r = racacit_fps_cap() <= 60 || s_f60_new;
+    s_g60_calls++; s_g60_pass += (unsigned)r;
+    return r;
+}
+extern "C" uint32_t racacit_frame60_at(uint32_t base)
+{
+    if (racacit_fps_cap() <= 60 || base != s_f60_clk || !s_f60_seeded) return vm_read32(base + 0xD0u);
+    static unsigned long long n; static unsigned long long t0;
+    if (getenv("RACACIT_CLOCK_LOG")) {
+        n++;
+        const unsigned long long w = (unsigned long long)std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        if (!t0) t0 = w;
+        if (w - t0 >= 5) { fprintf(stderr, "[frame60] v60 %u real %u, %llu reads, gates %llu due / %llu fired in 5 s%c", s_f60_v, vm_read32(base + 0xD0u), n, s_g60_calls, s_g60_pass, 10); t0 = w; n = 0; s_g60_calls = s_g60_pass = 0; }
+    }
+    return s_f60_v;
+}
+
 extern "C" void racacit_clock_tick(ppu_context* ctx)
 {
     static int cap = -1;
@@ -1822,6 +1868,7 @@ extern "C" void racacit_clock_tick(ppu_context* ctx)
     static int log = -1;
     if (log < 0) log = (cap > 60 || getenv("RACACIT_CLOCK_LOG")) ? 1 : 0;
     const uint32_t clk = (uint32_t)ctx->gpr[3];
+    racacit_frame60_tick(clk);
     if (cap > 60) {
         const float want = 1.0f / (2.0f * (float)cap);
         if (racacit_rdf(clk + 0x04u) > want) racacit_wrf(clk + 0x04u, want);

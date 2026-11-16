@@ -644,6 +644,60 @@ def patch_file(path):
             src = src[:i] + 'extern "C" void racacit_clock_tick(ppu_context* ctx);\n' + src[i:]
         changed = True
 
+    # 24. Frame-rate unlock: code that counts frames as time (game/stubs.cpp
+    #     racacit_frame60_at / racacit_new60; docs: the stubs comment). In the
+    #     AI/behaviour family below every clock+0xD0 load reads a counter at
+    #     60 per second of unpaused time, and the "every N frames" gates fire
+    #     at most once per 1/60 s. Both are the original behaviour unless
+    #     RACACIT_FPS_CAP is above 60. Counts are the disc's; another lift
+    #     whose functions differ stops the build.
+    F60_LOADS = {'func_000106FC': 1, 'func_000119A8': 1, 'func_00012F40': 2, 'func_00016B6C': 2,
+                 'func_00016F14': 1, 'func_00018E54': 1, 'func_000190C0': 1, 'func_00019160': 3,
+                 'func_0001BFD8': 15, 'func_0001F694': 1, 'func_0001FD68': 1, 'func_0001FE0C': 1,
+                 'func_0001FF64': 2, 'func_00020DCC': 2, 'func_00022798': 1, 'func_00023DE4': 2}
+    G60_GATES = {'func_00023DE4': 2, 'func_00022798': 1, 'func_00012F40': 2, 'func_00019160': 2,
+                 'func_00018E54': 1, 'func_00016B6C': 2, 'func_00016F14': 1, 'func_0001BFD8': 1,
+                 'func_000BC018': 1, 'func_00148DA4': 1, 'func_0010DDB8': 1, 'func_00169EDC': 1,
+                 'func_002B7828': 1, 'func_002B9B88': 1, 'func_002BF4F0': 1, 'func_00384858': 1,
+                 'func_00385E78': 1, 'func_004735E8': 1, 'func_0046DB90': 1}
+    f60_load = re.compile(r'vm_read32\(ctx->gpr\[(\d+)\] \+ 0xD0\)')
+    f60_any = re.compile(r'(?:vm_read32\(ctx->gpr\[\d+\] \+ 0xD0\)|racacit_frame60_at\(\(uint32_t\)ctx->gpr\[\d+\]\))')
+    f60_br = re.compile(r'^\s*if \(\(!\(\(ctx->cr >> \d+\) & 2\)\)\) goto loc_[0-9A-F]+;$')
+    for fname in sorted(set(F60_LOADS) | set(G60_GATES)):
+        sp = func_span(src, fname)
+        if not sp or 'racacit_new60' in src[sp[0]:sp[2]] or 'racacit_frame60_at' in src[sp[0]:sp[2]]:
+            continue
+        a_, body_, end_ = sp
+        lines = src[a_:end_].split('\n')
+        gates = 0
+        if fname in G60_GATES:
+            for k, ln in enumerate(lines):
+                if not f60_any.search(ln):
+                    continue
+                for j in range(k + 1, min(k + 9, len(lines))):
+                    if not f60_br.match(lines[j]):
+                        continue
+                    between = '\n'.join(lines[k:j])
+                    if '/_b' in between or re.search(r'& 0x[0-9A-F]+\b|ppc_rlwinm', between):
+                        lines[j] = lines[j].replace(') goto ', ' || !racacit_new60()) goto ', 1)
+                        lines[k] = f60_load.sub(lambda m: 'racacit_frame60_at((uint32_t)ctx->gpr[%s])' % m.group(1), lines[k])
+                        gates += 1
+                    break
+            if gates != G60_GATES[fname]:
+                sys.exit('patch_lift #24: %s: %d frame gates, expected %d -- not the disc\'s function' % (fname, gates, G60_GATES[fname]))
+        fn = '\n'.join(lines)
+        if fname in F60_LOADS:
+            n = len(f60_load.findall(fn)) + fn.count('racacit_frame60_at(')
+            if n != F60_LOADS[fname]:
+                sys.exit('patch_lift #24: %s: %d frame-counter loads, expected %d -- not the disc\'s function' % (fname, n, F60_LOADS[fname]))
+            fn = f60_load.sub(lambda m: 'racacit_frame60_at((uint32_t)ctx->gpr[%s])' % m.group(1), fn)
+        src = src[:a_] + fn + src[end_:]
+        for decl in ('extern "C" uint32_t racacit_frame60_at(uint32_t base);', 'extern "C" int racacit_new60(void);'):
+            if decl not in src:
+                i = src.index('\n', src.index('#include')) + 1
+                src = src[:i] + decl + '\n' + src[i:]
+        changed = True
+
     if (('racacit_jb_push(' in src or 'racacit_longjmp(' in src)
             and 'racacit: guest setjmp' not in src):
         # declarations after the first include
