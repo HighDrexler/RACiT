@@ -576,7 +576,7 @@ def patch_file(path):
             src = src[:a_] + fn + src[end_:]
             changed = True
         else:
-            print('patch_lift #20: func_004C3C44: group 1 row 3 default not found once; left unchanged')
+            sys.exit('patch_lift #20: func_004C3C44: group 1 row 3 default not found once. The function is in this lift but not the code update 1.20\'s port expects (another disc?): stopping rather than building without the fix.')
     sp = func_span(src, 'func_004C46FC')
     if sp and 'racacit_u120_part_masks' not in src[sp[0]:sp[2]]:
         a_, body_, end_ = sp
@@ -593,7 +593,7 @@ def patch_file(path):
                 src = src[:i] + 'extern "C" void racacit_u120_part_masks(ppu_context* ctx);\n' + src[i:]
             changed = True
         else:
-            print('patch_lift #20: func_004C46FC: row bound or mask join not found once; left unchanged')
+            sys.exit('patch_lift #20: func_004C46FC: row bound or mask join not found once. The function is in this lift but not the code update 1.20\'s port expects (another disc?): stopping rather than building without the fix.')
 
     if changed:
         open(path, 'w').write(src)
