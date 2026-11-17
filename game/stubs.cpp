@@ -627,15 +627,15 @@ extern "C" uint32_t racacit_movie_update_hook(uint32_t slot, uint32_t playing)
  * <startMode>Cards one by one -- regularCards = insomLogo, sonyPresents,
  * autosaveCard, seizureCard; afterInstallCards = the two logos -- and calls
  * CreateMenu (the PRESS START screen) once cardIndex reaches the list's length
- * or the list is empty. func_004C8898 tells the movie its startMode through
- * the movie's SetVariable (vtable +0x30: r3 movie, r4 name, r5 a GFxValue --
- * type at +0, value at +8 -- r6 1), before Init runs. patch_lift.py calls this
+ * or the list is empty. func_004C8898 (update 1.20: func_004C9018) tells the
+ * movie its startMode through the movie's SetVariable (vtable +0x30: r3 movie,
+ * r4 name, r5 a GFxValue -- type at +0, value at +8 -- r6 1), before Init
+ * runs. patch_lift.py (1.20: versions/BCUS98124-1.20-hooks.json) calls this
  * right after that call returns: for "regular" and "afterInstall" the same
  * SetVariable sets that mode's card list to "" (an AS2 string: length 0), so
  * the menu's first CardController goes straight to CreateMenu. The install
  * mode's cards (the HDD install and subtitle choice) are left alone.
  * -----------------------------------------------------------------------*/
-// Disc-only intro hook begins.
 void func_004C64C8(ppu_context* ctx);
 extern "C" void ps3_indirect_call(ppu_context* ctx);
 extern "C" void vm_write8(uint64_t a, uint8_t v);
@@ -681,7 +681,6 @@ extern "C" void racacit_front_end_cards(ppu_context* ctx)
     fprintf(stderr, "[front-end] startMode %s: %s = \"\" (intro cards skipped, RACACIT_SKIP_INTRO)%s\n",
             mode, nm, ok ? "" : " -- SetVariable said no");
 }
-// Disc-only intro hook ends.
 
 /* ---------------------------------------------------------------------------
  * Every cutscene skippable (RACACIT_ALL_CUTSCENES_SKIPPABLE, default on)

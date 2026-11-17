@@ -83,6 +83,7 @@
 {"function":"006DE268","before_sha256":"fb9a962724f6dea69ab9e88ac2b60bf115895bf5dd767beb971ec593d511d520","after_sha256":"64b14a974325e2f1ca6c485e12368bafbd92e93b6b72ea101b7c7fea2c55ac4a","edits":[[1,0,"        racacit_snd_stop_hook(ctx, 0);   /* racacit: sound stops (DualSense speaker) */\n"]]},
 {"function":"0090B04C","before_sha256":"890964566cad4f72f63ce2d67deabe086dfc52e94ccbfa39cfa9e3712294de84","after_sha256":"e500c786f650cd701fcb5523b143e77d983c5ae7cb3231ff5ca96e8e98a1017a","edits":[[1,0,"        uint32_t _jb=(uint32_t)ctx->gpr[3];\n"],[82,0,"        racacit_longjmp(_jb);\n"]]},
 {"function":"00979A08","before_sha256":"67d697404d75c9a4c63a68496a56759f3918a8a545faad5b964ed23bdd19353d","after_sha256":"f0ac04239cb1c0d513ee524801570fd6c91dfc4b0b9bfa3525918832a8e7e7ab","edits":[[1,0,"        racacit_snd_play_hook(ctx, 3);   /* racacit: sound starts (DualSense routing) */\n"]]},
-{"function":"0099B1F8","before_sha256":"2f08e8b88541da76d3ccd012b614283f66497229739b5d77b0a8f647d3701035","after_sha256":"4b36d1075fa0599b45064b813583879912cd81d6e372cd87cd2c8873b0c56023","edits":[[1,0,"        racacit_stream_pause_hook(ctx);   /* racacit */\n"]]}
+{"function":"0099B1F8","before_sha256":"2f08e8b88541da76d3ccd012b614283f66497229739b5d77b0a8f647d3701035","after_sha256":"4b36d1075fa0599b45064b813583879912cd81d6e372cd87cd2c8873b0c56023","edits":[[1,0,"        racacit_stream_pause_hook(ctx);   /* racacit */\n"]]},
+{"function":"004C9018","before_sha256":"4cffa47a0f6c38ea11f2c26102b7e027729e78c41683f3422f4bd91cc743569b","after_sha256":"f3e92a1b1cea5f964cfbcc60a44df2ea3b9c16b98b21d1a6a65b30df0363edd4","includes":["extern \"C\" void racacit_front_end_cards(ppu_context* ctx);"],"edits":[[450,0,"        racacit_front_end_cards(ctx);   /* racacit */\n"]]}
 ]
 }
