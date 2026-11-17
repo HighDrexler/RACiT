@@ -27506,7 +27506,7 @@ index acbaf12..6ca46a3 100644
  }
  
 diff --git a/runtime/ppu/ppu_loader.cpp b/runtime/ppu/ppu_loader.cpp
-index e73a151..a2a1cdb 100644
+index e73a151..cf2f82d 100644
 --- a/runtime/ppu/ppu_loader.cpp
 +++ b/runtime/ppu/ppu_loader.cpp
 @@ -377,8 +377,9 @@ static void sc_trace(uint64_t num, ppu_context* ctx, uint64_t a3, uint64_t a4,
@@ -27568,15 +27568,15 @@ index e73a151..a2a1cdb 100644
  static uint32_t s_t2_id[SAMP_TIDS2];
  static uint64_t s_t2_guest[SAMP_TIDS2], s_t2_ntdll[SAMP_TIDS2], s_t2_other[SAMP_TIDS2];
 +static uintptr_t s_t2_rip[SAMP_TIDS2];   /* the last non-guest, non-ntdll pc: names a busy host thread */
-+
+ 
+-static void samp_tid2(uint32_t tid, int guest, int ntdll)
 +/* PS3_SAMPLE_STACK=1: per thread, which guest functions (innermost lifted
 + * frame on the stack, so a wait inside a syscall is charged to its caller).
 + * "Thread X is busy" says nothing; "thread X is in func_Y" names the job. */
 +#define SAMP_T2FN 24
 +static uint32_t s_t2_fn[SAMP_TIDS2][SAMP_T2FN];
 +static uint64_t s_t2_fc[SAMP_TIDS2][SAMP_T2FN];
- 
--static void samp_tid2(uint32_t tid, int guest, int ntdll)
++
 +static uintptr_t s_samp_last_rip;
 +static void samp_tid2(uint32_t tid, int guest, int ntdll, uint32_t fn)
  {
@@ -28119,7 +28119,7 @@ index e73a151..a2a1cdb 100644
                    fprintf(stderr, "[GUARD] CLEARED 0x%08X: 0x%08X -> 0\n",
                            s_guard_ea, s_guard_pre);
                    /* The guard fires INSIDE the clearing routine, so the live guest
-@@ -1206,6 +1569,82 @@ static uint32_t g_tls_vaddr = 0, g_tls_filesz = 0, g_tls_memsz = 0;
+@@ -1206,6 +1569,257 @@ static uint32_t g_tls_vaddr = 0, g_tls_filesz = 0, g_tls_memsz = 0;
   * memory and stays on the fast path (spu_raw_is_reg excludes it). */
  #include "../spu/spu_raw.h"
  
@@ -28178,6 +28178,174 @@ index e73a151..a2a1cdb 100644
 +    racacit_ring_note('V', g_active_ctx ? (uint32_t)g_active_ctx->thread_id : 0u, g_active_ctx ? (uint32_t)g_active_ctx->lr : 0u, ea, 0);
 +    if (g_resv_store_active > 0) ppu_resv_break_store(ea);
 +}
++#if defined(PPU_FASTMEM) && defined(__APPLE__) && defined(__aarch64__)
++/* PPU_FASTMEM (ppu_recomp.h): the lifted code's guest loads and stores make no
++ * range test. They go through a second view of the guest arena -- the same
++ * pages, mapped again with mach_vm_remap -- in which everything that is not
++ * ordinary memory is PROT_NONE: the null page [0, lo), [lo + span, 4 GB), and
++ * a guard after it. An access there faults; this handler decodes the faulting
++ * load/store, performs it with vm_read* / vm_write* (exactly what the inline
++ * test's slow path called), writes the loaded value into the destination
++ * register as the raw (unswapped) bytes the instruction would have loaded, and
++ * resumes after it. Stores into SPU-reserved lines are still tested inline
++ * (spu_coh_bitmap_g), so the coherent store path never needs a fault. With
++ * diagnostics on (span 0) the whole view is PROT_NONE and every lifted access
++ * takes the runtime path, as before. Only the lifted translation units ever
++ * see the view's address (ppu_inl_cfg.base); the runtime keeps vm_base. */
++#include <mach/mach.h>
++#include <mach/mach_vm.h>
++#include <sys/ucontext.h>
++static uint8_t* s_fm_view = 0;
++static struct sigaction s_fm_prev[2];
++static volatile long s_fm_faults = 0;
++extern "C" long ppu_fastmem_faults(void) { return s_fm_faults; }
++static uint64_t fm_xreg(const _STRUCT_ARM_THREAD_STATE64* ss, int r, int sp_ok)
++{
++    if (r == 31) return sp_ok ? ss->__sp : 0;
++    if (r == 29) return ss->__fp;
++    if (r == 30) return ss->__lr;
++    return ss->__x[r];
++}
++static void fm_set_xreg(_STRUCT_ARM_THREAD_STATE64* ss, int r, uint64_t v, int sp_ok)
++{
++    if (r == 31) { if (sp_ok) ss->__sp = v; return; }
++    if (r == 29) { ss->__fp = v; return; }
++    if (r == 30) { ss->__lr = v; return; }
++    ss->__x[r] = v;
++}
++static inline uint64_t fm_ext(uint64_t v, int option, int shift)
++{
++    switch (option) {
++    case 2: v = (uint32_t)v; break;                  /* UXTW */
++    case 3: break;                                   /* LSL / UXTX */
++    case 6: v = (uint64_t)(int64_t)(int32_t)v; break; /* SXTW */
++    case 7: break;                                   /* SXTX */
++    default: return ~0ull;                           /* not a load/store index form */
++    }
++    return v << shift;
++}
++/* Returns 1 when the fault was a lifted guest access and has been emulated. */
++static int fm_emulate(void* uc_, uintptr_t far)
++{
++    ucontext_t* uc = (ucontext_t*)uc_;
++    _STRUCT_ARM_THREAD_STATE64* ss = &uc->uc_mcontext->__ss;
++    const uint32_t in = *(const uint32_t*)ss->__pc;
++    /* load/store register: bits 29:27 = 111, bit 25 = 0 for the single-register forms */
++    if (((in >> 27) & 7) != 7 || ((in >> 25) & 1)) return 0;   /* not a single-register load/store */
++    const int size = (in >> 30) & 3, V = (in >> 26) & 1, opc = (in >> 22) & 3;
++    const int rt = in & 31, rn = (in >> 5) & 31;
++    uint64_t ea; int wb = 0; uint64_t wbv = 0;
++    const uint64_t base = fm_xreg(ss, rn, 1);
++    if (((in >> 24) & 3) == 1) {                      /* unsigned 12-bit immediate, scaled */
++        int scale = size; if (V && opc >= 2) scale = 4;
++        ea = base + ((uint64_t)((in >> 10) & 0xFFF) << scale);
++    } else if ((in >> 21) & 1) {                      /* register offset */
++        if (((in >> 10) & 3) != 2) return 0;
++        int scale = size; if (V && opc >= 2) scale = 4;
++        const int rm = (in >> 16) & 31, option = (in >> 13) & 7, S = (in >> 12) & 1;
++        const uint64_t off = fm_ext(fm_xreg(ss, rm, 0), option, S ? scale : 0);
++        if (off == ~0ull) return 0;
++        ea = base + off;
++    } else {                                          /* 9-bit signed immediate: unscaled / post / pre */
++        const int64_t imm9 = (int64_t)((int32_t)(in << 11) >> 23);
++        const int mode = (in >> 10) & 3;
++        if (mode == 2) return 0;                      /* unprivileged forms */
++        if (mode == 0) ea = base + (uint64_t)imm9;
++        else if (mode == 1) { ea = base; wb = 1; wbv = base + (uint64_t)imm9; }   /* post-index */
++        else { ea = base + (uint64_t)imm9; wb = 1; wbv = ea; }                      /* pre-index */
++    }
++    if (ea - (uintptr_t)s_fm_view >= 0x100000000ull + 0x10000ull) return 0;    /* not a view access */
++    if (far < ea || far - ea >= 16) return 0;         /* the decode must explain the fault */
++    const uint32_t g = (uint32_t)(ea - (uintptr_t)s_fm_view);
++    int n; int load; int sext = 0;
++    if (V) {
++        if (opc >= 2 && size == 0) n = 16; else n = 1 << size;
++        load = opc & 1;
++        if (n == 16) return 0;                        /* q registers: the lifted scalar accessors never use them */
++    } else {
++        n = 1 << size;
++        if (opc == 0) load = 0;
++        else if (opc == 1) load = 1;
++        else { if (size == 3) return 0;               /* prefetch */
++               load = 1; sext = opc == 2 ? 64 : 32; }
++    }
++    if (load) {
++        uint64_t v;                                   /* the guest value, as vm_read* returns it */
++        switch (n) { case 1: v = vm_read8(g); break; case 2: v = vm_read16(g); break;
++                     case 4: v = vm_read32(g); break; default: v = vm_read64(g); break; }
++        uint64_t raw;                                 /* the bytes as the host load would have seen them */
++        switch (n) { case 1: raw = v; break; case 2: raw = __builtin_bswap16((uint16_t)v); break;
++                     case 4: raw = __builtin_bswap32((uint32_t)v); break; default: raw = __builtin_bswap64(v); break; }
++        if (V) {
++            memset(&uc->uc_mcontext->__ns.__v[rt], 0, 16);
++            memcpy(&uc->uc_mcontext->__ns.__v[rt], &raw, (size_t)n);
++        } else {
++            if (sext) {
++                int64_t s = n == 1 ? (int64_t)(int8_t)raw : n == 2 ? (int64_t)(int16_t)raw : (int64_t)(int32_t)raw;
++                raw = sext == 32 ? (uint64_t)(uint32_t)s : (uint64_t)s;
++            }
++            fm_set_xreg(ss, rt, raw, 0);
++        }
++    } else {
++        uint64_t raw = 0;
++        if (V) memcpy(&raw, &uc->uc_mcontext->__ns.__v[rt], (size_t)n);
++        else raw = fm_xreg(ss, rt, 0);
++        switch (n) { case 1: vm_write8(g, (uint8_t)raw); break;
++                     case 2: vm_write16(g, __builtin_bswap16((uint16_t)raw)); break;
++                     case 4: vm_write32(g, __builtin_bswap32((uint32_t)raw)); break;
++                     default: vm_write64(g, __builtin_bswap64(raw)); break; }
++    }
++    if (wb) fm_set_xreg(ss, rn, wbv, 1);
++    ss->__pc += 4;
++    const long nf = __atomic_add_fetch(&s_fm_faults, 1, __ATOMIC_RELAXED);
++    if ((nf & 0x3FFF) == 0 || nf <= 4) fprintf(stderr, "[ppu] fastmem: %ld faults emulated (last guest 0x%08X)\n", nf, g);
++    return 1;
++}
++static void fm_fault(int sig, siginfo_t* si, void* uc)
++{
++    if (s_fm_view && si && fm_emulate(uc, (uintptr_t)si->si_addr)) return;
++    const struct sigaction& prev = s_fm_prev[sig == SIGBUS];
++    if ((prev.sa_flags & SA_SIGINFO) && prev.sa_sigaction) { prev.sa_sigaction(sig, si, uc); return; }
++    if (prev.sa_handler && prev.sa_handler != SIG_DFL && prev.sa_handler != SIG_IGN) { prev.sa_handler(sig); return; }
++    struct sigaction dfl; memset(&dfl, 0, sizeof dfl); dfl.sa_handler = SIG_DFL; sigemptyset(&dfl.sa_mask);
++    sigaction(sig, &dfl, NULL);                       /* re-run the access and die as before */
++}
++/* The view, or NULL: the lifted code makes no range test, so the caller must stop. */
++static uint8_t* ppu_fastmem_view(uint32_t lo, uint64_t span)
++{
++    if (!s_fm_view) {
++        const uint64_t sz = 0x100000000ull, guard = 0x10000ull;
++        void* r = mmap(NULL, (size_t)(sz + guard), PROT_NONE, MAP_PRIVATE | MAP_ANON | MAP_NORESERVE, -1, 0);
++        if (r == MAP_FAILED) return NULL;
++        mach_vm_address_t v = (mach_vm_address_t)(uintptr_t)r; vm_prot_t cur, max;
++        kern_return_t kr = mach_vm_remap(mach_task_self(), &v, sz, 0, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE,
++                                         mach_task_self(), (mach_vm_address_t)(uintptr_t)vm_base, FALSE,
++                                         &cur, &max, VM_INHERIT_NONE);
++        if (kr != KERN_SUCCESS || v != (mach_vm_address_t)(uintptr_t)r) {
++            fprintf(stderr, "[ppu] fastmem: mach_vm_remap failed (%d)\n", kr);
++            munmap(r, (size_t)(sz + guard));
++            return NULL;
++        }
++        struct sigaction sa; memset(&sa, 0, sizeof sa);
++        sa.sa_sigaction = fm_fault; sa.sa_flags = SA_SIGINFO; sigemptyset(&sa.sa_mask);
++        sigaction(SIGSEGV, &sa, &s_fm_prev[0]);
++        sigaction(SIGBUS, &sa, &s_fm_prev[1]);
++        s_fm_view = (uint8_t*)r;
++    }
++    /* ordinary memory is [lo, lo + span); the rest of the view faults (span 0: all of it) */
++    const uint64_t end = span ? (uint64_t)lo + span : 0;
++    int bad = 0;
++    if (span) {
++        bad |= mprotect(s_fm_view, lo, PROT_NONE);
++        bad |= mprotect(s_fm_view + lo, (size_t)span, PROT_READ | PROT_WRITE);
++        if (end < 0x100000000ull) bad |= mprotect(s_fm_view + end, (size_t)(0x100000000ull - end), PROT_NONE);
++    } else bad |= mprotect(s_fm_view, (size_t)0x100000000ull, PROT_NONE);
++    if (bad) { fprintf(stderr, "[ppu] fastmem: mprotect failed\n"); return NULL; }
++    fprintf(stderr, "[ppu] fastmem: guest view %p, faulting outside 0x%08X-0x%08llX\n", (void*)s_fm_view, lo,
++            (unsigned long long)end);
++    return s_fm_view;
++}
++#endif
 +extern "C" void ppu_inl_cfg_refresh(void)
 +{
 +    uint32_t top = (ppu_vm_size && ppu_vm_size < 0xE0000000u) ? ppu_vm_size : 0xE0000000u;   /* SPU_RAW_BASE */
@@ -28187,6 +28355,13 @@ index e73a151..a2a1cdb 100644
 +    ppu_inl_cfg.lo   = 0x10000u;
 +    ppu_inl_cfg.hole = hole;
 +    ppu_inl_cfg.span = (g_vm_diag || !vm_base) ? 0 : (uint64_t)(top - 0x10000u);
++#if defined(PPU_FASTMEM) && defined(__APPLE__) && defined(__aarch64__)
++    {   /* the lifted code makes no range test: it needs the faulting view, or nothing works */
++        uint8_t* v = vm_base ? ppu_fastmem_view(ppu_inl_cfg.lo, ppu_inl_cfg.span) : NULL;
++        if (!v) { fprintf(stderr, "[ppu] fastmem build without a guest view: refusing to run\n"); abort(); }
++        ppu_inl_cfg.base = v;
++    }
++#endif
 +    fprintf(stderr, "[ppu] inline guest-memory window 0x%08X-0x%08X%s (GCM page 0x%08X)%c", ppu_inl_cfg.lo,
 +            (uint32_t)(ppu_inl_cfg.lo + ppu_inl_cfg.span), ppu_inl_cfg.span ? "" : " -- off (diagnostics)", hole, 10);
 +}
@@ -28202,7 +28377,7 @@ index e73a151..a2a1cdb 100644
  static int vm_oob_report(uint32_t a, uint32_t n)
  {
      {
-@@ -1215,7 +1654,7 @@ static int vm_oob_report(uint32_t a, uint32_t n)
+@@ -1215,7 +1829,7 @@ static int vm_oob_report(uint32_t a, uint32_t n)
  #ifdef _WIN32
              /* one-shot backtrace on the first OOB so the lifted caller is known */
              static int bt = 0;
@@ -28211,7 +28386,7 @@ index e73a151..a2a1cdb 100644
                  void* fr[20]; USHORT m = RtlCaptureStackBackTrace(0, 20, fr, NULL);
                  HMODULE self = NULL;
                  GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-@@ -1438,8 +1877,9 @@ static PPU_THREAD_LOCAL int      g_vcall_sp = 0;
+@@ -1438,8 +2052,9 @@ static PPU_THREAD_LOCAL int      g_vcall_sp = 0;
   * them, until SPU code runs) it is the plain memcpy it replaced. */
  #define VM_WRITE_COH(a, src, n)                                               \
      do {                                                                      \
@@ -28222,7 +28397,7 @@ index e73a151..a2a1cdb 100644
              memcpy(vm_base + (uint32_t)(a), (src), (n));                      \
              spu_coh_notify_write((uint32_t)(a));                              \
              spu_lockline_unlock();                                            \
-@@ -1476,6 +1916,9 @@ static inline void ppu_rwatch_hit(uint32_t a, int width, void* ra)
+@@ -1476,6 +2091,9 @@ static inline void ppu_rwatch_hit(uint32_t a, int width, void* ra)
          }
          fprintf(stderr, "[rwatch] n=%lu read%d 0x%08X = 0x%X guest-fn=0x%08X\n",
                  rn, width, a, v, ppu_prof_resolve_host(ra));
@@ -28232,7 +28407,7 @@ index e73a151..a2a1cdb 100644
      }
      /* ...and the guest call chain on the first hit, as PPU_WWATCH does. The
       * sampled guest-fn is a HOST return address that identical code folding
-@@ -1515,9 +1958,12 @@ static inline void ppu_null_read_report(uint32_t a, int width, void* ra)
+@@ -1515,9 +2133,12 @@ static inline void ppu_null_read_report(uint32_t a, int width, void* ra)
              width * 8, a, a, ppu_prof_resolve_host(ra),
              s_n == 16 ? "  [further NULL reads not reported]" : "");
      fflush(stderr);
@@ -28246,7 +28421,7 @@ index e73a151..a2a1cdb 100644
      if ((uint32_t)a < 0x10000u) ppu_null_read_report((uint32_t)a, 1, __builtin_return_address(0));
  #ifdef VM_SAMPLE_READS
      { static uint64_t c=0; if ((++c % 2000000ull)==0) fprintf(stderr, "[sample] read8  0x%08X ra0=%p ra1=%p\n", (uint32_t)a, __builtin_return_address(0), __builtin_return_address(1)); }
-@@ -1553,11 +1999,30 @@ uint8_t  vm_read8 (uint64_t a) { if (vm_oob((uint32_t)a,1)) return 0; vm_hotmap(
+@@ -1553,11 +2174,30 @@ uint8_t  vm_read8 (uint64_t a) { if (vm_oob((uint32_t)a,1)) return 0; vm_hotmap(
            n=0; } }
        else { last=(uint32_t)a; n=0; } }
      return vm_base[(uint32_t)a]; }
@@ -28280,7 +28455,7 @@ index e73a151..a2a1cdb 100644
      if ((uint32_t)a < 0x10000u) ppu_null_read_report((uint32_t)a, 4, __builtin_return_address(0));
      /* Raw SPU problem state: reading the outbound mailbox POPS it, so that one
       * cannot be served out of memory. Everything else in the window the SPU
-@@ -1591,7 +2056,7 @@ uint32_t vm_read32(uint64_t a) { if (vm_oob((uint32_t)a,4)) return 0; ppu_rwatch
+@@ -1591,7 +2231,7 @@ uint32_t vm_read32(uint64_t a) { if (vm_oob((uint32_t)a,4)) return 0; ppu_rwatch
       * consumption; print the ORIGINAL truncating writer we recorded. */
      if (g_pt_val>=0 && g_last_rd_val==(uint32_t)g_pt_val) {
          for (int i=0;i<g_pt_n;i++) if (g_pt_live[i] && g_pt_addr[i]==(uint32_t)a) {
@@ -28289,7 +28464,7 @@ index e73a151..a2a1cdb 100644
                  fprintf(stderr,"[PT-HIT] persistent trunc [0x%08X]=0x%08X\n  TRUNCATED-BY:%s\n  READ-BACK-BY:%s\n",
                          (uint32_t)a,(uint32_t)g_pt_val, g_pt_bt[i], rb); }
              g_pt_live[i]=0; break; } }
-@@ -1611,8 +2076,8 @@ uint32_t vm_read32(uint64_t a) { if (vm_oob((uint32_t)a,4)) return 0; ppu_rwatch
+@@ -1611,8 +2251,8 @@ uint32_t vm_read32(uint64_t a) { if (vm_oob((uint32_t)a,4)) return 0; ppu_rwatch
      /* PPU_RVAL=<hex>: catch where a value is READ FROM memory (its source loc) —
       * the complement to PPU_WVAL, to find the origin of the 0xC708C708 poison. */
      { static int64_t rv=-2; if (rv==-2){ const char* e=getenv("PPU_RVAL"); rv=e?(int64_t)strtoul(e,0,16):-1; }
@@ -28300,7 +28475,7 @@ index e73a151..a2a1cdb 100644
          char ln[820]; int p=snprintf(ln,sizeof ln,"[RVAL] read 0x%08X = 0x%08X guest:",(uint32_t)a,(uint32_t)rv);
          for(int i=0;i<fr && i<10;i++){ uintptr_t tgt=(uintptr_t)bt[i]; uint32_t bg=0; uintptr_t bh=0;
            for(uint64_t k=0;k<function_table_count;k++){ uintptr_t h=(uintptr_t)function_table[k].func; if(h<=tgt&&h>bh){bh=h;bg=function_table[k].addr;} }
-@@ -1651,7 +2116,9 @@ uint32_t vm_read32(uint64_t a) { if (vm_oob((uint32_t)a,4)) return 0; ppu_rwatch
+@@ -1651,7 +2291,9 @@ uint32_t vm_read32(uint64_t a) { if (vm_oob((uint32_t)a,4)) return 0; ppu_rwatch
                    rf = ((uint32_t)c[8]<<24)|((uint32_t)c[9]<<16)|((uint32_t)c[10]<<8)|c[11];
                }
                fprintf(stderr, "[HOTREAD] GCM control spin: put=0x%08X get=0x%08X "
@@ -28311,7 +28486,7 @@ index e73a151..a2a1cdb 100644
            } else fprintf(stderr, "[HOTREAD] spinning on 0x%08X (=0x%08X) guest cia=0x%08X lr=0x%08X\n", (uint32_t)a, __builtin_bswap32(v),
            g_active_ctx?(uint32_t)g_active_ctx->cia:0, g_active_ctx?(uint32_t)g_active_ctx->lr:0); n=0;
  #ifdef _WIN32
-@@ -1670,7 +2137,7 @@ uint32_t vm_read32(uint64_t a) { if (vm_oob((uint32_t)a,4)) return 0; ppu_rwatch
+@@ -1670,7 +2312,7 @@ uint32_t vm_read32(uint64_t a) { if (vm_oob((uint32_t)a,4)) return 0; ppu_rwatch
        } }
        else { last=(uint32_t)a; n=0; } }
      return __builtin_bswap32(v); }
@@ -28320,7 +28495,7 @@ index e73a151..a2a1cdb 100644
      if ((uint32_t)a < 0x10000u) ppu_null_read_report((uint32_t)a, 8, __builtin_return_address(0)); uint64_t v; memcpy(&v, vm_base + (uint32_t)a, 8);
  #ifdef VM_SAMPLE_READS
      { static uint64_t c=0; if ((++c % 2000000ull)==0) fprintf(stderr, "[sample] read64 0x%08X\n", (uint32_t)a); }
-@@ -1689,7 +2156,7 @@ uint64_t vm_read64(uint64_t a) { if (vm_oob((uint32_t)a,8)) return 0; vm_hotmap(
+@@ -1689,7 +2331,7 @@ uint64_t vm_read64(uint64_t a) { if (vm_oob((uint32_t)a,8)) return 0; vm_hotmap(
  #ifdef _WIN32
      { static int64_t r6=-2; if(r6==-2){const char*e=getenv("PPU_RVAL64"); r6=e?(int64_t)strtoul(e,0,16):-1;}
        if(r6>=0){ uint64_t vb=__builtin_bswap64(v);
@@ -28329,7 +28504,7 @@ index e73a151..a2a1cdb 100644
            void* bt[24]; unsigned short fr=RtlCaptureStackBackTrace(0,24,bt,0);
            char ln[820]; int p=snprintf(ln,sizeof ln,"[RVAL64] read64 0x%08X = 0x%016llX guest:",(uint32_t)a,(unsigned long long)vb);
            for(int i=0;i<fr && i<10;i++){ uintptr_t tgt=(uintptr_t)bt[i]; uint32_t bg=0; uintptr_t bh=0;
-@@ -1846,7 +2313,7 @@ static inline void barrier_watch_hit(uint32_t a, uint32_t v, int width, void* ra
+@@ -1846,7 +2488,7 @@ static inline void barrier_watch_hit(uint32_t a, uint32_t v, int width, void* ra
      if (!b) return;
      if (a >= b + 0x40 && a < b + 0xC0) {
          static int _n = 0;
@@ -28338,7 +28513,7 @@ index e73a151..a2a1cdb 100644
              fprintf(stderr, "[sync-write] +0x%02X <- 0x%X (w%d) guest-fn=0x%08X\n",
                      a - b, v, width, ppu_prof_resolve_host(ra));
      }
-@@ -1857,7 +2324,7 @@ extern "C" void ppu_ww_note_atomic(uint32_t ea, uint32_t val, int width, void* r
+@@ -1857,7 +2499,7 @@ extern "C" void ppu_ww_note_atomic(uint32_t ea, uint32_t val, int width, void* r
  {
      barrier_watch_hit(ea, val, width, ra);
  }
@@ -28347,7 +28522,7 @@ index e73a151..a2a1cdb 100644
  #ifdef _WIN32
      /* PT detector: does this byte-write turn its word into the hunted truncated value? */
      { if(g_pt_val==-2){const char*e=getenv("PT"); g_pt_val=e?(int64_t)strtoul(e,0,16):-1;}
-@@ -1867,9 +2334,9 @@ void vm_write8 (uint64_t a, uint8_t  v) { barrier_watch_hit((uint32_t)a, v, 1, _
+@@ -1867,9 +2509,9 @@ void vm_write8 (uint64_t a, uint8_t  v) { barrier_watch_hit((uint32_t)a, v, 1, _
          else if(((uint32_t)a&3)==0 && v!=0) pt_restore(wa); /* MSB byte set non-zero = restored */ } }
  #endif
      VM_WRITE_COH(a, &v, 1); }
@@ -28359,7 +28534,7 @@ index e73a151..a2a1cdb 100644
  #ifdef _WIN32
      /* PT restore: a full-word store of a valid pointer (high byte set) to a
       * previously-truncated slot clears the record (that truncation was transient). */
-@@ -1881,7 +2348,7 @@ void vm_write32(uint64_t a, uint32_t v) { barrier_watch_hit((uint32_t)a, v, 4, _
+@@ -1881,7 +2523,7 @@ void vm_write32(uint64_t a, uint32_t v) { barrier_watch_hit((uint32_t)a, v, 4, _
         * have side effects. The plain store above still happens -- the registers
         * are guest memory and the PPU reads most of them straight back. */
        if (spu_raw_is_reg((uint32_t)a)) spu_raw_reg_store((uint32_t)a, _v, 4); } }
@@ -28368,7 +28543,7 @@ index e73a151..a2a1cdb 100644
      /* PPU_WWATCH covers the 64-bit store too. It did not, which made the watch
       * blind to exactly the code that matters most for it: every bignum and
       * every 64-bit struct field is written with std, so a watch on one would
-@@ -1893,6 +2360,49 @@ void vm_write64(uint64_t a, uint64_t v) {
+@@ -1893,6 +2535,49 @@ void vm_write64(uint64_t a, uint64_t v) {
      v = __builtin_bswap64(v); VM_WRITE_COH(a, &v, 8); }
  }
  
@@ -28418,7 +28593,7 @@ index e73a151..a2a1cdb 100644
  /* ---- malloc allocation tracker (PS3_ALLOCTAG) -------------------------------
   * Records recent guest malloc results {ptr,size,lr,id} in a ring so we can ask,
   * for a garbage object, which allocation it belongs to and where it came from --
-@@ -1968,7 +2478,7 @@ extern "C" void ppu_register_function(uint64_t addr, ppu_fn fn)
+@@ -1968,7 +2653,7 @@ extern "C" void ppu_register_function(uint64_t addr, ppu_fn fn)
          i = (i + 1) & PPU_HASH_MASK;
      }
      static int warned = 0;
@@ -28427,7 +28602,7 @@ index e73a151..a2a1cdb 100644
          fprintf(stderr, "[ppu] function table full (%u/%u) -- raise PPU_HASH_BITS; "
                  "0x%08X dropped\n", g_fn_count, (unsigned)PPU_HASH_SIZE, a);
  }
-@@ -2033,7 +2543,7 @@ extern "C" void ydkj_memmove_0036FA74(ppu_context* ctx)
+@@ -2033,7 +2718,7 @@ extern "C" void ydkj_memmove_0036FA74(ppu_context* ctx)
      if (vm_base && dst <= 0x400240A8u && 0x400240A8u < dst + n) {
          uint32_t soff = 0x400240A8u - dst + src;
          uint32_t sval = __builtin_bswap32(*(volatile uint32_t*)(vm_base + soff));
@@ -28436,7 +28611,7 @@ index e73a151..a2a1cdb 100644
              fprintf(stderr,"[memfix] copy dst=0x%08X src=0x%08X n=0x%X -> 0x400240A8 gets src[0x%08X]=0x%08X\n",
                      dst, src, n, soff, sval);
      }
-@@ -2078,6 +2588,7 @@ static uint32_t ppu_code_hi(void)
+@@ -2078,6 +2763,7 @@ static uint32_t ppu_code_hi(void)
      return hi;
  }
  
@@ -28444,7 +28619,7 @@ index e73a151..a2a1cdb 100644
  extern "C" void ppu_dump_guest_stack(ppu_context* ctx, const char* tag)
  {
      if (!ctx || !vm_base) return;
-@@ -2108,7 +2619,7 @@ extern "C" void ppu_dump_guest_stack(ppu_context* ctx, const char* tag)
+@@ -2108,7 +2794,7 @@ extern "C" void ppu_dump_guest_stack(ppu_context* ctx, const char* tag)
            fprintf(stderr, "%s\n", gr);
        } }
      if (!vm_oob(sp,4)) { char rw[600]; int rp=snprintf(rw,sizeof rw,"      rawstk:");
@@ -28453,7 +28628,7 @@ index e73a151..a2a1cdb 100644
          fprintf(stderr,"%s\n",rw); }
      /* Identify the worker's dispatched method: func_000750A8 vcalls
       * [[arg+0xC]+0] (code) with toc [[arg+0xC]+4]. Dump for the known thread
-@@ -2118,11 +2629,11 @@ extern "C" void ppu_dump_guest_stack(ppu_context* ctx, const char* tag)
+@@ -2118,11 +2804,11 @@ extern "C" void ppu_dump_guest_stack(ppu_context* ctx, const char* tag)
        for (int j=0;j<2;j++){ uint32_t o=args[j];
          if (vm_oob(o+0x10,4)) continue;
          uint32_t vt, code, toc; { uint32_t t;
@@ -28468,7 +28643,7 @@ index e73a151..a2a1cdb 100644
            fprintf(stderr,"      ARG[0x%08X] vtbl=0x%08X -> method code=0x%08X toc=0x%08X (worker body?)\n", o, vt, code, toc); }
        } }
      /* The real frame chain FIRST, then the scan.
-@@ -2141,10 +2652,10 @@ extern "C" void ppu_dump_guest_stack(ppu_context* ctx, const char* tag)
+@@ -2141,10 +2827,10 @@ extern "C" void ppu_dump_guest_stack(ppu_context* ctx, const char* tag)
        uint32_t f = sp;
        for (int d = 0; d < 24 && bp < 820; d++) {
            if (vm_oob(f, 8)) break;
@@ -28481,7 +28656,7 @@ index e73a151..a2a1cdb 100644
            uint32_t ra = __builtin_bswap32(t);
            if (ra >= 0x10000 && ra < ppu_code_hi()) {
                uint32_t bg = 0;
-@@ -2160,7 +2671,7 @@ extern "C" void ppu_dump_guest_stack(ppu_context* ctx, const char* tag)
+@@ -2160,7 +2846,7 @@ extern "C" void ppu_dump_guest_stack(ppu_context* ctx, const char* tag)
      uint32_t last = 0;
      for (int i = 0; i < 700 && gp < 1100; i++) {
          uint32_t a = sp + i*4; if (vm_oob(a,4)) break;
@@ -28490,7 +28665,7 @@ index e73a151..a2a1cdb 100644
          if (w < 0x10000 || w >= ppu_code_hi()) continue;
          uint32_t bg = 0;
          for (uint64_t k = 0; k < function_table_count; k++) { uint32_t aa = function_table[k].addr; if (aa <= w && aa > bg) bg = aa; }
-@@ -2338,8 +2849,13 @@ static void icall_hist(ppu_context* ctx, uint32_t tgt, int phase)
+@@ -2338,8 +3024,13 @@ static void icall_hist(ppu_context* ctx, uint32_t tgt, int phase)
      ReleaseSRWLockExclusive(&lk);
  }
  
@@ -28504,7 +28679,7 @@ index e73a151..a2a1cdb 100644
      static int on = -1;
      if (on < 0) on = getenv("PPU_CSCHECK") ? 1 : 0;
      { static int hg = -1; if (hg < 0) hg = getenv("PS3_ICALL_GATE") ? 1 : 0;
-@@ -2365,6 +2881,14 @@ extern "C" void ps3_indirect_call(ppu_context* ctx)
+@@ -2365,6 +3056,14 @@ extern "C" void ps3_indirect_call(ppu_context* ctx)
      }
  }
  
@@ -28519,7 +28694,7 @@ index e73a151..a2a1cdb 100644
  static void ps3_indirect_call_impl(ppu_context* ctx)
  {
      g_active_ctx = ctx;
-@@ -2385,7 +2909,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
+@@ -2385,7 +3084,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
        if(bc){ unsigned t=(unsigned)ctx->thread_id & 63; g_bc_last[t]=(uint32_t)ctx->ctr; g_bc_cnt[t]++; } }
  #ifdef _WIN32
      { static int64_t tw=-2; if(tw==-2){const char*e=getenv("PPU_TOCWATCH"); tw=e?(int64_t)strtoul(e,0,16):-1;}
@@ -28528,7 +28703,7 @@ index e73a151..a2a1cdb 100644
          char* mb=(char*)GetModuleHandleA(0); void* bt[24]; unsigned short fr=RtlCaptureStackBackTrace(0,24,bt,0);
          char ln[800]; int p=snprintf(ln,sizeof ln,"[TOCWATCH] r2=0x%08X ctr=0x%08X bt:",(uint32_t)ctx->gpr[2],(uint32_t)ctx->ctr);
          for(int i=0;i<fr;i++) p+=snprintf(ln+p,sizeof(ln)-p," %llX",(unsigned long long)((char*)bt[i]-mb));
-@@ -2560,7 +3084,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
+@@ -2560,7 +3259,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
                  uint32_t _c = __builtin_bswap32(*(volatile uint32_t*)(vm_base + _opd));
                  if (_c && (_c & 3) == 0) {
                      static int _n2 = 0;
@@ -28537,7 +28712,7 @@ index e73a151..a2a1cdb 100644
                          fprintf(stderr, "[ppu] OPD-RECOVER: ctr=0 -> dispatching opd[0]=0x%08X\n", _c);
                      addr = _c;
                  }
-@@ -2629,7 +3153,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
+@@ -2629,7 +3328,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
          ppu_fn fn2 = ppu_lookup(toc_reg);
          if (fn2) {
              static int _n = 0;
@@ -28546,7 +28721,7 @@ index e73a151..a2a1cdb 100644
              ctx->gpr[2] = addr;        /* callee TOC = the (TOC) value from the code slot */
              addr = toc_reg; ctx->ctr = toc_reg;
              fn = fn2;
-@@ -2642,7 +3166,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
+@@ -2642,7 +3341,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
          static thread_local int s_depth = 0;
          if (s_depth > 4000) {
              static int warned = 0;
@@ -28555,7 +28730,7 @@ index e73a151..a2a1cdb 100644
                  fprintf(stderr, "[ppu] recursion cap @0x%08X depth=%d -- skipping\n", addr, s_depth);
              return;
          }
-@@ -2669,7 +3193,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
+@@ -2669,7 +3368,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
          /* PPU_RETWATCH=<hex>: catch the first vcall(s) whose RETURN value (r3)
           * equals this, pinning the exact virtual method that produces the poison. */
          { static int64_t rw=-2; if(rw==-2){const char*e=getenv("PPU_RETWATCH"); rw=e?(int64_t)strtoul(e,0,16):-1;}
@@ -28564,7 +28739,7 @@ index e73a151..a2a1cdb 100644
              fprintf(stderr,"[RETWATCH] vcall -> func_%08X returned r3=0x%08X\n", addr, (uint32_t)rw);
  #ifdef _WIN32
              void* bt[16]; unsigned short fr=RtlCaptureStackBackTrace(0,16,bt,0);
-@@ -2709,9 +3233,9 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
+@@ -2709,9 +3408,9 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
            if(_nv && ((tgt & 3u)!=0u || tgt < 0x10000u || tgt >= 0x40000000u)) _invalid = true; }
          if (_invalid) {
              static int _gn = 0;
@@ -28576,7 +28751,7 @@ index e73a151..a2a1cdb 100644
                  char* mb=(char*)GetModuleHandleA(0); void* bt[26]; unsigned short fr=RtlCaptureStackBackTrace(0,26,bt,0);
                  char ln[820]; int p=snprintf(ln,sizeof ln,"      GVBT this=0x%08X r2=0x%08X lr=0x%08X rva:",(uint32_t)ctx->gpr[3],(uint32_t)ctx->gpr[2],(uint32_t)ctx->lr);
                  for(int i=0;i<fr;i++) p+=snprintf(ln+p,sizeof(ln)-p," %llX",(unsigned long long)((char*)bt[i]-mb));
-@@ -2726,10 +3250,24 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
+@@ -2726,10 +3425,24 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
       * Detect a long run of identical unresolved targets and bail so the run
       * stays fast and the log readable. */
      static uint32_t last = 0xFFFFFFFFu; static uint32_t streak = 0;
@@ -28601,7 +28776,7 @@ index e73a151..a2a1cdb 100644
              fprintf(stderr, "[ppu] FATAL: stuck calling 0x%08X (%u times) -- aborting run\n", cur, streak);
              /* The target alone rarely says why. Dump the descriptor the guest
               * dereferenced (r9/r11/r12 are where the ELFv1 idiom keeps it) and
-@@ -2753,7 +3291,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
+@@ -2753,7 +3466,7 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
          }
          return;   /* don't spam the log on a tight retry loop */
      }
@@ -28610,7 +28785,7 @@ index e73a151..a2a1cdb 100644
      fprintf(stderr, "[ppu] unresolved indirect call -> 0x%08X (tid=%llu lr=0x%08X)\n",
              (uint32_t)ctx->ctr, (unsigned long long)ctx->thread_id, (uint32_t)ctx->lr);
      /* With no NID table the very first one of these is the expected outcome
-@@ -2993,16 +3531,16 @@ extern "C" void lv2_syscall(ppu_context* ctx)
+@@ -2993,16 +3706,16 @@ extern "C" void lv2_syscall(ppu_context* ctx)
      /* One-shot: resolve the guest function that makes the flag=100 spin syscall
       * (num=141 r3=0x64), so we can inspect its lifted arg setup (is mode=garbage a
       * lift bug or a real uninit-object field?). */
@@ -28631,7 +28806,7 @@ index e73a151..a2a1cdb 100644
          uintptr_t tgt=(uintptr_t)ra; uint32_t bg=0; uintptr_t bh=0;
          for(uint64_t k=0;k<function_table_count;k++){ uintptr_t h=(uintptr_t)function_table[k].func; if(h<=tgt&&h>bh){bh=h;bg=function_table[k].addr;} }
          fprintf(stderr,"[sc-caller] port_send(port=1) from func_%08X+0x%llX data=0x%08X/0x%08X/0x%08X\n",
-@@ -3061,7 +3599,6 @@ extern "C" void lv2_syscall(ppu_context* ctx)
+@@ -3061,7 +3774,6 @@ extern "C" void lv2_syscall(ppu_context* ctx)
      case 988:     /* sys_tty_write — canonical LV2 number (psdevwiki); some CRTs
                     * use this instead of 403. Same ABI. */
      case 403: {   /* sys_tty_write(s32 ch, cptr buf, u32 len, ptr pwritelen) */
@@ -28639,7 +28814,7 @@ index e73a151..a2a1cdb 100644
          uint32_t buf  = (uint32_t)ctx->gpr[4];
          uint32_t len  = (uint32_t)ctx->gpr[5];
          uint32_t pwl  = (uint32_t)ctx->gpr[6];
-@@ -3125,7 +3662,7 @@ extern "C" void lv2_syscall(ppu_context* ctx)
+@@ -3125,7 +3837,7 @@ extern "C" void lv2_syscall(ppu_context* ctx)
                  bt[bn] = 0;
                  if (strstr(bt, pat)) {
                      static int tn = 0;
@@ -28648,7 +28823,7 @@ index e73a151..a2a1cdb 100644
                          fprintf(stderr, "%c[TTY_BT] \"%.90s\"%c", 10, bt, 10);
                          ppu_log_host_chain("tty-bt");
                      }
-@@ -3144,7 +3681,7 @@ extern "C" void lv2_syscall(ppu_context* ctx)
+@@ -3144,7 +3856,7 @@ extern "C" void lv2_syscall(ppu_context* ctx)
                  strstr(pt, "sentinel") || strstr(pt, "double-deallocate") ||
                  strstr(pt, "out of memory on request")) {
                  static int pc = 0;
@@ -28657,7 +28832,7 @@ index e73a151..a2a1cdb 100644
              }
          }
          /* DIAGNOSTIC (FLOW_PSSGTRACE=1): when the title's tty output carries a
-@@ -3206,13 +3743,29 @@ extern "C" void lv2_syscall(ppu_context* ctx)
+@@ -3206,13 +3918,29 @@ extern "C" void lv2_syscall(ppu_context* ctx)
          if (s_sbp) {
              static ULONGLONG s_acc[1024]={0}; static uint32_t s_cnt[1024]={0}; static ULONGLONG s_win=0;
              uint32_t _a3=(uint32_t)ctx->gpr[3], _a4=(uint32_t)ctx->gpr[4], _a5=(uint32_t)ctx->gpr[5];
@@ -28692,7 +28867,7 @@ index e73a151..a2a1cdb 100644
                  void* ra=__builtin_return_address(0);
                  uintptr_t tgt=(uintptr_t)ra; uint32_t bg=0; uintptr_t bh=0;
                  for(uint64_t k=0;k<function_table_count;k++){ uintptr_t h=(uintptr_t)function_table[k].func; if(h<=tgt&&h>bh){bh=h;bg=function_table[k].addr;} }
-@@ -3223,8 +3776,8 @@ extern "C" void lv2_syscall(ppu_context* ctx)
+@@ -3223,8 +3951,8 @@ extern "C" void lv2_syscall(ppu_context* ctx)
              }
              if (s_win==0) s_win=_t0;
              if (_t0 - s_win >= 2000) {
@@ -28703,7 +28878,7 @@ index e73a151..a2a1cdb 100644
                  for (int n=0;n<1024;n++){s_acc[n]=0;s_cnt[n]=0;} s_win=_t0;
              }
              if (_ok) { sc_trace(num, ctx, _a3, _a4, _a5, 0); return; }
-@@ -3423,7 +3976,7 @@ extern "C" uint32_t ppu_load_elf(const char* path)
+@@ -3423,7 +4151,7 @@ extern "C" uint32_t ppu_load_elf(const char* path)
                            if (memcmp(vm_base + keep_ea, keep, keep_len)) {
                                memcpy(vm_base + keep_ea, keep, keep_len);
                                static int n = 0;
@@ -28712,7 +28887,7 @@ index e73a151..a2a1cdb 100644
                            }
                            Sleep(2);
                        } } };
-@@ -3669,7 +4222,9 @@ extern "C" int ppu_run(uint32_t entry_opd, uint32_t stack_top)
+@@ -3669,7 +4397,9 @@ extern "C" int ppu_run(uint32_t entry_opd, uint32_t stack_top)
       * sys_mutex -- LBP's main + bringup threads both held the GCM lock at once
       * and concurrently-emitted fences vanished (the boot-loading stall). */
      { extern uint64_t ppu_thread_register_main(void);
@@ -28723,7 +28898,7 @@ index e73a151..a2a1cdb 100644
  
      /* PS3 process-entry ABI: the loader hands _start register state the CRT
       * (_initialize) consumes directly:
-@@ -3772,6 +4327,7 @@ extern "C" int ppu_run(uint32_t entry_opd, uint32_t stack_top)
+@@ -3772,6 +4502,7 @@ extern "C" int ppu_run(uint32_t entry_opd, uint32_t stack_top)
      fprintf(stderr, "[ppu] run: code 0x%08X, toc 0x%08X, sp 0x%08X\n", code, toc, stack_top);
      g_active_ctx = &ctx;
      ppu_resv_register(&ctx);   /* main/entry thread: join the reservation set too */
@@ -35139,10 +35314,21 @@ index ac13929..9252321 100644
      print(f"wrote {args.out}: {len(regs)} NID handlers from {nlibs} module(s)")
  
 diff --git a/tools/ppu_lifter.py b/tools/ppu_lifter.py
-index b19e240..e493106 100644
+index b19e240..9b24115 100644
 --- a/tools/ppu_lifter.py
 +++ b/tools/ppu_lifter.py
-@@ -131,6 +131,144 @@ int      ppu_stdcx64(uint64_t addr, uint64_t expected, uint64_t val);
+@@ -72,6 +72,10 @@ FENCE_PREAMBLE = """\
+ HEADER_PREAMBLE = """\
+ /* Auto-generated by ppu_lifter.py -- do not edit by hand. */
+ #pragma once
++/* Lifted guest accesses make no range test: see ppu_loader.cpp, PPU_FASTMEM. */
++#if defined(__APPLE__) && defined(__aarch64__) && !defined(PPU_NO_FASTMEM)
++#define PPU_FASTMEM 1
++#endif
+ #include <stdint.h>
+ 
+ """ + FENCE_PREAMBLE + """
+@@ -131,6 +135,191 @@ int      ppu_stdcx64(uint64_t addr, uint64_t expected, uint64_t val);
  }
  #endif
  
@@ -35173,18 +35359,61 @@ index b19e240..e493106 100644
 +#ifdef __cplusplus
 +}
 +#endif
++/* The same snapshot read through a const array of scalars bound to the same
++ * symbol. C++ never treats an extern const declaration of a *class* type as
++ * constant storage (its definition might have a dynamic initializer), so the
++ * compiler had to assume any guest store -- which may alias anything -- could
++ * change it, and reloaded base, lo and span (through the GOT) at every guest
++ * access. A const array of integers is constant storage: the loads become
++ * invariant, so they are hoisted, CSE'd and rematerialized instead. The values
++ * are the ones ppu_inl_cfg_refresh writes before any lifted code runs, and it
++ * never writes them again; lifted code that ran before it saw span 0 then and
++ * still does. Layout: { base, span, lo | hole << 32 }. PPU_FASTMEM builds only;
++ * other hosts read the struct as before. */
++#if defined(PPU_FASTMEM) && defined(__cplusplus) && (defined(__clang__) || defined(__GNUC__))
++#if defined(__APPLE__)
++extern "C" const uint64_t ppu_inl_cfg_q[3] __asm__("_ppu_inl_cfg");
++#else
++extern "C" const uint64_t ppu_inl_cfg_q[3] __asm__("ppu_inl_cfg");
++#endif
++#define PPU_INL_BASE ((uint8_t*)(uintptr_t)ppu_inl_cfg_q[0])
++#define PPU_INL_SPAN (ppu_inl_cfg_q[1])
++#define PPU_INL_LO   ((uint32_t)ppu_inl_cfg_q[2])
++#define PPU_INL_HOLE ((uint32_t)(ppu_inl_cfg_q[2] >> 32))
++#else
++#define PPU_INL_BASE ppu_inl_cfg.base
++#define PPU_INL_LO   ppu_inl_cfg.lo
++#define PPU_INL_SPAN ppu_inl_cfg.span
++#define PPU_INL_HOLE ppu_inl_cfg.hole
++#endif
 +static inline int ppu_inl_ok(uint32_t ea, uint32_t n)
 +{
-+    if ((uint64_t)(uint32_t)(ea - ppu_inl_cfg.lo) + n > ppu_inl_cfg.span) return 0;
++#if defined(PPU_FASTMEM)
++    (void)n;
++    /* The view faults outside ordinary memory, but the RSX/HLE pages at
++     * 0xE0000000 and up are polled every frame (labels, GCM control), and a
++     * fault costs ~3 us: one compare keeps those on the inline slow path.
++     * A straddling access at the boundary still faults and is emulated. */
++    return ea < 0xE0000000u;
++#else
++    if ((uint64_t)(uint32_t)(ea - PPU_INL_LO) + n > PPU_INL_SPAN) return 0;
 +#if !defined(PPU_INL_NO_HOLE)   /* a port whose ppu_run clips the window at the hole (ppu_inl_clip_hole) */
-+    if ((uint32_t)(ea - ppu_inl_cfg.hole) < 0x1000u) return 0;
++    if ((uint32_t)(ea - PPU_INL_HOLE) < 0x1000u) return 0;
 +#endif
 +    return 1;
++#endif
 +}
++/* PPU_FASTMEM: no spu_coh_armed_g test. The runtime sets a line's bitmap bit and then
++ * spu_coh_armed_g, and never clears the flag, so while it reads 0 the bitmap
++ * is all zero (the one exception, a bit set an instant before the flag, sends
++ * the store to vm_write*, which does the same plain store then). Armed -- all
++ * of gameplay -- the flag test was a load and a branch on every store. */
 +static inline int ppu_inl_wok(uint32_t ea, uint32_t n)
 +{
 +    if (!ppu_inl_ok(ea, n)) return 0;
++#if !defined(PPU_FASTMEM)
 +    if (!spu_coh_armed_g) return 1;
++#endif
 +    const uint32_t l = ea >> 7;
 +    return !((spu_coh_bitmap_g[l >> 3] >> (l & 7)) & 1u);
 +}
@@ -35197,21 +35426,21 @@ index b19e240..e493106 100644
 +typedef uint32_t __attribute__((aligned(1))) ppu_vu32;
 +typedef uint64_t __attribute__((aligned(1))) ppu_vu64;
 +static inline uint8_t ppu_inl_read8(uint64_t a)
-+{ const uint32_t e = (uint32_t)a; if (__builtin_expect(ppu_inl_ok(e, 1), 1)) return *(volatile uint8_t*)(ppu_inl_cfg.base + e); return vm_read8(a); }
++{ const uint32_t e = (uint32_t)a; if (__builtin_expect(ppu_inl_ok(e, 1), 1)) return *(volatile uint8_t*)(PPU_INL_BASE + e); return vm_read8(a); }
 +static inline uint16_t ppu_inl_read16(uint64_t a)
-+{ const uint32_t e = (uint32_t)a; if (__builtin_expect(ppu_inl_ok(e, 2), 1)) { uint16_t v = *(volatile ppu_vu16*)(ppu_inl_cfg.base + e); return __builtin_bswap16(v); } return vm_read16(a); }
++{ const uint32_t e = (uint32_t)a; if (__builtin_expect(ppu_inl_ok(e, 2), 1)) { uint16_t v = *(volatile ppu_vu16*)(PPU_INL_BASE + e); return __builtin_bswap16(v); } return vm_read16(a); }
 +static inline uint32_t ppu_inl_read32(uint64_t a)
-+{ const uint32_t e = (uint32_t)a; if (__builtin_expect(ppu_inl_ok(e, 4), 1)) { uint32_t v = *(volatile ppu_vu32*)(ppu_inl_cfg.base + e); return __builtin_bswap32(v); } return vm_read32(a); }
++{ const uint32_t e = (uint32_t)a; if (__builtin_expect(ppu_inl_ok(e, 4), 1)) { uint32_t v = *(volatile ppu_vu32*)(PPU_INL_BASE + e); return __builtin_bswap32(v); } return vm_read32(a); }
 +static inline uint64_t ppu_inl_read64(uint64_t a)
-+{ const uint32_t e = (uint32_t)a; if (__builtin_expect(ppu_inl_ok(e, 8), 1)) { uint64_t v = *(volatile ppu_vu64*)(ppu_inl_cfg.base + e); return __builtin_bswap64(v); } return vm_read64(a); }
++{ const uint32_t e = (uint32_t)a; if (__builtin_expect(ppu_inl_ok(e, 8), 1)) { uint64_t v = *(volatile ppu_vu64*)(PPU_INL_BASE + e); return __builtin_bswap64(v); } return vm_read64(a); }
 +static inline void ppu_inl_write8(uint64_t a, uint8_t v)
-+{ const uint32_t e = (uint32_t)a; if (__builtin_expect(ppu_inl_wok(e, 1), 1)) { *(volatile uint8_t*)(ppu_inl_cfg.base + e) = v; return; } vm_write8(a, v); }
++{ const uint32_t e = (uint32_t)a; if (__builtin_expect(ppu_inl_wok(e, 1), 1)) { *(volatile uint8_t*)(PPU_INL_BASE + e) = v; return; } vm_write8(a, v); }
 +static inline void ppu_inl_write16(uint64_t a, uint16_t v)
-+{ const uint32_t e = (uint32_t)a; if (__builtin_expect(ppu_inl_wok(e, 2), 1)) { const uint16_t s = __builtin_bswap16(v); *(volatile ppu_vu16*)(ppu_inl_cfg.base + e) = s; return; } vm_write16(a, v); }
++{ const uint32_t e = (uint32_t)a; if (__builtin_expect(ppu_inl_wok(e, 2), 1)) { const uint16_t s = __builtin_bswap16(v); *(volatile ppu_vu16*)(PPU_INL_BASE + e) = s; return; } vm_write16(a, v); }
 +static inline void ppu_inl_write32(uint64_t a, uint32_t v)
-+{ const uint32_t e = (uint32_t)a; if (__builtin_expect(ppu_inl_wok(e, 4), 1)) { const uint32_t s = __builtin_bswap32(v); *(volatile ppu_vu32*)(ppu_inl_cfg.base + e) = s; return; } vm_write32(a, v); }
++{ const uint32_t e = (uint32_t)a; if (__builtin_expect(ppu_inl_wok(e, 4), 1)) { const uint32_t s = __builtin_bswap32(v); *(volatile ppu_vu32*)(PPU_INL_BASE + e) = s; return; } vm_write32(a, v); }
 +static inline void ppu_inl_write64(uint64_t a, uint64_t v)
-+{ const uint32_t e = (uint32_t)a; if (__builtin_expect(ppu_inl_wok(e, 8), 1)) { const uint64_t s = __builtin_bswap64(v); *(volatile ppu_vu64*)(ppu_inl_cfg.base + e) = s; return; } vm_write64(a, v); }
++{ const uint32_t e = (uint32_t)a; if (__builtin_expect(ppu_inl_wok(e, 8), 1)) { const uint64_t s = __builtin_bswap64(v); *(volatile ppu_vu64*)(PPU_INL_BASE + e) = s; return; } vm_write64(a, v); }
 +#define vm_read8   ppu_inl_read8
 +#define vm_read16  ppu_inl_read16
 +#define vm_read32  ppu_inl_read32
@@ -35258,7 +35487,11 @@ index b19e240..e493106 100644
 +}
 +static inline int ppu_line_reserved(uint32_t ea)
 +{
++#if defined(PPU_FASTMEM)
++    /* no spu_coh_armed_g test: see ppu_inl_wok */
++#else
 +    if (!spu_coh_armed_g) return 0;
++#endif
 +    const uint32_t l = ea >> 7;
 +    return (spu_coh_bitmap_g[l >> 3] >> (l & 7)) & 1u;
 +}
@@ -35287,7 +35520,51 @@ index b19e240..e493106 100644
  /* Syscall handler */
  #ifdef __cplusplus
  extern "C"
-@@ -907,7 +1045,9 @@ class PPULifter:
+@@ -216,10 +405,20 @@ static inline double ppu_fp_default_qnan(void)
+ }
+ static inline double ppu_fp_bin(double a, double b, double r)
+ {
++#if defined(PPU_FASTMEM)
++    /* A NaN operand always makes the IEEE result NaN, so a non-NaN result
++     * proves both operands were numbers: one compare on the common path, and
++     * the operand order only matters once the result is known to be NaN. */
++    if (__builtin_expect(r == r, 1)) return r;
++    if (a != a) return ppu_fp_quiet(a);
++    if (b != b) return ppu_fp_quiet(b);
++    return ppu_fp_default_qnan();
++#else
+     if (a != a) return ppu_fp_quiet(a);
+     if (b != b) return ppu_fp_quiet(b);
+     if (r != r) return ppu_fp_default_qnan();
+     return r;
++#endif
+ }
+ static inline double ppu_fadd(double a, double b) { return ppu_fp_bin(a, b, a + b); }
+ static inline double ppu_fsub(double a, double b) { return ppu_fp_bin(a, b, a - b); }
+@@ -229,12 +428,22 @@ static inline double ppu_fdiv(double a, double b) { return ppu_fp_bin(a, b, a /
+  * NaN priority: FRA, FRB, FRC (negations never apply to propagated NaNs). */
+ static inline double ppu_fmadd_core(double a, double c, double b, int neg_b, int neg_res)
+ {
++#if defined(PPU_FASTMEM)
++    /* fma() of a NaN operand is NaN: a number result means none was (see ppu_fp_bin) */
++    double r = fma(a, c, neg_b ? -b : b);
++    if (__builtin_expect(r == r, 1)) return neg_res ? -r : r;
++    if (a != a) return ppu_fp_quiet(a);
++    if (b != b) return ppu_fp_quiet(b);
++    if (c != c) return ppu_fp_quiet(c);
++    return ppu_fp_default_qnan();
++#else
+     if (a != a) return ppu_fp_quiet(a);
+     if (b != b) return ppu_fp_quiet(b);
+     if (c != c) return ppu_fp_quiet(c);
+     double r = fma(a, c, neg_b ? -b : b);
+     if (r != r) return ppu_fp_default_qnan();
+     return neg_res ? -r : r;
++#endif
+ }
+ /* Round-to-single of a NaN keeps the full double payload (quieted). */
+ static inline double ppu_fp_single(double r)
+@@ -907,7 +1116,9 @@ class PPULifter:
      _CR0_SELF_HANDLED = ("stwcx.", "stdcx.")
  
      def _translate(self, insn: Instruction, func: LiftedFunction) -> str:
@@ -35298,7 +35575,7 @@ index b19e240..e493106 100644
          mn = insn.mnemonic
          if (mn.endswith(".") and code and not code.startswith("/*")
                  and mn not in self._CR0_SELF_HANDLED
-@@ -921,6 +1061,42 @@ class PPULifter:
+@@ -921,6 +1132,42 @@ class PPULifter:
                           f"ctx->cr = (ctx->cr & 0x0FFFFFFFu) | (_c << 28); }}")
          return code
  
@@ -35341,7 +35618,7 @@ index b19e240..e493106 100644
      def _translate_op(self, insn: Instruction, func: LiftedFunction) -> str:
          """Translate one Instruction to a C statement string."""
          mn = insn.mnemonic
-@@ -2086,19 +2262,19 @@ class PPULifter:
+@@ -2086,19 +2333,19 @@ class PPULifter:
          if mn == "lwbrx":
              rd, ra, rb = _reg_idx(ops[0]), _reg_idx(ops[1]), _reg_idx(ops[2])
              return (f"{{ uint64_t ea = {_xea(ra,rb)}; "
@@ -35364,7 +35641,7 @@ index b19e240..e493106 100644
                      f"ctx->gpr[{rd}] = raw; }}")
  
          if mn == "ldbrx":
-@@ -2107,14 +2283,14 @@ class PPULifter:
+@@ -2107,14 +2354,14 @@ class PPULifter:
              # as lhbrx above.
              rd, ra, rb = _reg_idx(ops[0]), _reg_idx(ops[1]), _reg_idx(ops[2])
              return (f"{{ uint64_t ea = {_xea(ra,rb)}; "
@@ -35381,7 +35658,7 @@ index b19e240..e493106 100644
  
          # ------- Load algebraic -------
          if mn == "lwax":
-@@ -2151,7 +2327,7 @@ class PPULifter:
+@@ -2151,7 +2398,7 @@ class PPULifter:
              ra = _reg_idx(ops[0])
              rb = _reg_idx(ops[1])
              return (f"{{ uint64_t ea = ({_xea(ra,rb)}) & ~0x7FULL; "
@@ -35390,7 +35667,7 @@ index b19e240..e493106 100644
  
          if mn in ("dcbt", "dcbtst", "dcbf", "dcbst", "dcba", "icbi"):
              return f"/* {mn}: cache hint, no-op */;"
-@@ -2242,14 +2418,14 @@ class PPULifter:
+@@ -2242,14 +2489,14 @@ class PPULifter:
              ra = _reg_idx(ops[1])
              rb = _reg_idx(ops[2])
              return (f"{{ uint64_t ea = ({_xea(ra,rb)}) & ~0xFULL; "
@@ -35407,7 +35684,7 @@ index b19e240..e493106 100644
  
          # Cell unaligned vector loads (CBEA / AltiVec): lvlx loads bytes
          # [EA&15 .. 15] of the aligned quadword left-justified into vD and
-@@ -2287,8 +2463,8 @@ class PPULifter:
+@@ -2287,8 +2534,8 @@ class PPULifter:
              return (f"{{ uint64_t ea = {_xea(ra,rb)}; "
                      f"ea &= ~{size - 1}ULL; "
                      f"memset(&ctx->vr[{vd}], 0, 16); "
@@ -35418,7 +35695,7 @@ index b19e240..e493106 100644
  
          if mn == "stvebx" or mn == "stvehx" or mn == "stvewx":
              vs = int(ops[0][1:]) if ops[0].startswith("v") else _reg_idx(ops[0])
-@@ -2297,7 +2473,7 @@ class PPULifter:
+@@ -2297,7 +2544,7 @@ class PPULifter:
              size = {"stvebx": 1, "stvehx": 2, "stvewx": 4}[mn]
              return (f"{{ uint64_t ea = {_xea(ra,rb)}; "
                      f"ea &= ~{size - 1}ULL; "
@@ -35427,7 +35704,7 @@ index b19e240..e493106 100644
                      f"(const uint8_t*)&ctx->vr[{vs}] + (ea & 15), {size}); }}")
  
          if mn == "lvsl" or mn == "lvsr":
-@@ -2494,7 +2670,7 @@ class PPULifter:
+@@ -2494,7 +2741,7 @@ class PPULifter:
              # stale, so the `b[n]e cr6` after it followed an older compare.
              return (f"{{ uint16_t* a=(uint16_t*)&ctx->vr[{va}]; uint16_t* b=(uint16_t*)&ctx->vr[{vb}]; "
                      f"uint16_t* d=(uint16_t*)&ctx->vr[{vd}]; int t=0; "
@@ -35436,7 +35713,7 @@ index b19e240..e493106 100644
                      + (" uint32_t c6=(t==8?8u:0u)|(t==0?2u:0u); "
                         "ctx->cr=(ctx->cr & ~(0xFu<<4))|(c6<<4);" if mn.endswith(".") else "")
                      + " }")
-@@ -2761,7 +2937,7 @@ class PPULifter:
+@@ -2761,7 +3008,7 @@ class PPULifter:
              # Dot form: CR6 as for vcmpequh. above (8 = all lanes equal, 2 = none).
              return (f"{{ uint8_t* d=(uint8_t*)&ctx->vr[{vd}]; uint8_t* a=(uint8_t*)&ctx->vr[{va}]; "
                      f"uint8_t* b=(uint8_t*)&ctx->vr[{vb}]; int t=0; "
@@ -35445,7 +35722,7 @@ index b19e240..e493106 100644
                      + (" uint32_t c6=(t==16?8u:0u)|(t==0?2u:0u); "
                         "ctx->cr=(ctx->cr & ~(0xFu<<4))|(c6<<4);" if mn.endswith(".") else "")
                      + " }")
-@@ -2783,10 +2959,15 @@ class PPULifter:
+@@ -2783,10 +3030,15 @@ class PPULifter:
                      f"int16_t* b=(int16_t*)&ctx->vr[{vb}]; "
                      f"for(int i=0;i<8;i++){{int32_t r=(int32_t)a[i]+(int32_t)b[i]; d[i]=(int16_t)(r>32767?32767:r<-32768?-32768:r);}} }}")
          if mn == "vadduws":
@@ -35464,7 +35741,7 @@ index b19e240..e493106 100644
  
          # Subtract saturate
          if mn == "vsubsws":
-@@ -2905,18 +3086,18 @@ class PPULifter:
+@@ -2905,18 +3157,18 @@ class PPULifter:
          # (vmaxsw handled above by the generic vmax/vmin loop)
  
          # Integer multiply (odd/even halfword)
@@ -35494,7 +35771,7 @@ index b19e240..e493106 100644
          # vmsumshs / vsumsws -- the two instructions an IDCT is actually built
          # from, and both were emitted as "/* TODO */" no-ops. 32 sites, ALL of
          # them inside ps1_netemu's MDEC decode function (func_000E90B4), so the
-@@ -3023,19 +3204,27 @@ class PPULifter:
+@@ -3023,19 +3275,27 @@ class PPULifter:
          # them as a TODO comment left the narrow step out entirely, so the
          # destination register kept whatever it held.
          if mn == "vpkuhus":
@@ -35530,7 +35807,7 @@ index b19e240..e493106 100644
  
          # Pack unsigned word -> unsigned halfword, modulo (vpkuwum): keep the
          # low half of each word, no clamping. Same narrowing step as vpkuwus
-@@ -3494,6 +3683,10 @@ class PPULifter:
+@@ -3494,6 +3754,10 @@ class PPULifter:
  
          preamble = self._preamble_lines()
          written: list[str] = []
@@ -35541,7 +35818,7 @@ index b19e240..e493106 100644
          chunk_idx = 0
  
          def flush(body_lines: list[str], trailer: list[str] | None = None) -> None:
-@@ -3825,6 +4018,17 @@ def discover_jump_tables(all_insns, read_u32, toc, text_lo, text_hi, func_starts
+@@ -3825,6 +4089,17 @@ def discover_jump_tables(all_insns, read_u32, toc, text_lo, text_hi, func_starts
                              b = [x.strip() for x in w2.operands.split(',')]
                              if not b or b[0] != _mid or w2.mnemonic.startswith(('st', 'lf')):
                                  continue        # stores (std r30,..(r1)) read, not define
