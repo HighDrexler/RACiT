@@ -627,6 +627,12 @@ static DWORD WINAPI frame_clock(LPVOID)
 #if defined(_WIN32) && !defined(__ANDROID__)
                 /* Few CPU threads: the wake event is quick, and every ms spun here is a ms the SPU lanes wait. */
                 s_spin_us = e ? atoll(e) : (racacit_few_cpus() ? 50 : 1000);
+#elif defined(__APPLE__)
+                /* The game keeps ~8 cores busy here; 100 us of spin is enough
+                 * for the wake event to take over and leaves the rest to the
+                 * main thread and the SPU lanes (unlocked A/B: frames >= 20 ms
+                 * 1.07-1.28% -> 0.58-0.66%, 1% low 31-35 -> 42-46). */
+                s_spin_us = e ? atoll(e) : 100;
 #else
                 s_spin_us = e ? atoll(e) : 1000;
 #endif
