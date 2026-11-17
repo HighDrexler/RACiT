@@ -37,7 +37,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # An update of the same title can have a different code and data layout.
 # Check the decrypted executable before any generated source is touched.
-def check_game_profile(elf, selected='auto'):
+def find_game_profile(elf):
     import hashlib, json
     with open(os.path.join(ROOT, 'versions', 'profiles.json'), encoding='utf-8') as f:
         profiles = json.load(f)['profiles']
@@ -46,7 +46,10 @@ def check_game_profile(elf, selected='auto'):
         for block in iter(lambda: f.read(1024 * 1024), b''):
             digest.update(block)
     checksum = digest.hexdigest()
-    actual = next((p for p in profiles if p['elf_sha256'] == checksum), None)
+    return next((p for p in profiles if p['elf_sha256'] == checksum), None), checksum
+
+def check_game_profile(elf, selected='auto'):
+    actual, checksum = find_game_profile(elf)
     if actual is None:
         sys.exit('Unrecognized EBOOT.ELF (SHA-256 ' + checksum + '). No matching game profile; generation stopped.')
     if selected != 'auto' and selected != actual['id']:
@@ -61,6 +64,28 @@ if len(sys.argv) > 1 and sys.argv[1] == '--check-profile':
     check_game_profile(sys.argv[2], sys.argv[3] if len(sys.argv) == 4 else 'auto')
     sys.exit(0)
 RECOMP = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "game", "src", "recomp")
+
+# Hooks at addresses that differ between executables are applied only for a
+# profile whose addresses are known. scripts/pipeline.sh exports the profile it
+# verified; a run on its own checks input/EBOOT.ELF.
+def game_profile_id():
+    selected = os.environ.get('RACACIT_GAME_PROFILE', 'auto')
+    if selected != 'auto':
+        return selected
+    elf = os.path.join(ROOT, 'input', 'EBOOT.ELF')
+    if not os.path.exists(elf):
+        return None
+    actual, _ = find_game_profile(elf)
+    return actual['id'] if actual else None
+
+GAME_PROFILE = game_profile_id()
+
+# The third-person follow camera's update and the rotation it calls with the
+# yaw step, per executable (game/desktop_mouse.cpp).
+FOLLOW_CAMERA = {'BCUS98124-1.00': ('func_000459D4', 'func_00633C34')}
+if GAME_PROFILE not in FOLLOW_CAMERA:
+    print('patch_lift: no follow-camera address for %s; the mouse turns the camera through the right stick'
+          % (GAME_PROFILE or 'an unidentified executable'))
 
 DECLS = '''
 /* racacit: guest setjmp/longjmp support (scripts/patch_lift.py) */
@@ -547,6 +572,45 @@ def patch_file(path):
             changed = True
         else:
             print('patch_lift #19: func_004C8898: startMode SetVariable not found once (%d)' % len(hits))
+
+    # 20. Mouse turning of the follow camera (game/desktop_mouse.cpp). In the
+    #     1.00 lift, f1 before the call at 0x45D68 is the game's yaw step
+    #     ([r31+0x178] * frame time) and f31 before the subtraction at 0x45CBC
+    #     its pitch step. The mouse's angles are added to both; the pitch is held
+    #     in the game's limits (r30 - 0x7F24 / - 0x7F1C) before the game wraps
+    #     it, so a fast swipe cannot jump past a limit. With no mouse motion
+    #     racit_camera_take returns 0 and nothing changes.
+    camera, rotate = FOLLOW_CAMERA.get(GAME_PROFILE, (None, None))
+    sp = func_span(src, camera) if camera else None
+    if sp and 'racit_camera_take' not in src[sp[0]:sp[2]]:
+        a_, body_, end_ = sp
+        fn = src[a_:end_]
+        changes = (
+            ('void %s(ppu_context* ctx) {\n' % camera,
+             'void %s(ppu_context* ctx) {\n'
+             '        double mouse_angles[2];   /* racacit: mouse camera */\n'
+             '        const int mouse_turn = racit_camera_take(mouse_angles);\n' % camera),
+            ('        ctx->lr = 0x00045D6C; %s(ctx); DRAIN_TRAMPOLINE(ctx);\n' % rotate,
+             '        if (mouse_turn) ctx->fpr[1] -= mouse_angles[0];\n'
+             '        ctx->lr = 0x00045D6C; %s(ctx); DRAIN_TRAMPOLINE(ctx);\n' % rotate),
+            ('        ctx->fpr[3] = ppu_fp_single(ppu_fsub(ctx->fpr[31], ctx->fpr[1]));\n',
+             '        if (mouse_turn) {\n'
+             '            uint32_t lb = vm_read32(ctx->gpr[30] + -0x7F24), hb = vm_read32(ctx->gpr[30] + -0x7F1C);\n'
+             '            float lo, hi; memcpy(&lo, &lb, 4); memcpy(&hi, &hb, 4);\n'
+             '            const double pitch = ctx->fpr[31] + mouse_angles[1] - ctx->fpr[1];\n'
+             '            ctx->fpr[31] = fmin(fmax(pitch, (double)lo), (double)hi) + ctx->fpr[1];\n'
+             '        }\n'
+             '        ctx->fpr[3] = ppu_fp_single(ppu_fsub(ctx->fpr[31], ctx->fpr[1]));\n'),
+        )
+        if all(fn.count(old) == 1 for old, _ in changes):
+            for old, new in changes:
+                fn = fn.replace(old, new, 1)
+            src = src[:a_] + fn + src[end_:]
+            i = src.index('\n', src.index('#include')) + 1
+            src = src[:i] + 'extern "C" int racit_camera_take(double* angles);\n' + src[i:]
+            changed = True
+        else:
+            print('patch_lift #20: %s does not match; the mouse stays on the right stick' % camera)
 
     if (('racacit_jb_push(' in src or 'racacit_longjmp(' in src)
             and 'racacit: guest setjmp' not in src):
