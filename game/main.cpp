@@ -319,7 +319,7 @@ static void present_guest_frame(void)
  * (win32_compat's events): without it the walker slept a fixed 4 ms a pass,
  * and every RSX label the guest waited on cost up to 4 ms -- 52 fps in an
  * idle menu, ~40 in play, with every thread mostly waiting. */
-#if defined(_WIN32) || defined(__ANDROID__)
+#if defined(_WIN32) || defined(__ANDROID__) || defined(__APPLE__)
 extern "C" int racacit_few_cpus(void);   /* sys_timer.c */
 static HANDLE s_walker_wake;
 static void walker_wake(void) { if (s_walker_wake) SetEvent(s_walker_wake); }
@@ -570,6 +570,16 @@ static DWORD WINAPI frame_clock(LPVOID)
 #if defined(_WIN32) || defined(__ANDROID__)
     s_walker_wake = CreateEventA(NULL, FALSE, FALSE, NULL);
     g_gcm_wake_walker = walker_wake;
+#elif defined(__APPLE__)
+    /* The same walker as Windows and Android: spin briefly, then the wake
+     * event with a 1 ms poll. The fixed 4 ms sleep a pass it replaces held the
+     * frame-end RSX wait (005CB084, its usleep(100) polls at lr 005CB170) at
+     * ~2.7 ms of every ~16 ms frame once the game ran unlocked: 62 -> 79 FPS
+     * in gameplay, game time still 1.000x wall. RACACIT_WALKER_WAKE=0 keeps
+     * the old fixed sleep. (Tried on 2026-11-14 at ~20 FPS, GPU-bound, where
+     * it could not show.) */
+    { const char* e = getenv("RACACIT_WALKER_WAKE");
+      if (!(e && *e == '0')) { s_walker_wake = CreateEventA(NULL, FALSE, FALSE, NULL); g_gcm_wake_walker = walker_wake; } }
 #endif
 #ifdef _WIN32
     /* PS3_SAMPLE_RSX=1: the sampler profiles this thread only. */
@@ -603,10 +613,13 @@ static DWORD WINAPI frame_clock(LPVOID)
 #if defined(_WIN32) && !defined(__ANDROID__)
         racacit_memlog(rt_now_us());
 #endif
-#if defined(_WIN32) || defined(__ANDROID__)
+#if defined(_WIN32) || defined(__ANDROID__) || defined(__APPLE__)
         /* Spin (yielding) up to ~1 ms for new FIFO work before sleeping: the
          * guest waits on RSX labels every frame, so every ms between its kick
          * and the walker starting is a ms of its frame time. */
+#ifdef __APPLE__
+        if (!s_walker_wake) Sleep(4); else
+#endif
         if (!cellGcm_fifo_pending()) {
             /* RACACIT_WALKER_SPIN_US: how long (us) to spin before sleeping. */
             static LONGLONG s_spin_us = -1;
