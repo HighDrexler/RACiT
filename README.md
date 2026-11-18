@@ -1,43 +1,36 @@
-<h1 align="center">
-  <img src="assets/readme/racit-wordmark.svg" alt="RACiT" width="420">
-</h1>
+# RACiT for Android
 
-<h3 align="center"><a href="https://discord.gg/p6rypUkvb">Join the discord for updates!</a></h3>
+Ratchet & Clank Future: A Crack in Time, recompiled for 64-bit ARM Android (arm64-v8a, Vulkan).
+This branch is source only. No game data is included, and none ever will be: you need your own
+legally dumped copy of the USA disc (`BCUS98124`).
 
-<p align="center">
-  <img src="assets/readme/Racitim1.jpg" alt="Two armored characters inside a gold circular frame against a green and gold background." width="360">
-</p>
+## Install
 
-## About
+1. Download `RACiT-<version>-arm64.apk` from an Android release on the Releases page (tagged
+   `android-v<version>`), and
+   install it. Android asks you to allow installs from the app you opened it with.
+2. Put your own game folder (the one holding `PS3_GAME`) or its `.iso` on the device's storage
+   (about 25 GB).
+3. Open RACiT, then **Import game**, and **Add EBOOT.elf**: the game's `EBOOT.BIN` decrypted with
+   RPCS3 (Utilities > Decrypt PS3 Binaries).
+4. Pick a graphics preset, run **Shaders > Prepare shaders** once, and play.
 
-RACiT is Recomped A Crack in Time.
+Newer releases install over older ones, and the app checks GitHub for them when it opens.
 
-RACiT is a project to bring **Ratchet & Clank: A Crack in Time** (the greatest game ever made) to Windows and Android through static recompilation. It takes the original PS3 code and converts it to native C/C++, using ps3recomp.
+## Build
 
-The Android target is ARM64. There is also a Linux build for debugging (Android and Linux builds not yet public)
+On Windows, with Git Bash, Python 3.12, and one folder holding `android-ndk-r29`,
+`android-sdk`, `gradle-8.13` and `jdk-17.0.20.1+1`. Put your decrypted `input/EBOOT.ELF` and
+`input/libsre.prx` in place first (see `BUILDING.md`).
 
-## Features
+```bash
+bash scripts/setup_android.sh
+PY="$PWD/tools/venv/Scripts/python -I" SKIP_DESKTOP=1 bash scripts/pipeline.sh
+tools/venv/Scripts/python -I scripts/android_spu_fast.py
+tools/venv/Scripts/python -I scripts/upgrade-vmx-permute.py
+powershell -File scripts/build-android.ps1 -ToolchainsRoot <toolchains folder> -PythonExecutable "$PWD/tools/venv/Scripts/python.exe"
+```
 
-- Vulkan-based RSX renderer
-- DualSense (PS5 controller) speaker and trigger mod integrated
-- General controller support for most windows compatible controllers.
-- Mouse and keyboard controls (bindable in the launcher)
-- Added toggles for enhanced internal resolution and graphics settings
-
-## What you'll need
-
-Game data isn't included. You'll need your own decrypted dump of the **North American disc version (`BCUS98124`)**, including:
- !!A LEGALLY DUMPED VERSION OF RATCHET AND CLANK FUTURE: A CRACK IN TIME (NO ASSESTS ARE OR WILL EVER BE INCLUDED WITH THIS PROJECT)!!
-
-- `EBOOT.ELF`
-- `USRDIR`
-
--  After downloading the launcher, extract and run the .exe, which will take you through the setup process, which is importing your .iso directly or directing the launcher to your PS3GAME folder.
- The game will also check for a decrypted EBOOT.elf, if your dumps .elf is showing as encrypted, the easier way to fix is with RPSC3.
-
-## Current status
-
-This is a work in progress.
-
-RACiT is an unofficial project and is not affiliated with Sony, Insomniac Games, or the game's rights holders.
-Saves are currently not transferable between windows and android. Feature will be added in the future to sync saves between devices
+The APK lands in `artifacts/`. The first build makes its own signing key
+(`android/racit-independent.keystore`, never committed); an APK installs over another only when
+both carry the same key.
