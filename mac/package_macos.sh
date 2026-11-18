@@ -5,6 +5,8 @@
 #     RaCACiT Launcher.app          the launcher (mac/build_launcher.sh)
 #     README.txt                    launcher/README.txt
 #     builds/v<N>/RaCACiT           the game build (game/build/RaCACiTRecomp), version.txt
+#     builds/v<N>-u120/RaCACiT      with --game120: the update 1.20 build, laid out the same; the
+#                                   launcher plays it when the update and its EBOOT.elf are added
 #     builds/v<N>/lib/              its libraries: the Vulkan loader, MoltenVK (+ MoltenVK_icd.json),
 #                                   SDL2 (sdl2-compat) with the SDL3 it loads, glslang, SPIRV-Tools
 #     mods/                         the built-in mods (launcher/mods)
@@ -14,9 +16,10 @@
 # Nothing in it loads from Homebrew: every library is copied in and linked by @rpath. All of
 # it is signed ad hoc (codesign -s -), so Gatekeeper asks once ("Open Anyway").
 #
-# usage: mac/package_macos.sh --version N [--game PATH] [--out DIR] [--no-zip]
+# usage: mac/package_macos.sh --version N [--game PATH] [--game120 PATH] [--out DIR] [--no-zip]
 #   --version N   the game build's number (builds/vN), as the Windows releases count them
 #   --game PATH   the game binary (default game/build/RaCACiTRecomp)
+#   --game120 PATH  the update 1.20 game binary (game/build-u120/RaCACiTRecomp), optional
 #   --out DIR     where the folder and zip go (default out/macos)
 set -e
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -26,18 +29,21 @@ export MACOS_MIN="${MACOS_MIN:-14.0}"
 GAME="$ROOT/game/build/RaCACiTRecomp"
 OUT="$ROOT/out/macos"
 VER=""
+GAME120=""
 ZIP=1
 while [ $# -gt 0 ]; do
     case "$1" in
         --version) VER="$2"; shift 2;;
         --game) GAME="$2"; shift 2;;
+        --game120) GAME120="$2"; shift 2;;
         --out) OUT="$2"; shift 2;;
         --no-zip) ZIP=0; shift;;
-        *) echo "usage: $0 --version N [--game PATH] [--out DIR] [--no-zip]" >&2; exit 2;;
+        *) echo "usage: $0 --version N [--game PATH] [--game120 PATH] [--out DIR] [--no-zip]" >&2; exit 2;;
     esac
 done
 case "$VER" in ''|*[!0-9]*) echo "package_macos.sh: --version N (the build number, builds/vN) is needed" >&2; exit 2;; esac
 [ -f "$GAME" ] || { echo "package_macos.sh: no game binary at $GAME (see BUILDING.md, macOS Apple Silicon build)" >&2; exit 1; }
+[ -z "$GAME120" ] || [ -f "$GAME120" ] || { echo "package_macos.sh: no update 1.20 game binary at $GAME120" >&2; exit 1; }
 . "$ROOT/mac/macos_dylibs.sh"
 
 bash "$ROOT/mac/build_launcher.sh"
@@ -50,17 +56,19 @@ ditto --norsrc --noextattr "$ROOT/launcher/build/RaCACiT Launcher.app" "$REL/RaC
 cp "$ROOT/launcher/README.txt" "$REL/README.txt"
 cp -R "$ROOT/launcher/mods" "$REL/mods"
 
-B="$REL/builds/v$VER"
-cp "$GAME" "$B/RaCACiT"; chmod 755 "$B/RaCACiT"
-echo "$VER" > "$B/version.txt"
-# The game build's own caches, when they sit beside the binary (the launcher seeds data/cache from them).
-for c in shadercache.bin pipelinelist.bin; do [ -f "$(dirname "$GAME")/$c" ] && cp "$(dirname "$GAME")/$c" "$B/"; done
-
-# Libraries: what the game links, plus what it dlopen()s -- the Vulkan loader
-# (PS3RECOMP_VULKAN_LIBRARY), MoltenVK (through its ICD file) and SDL3 (through sdl2-compat).
-bundle_dylibs "$B/RaCACiT" "$B/lib" "@executable_path/lib" \
-    "$LIBS/lib/libvulkan.1.dylib" "$LIBS/lib/libMoltenVK.dylib" "$LIBS/lib/libSDL3.0.dylib=libSDL3.dylib"
-cat > "$B/lib/MoltenVK_icd.json" <<JSON
+# One build folder: the binary, its caches (when they sit beside it) and its own lib/.
+put_build() {   # GAME_BINARY BUILD_DIR
+    local game="$1" B="$2" c
+    mkdir -p "$B/lib"
+    cp "$game" "$B/RaCACiT"; chmod 755 "$B/RaCACiT"
+    echo "$VER" > "$B/version.txt"
+    # The game build's own caches, when they sit beside the binary (the launcher seeds data/cache from them).
+    for c in shadercache.bin pipelinelist.bin; do [ -f "$(dirname "$game")/$c" ] && cp "$(dirname "$game")/$c" "$B/"; done
+    # Libraries: what the game links, plus what it dlopen()s -- the Vulkan loader
+    # (PS3RECOMP_VULKAN_LIBRARY), MoltenVK (through its ICD file) and SDL3 (through sdl2-compat).
+    bundle_dylibs "$B/RaCACiT" "$B/lib" "@executable_path/lib" \
+        "$LIBS/lib/libvulkan.1.dylib" "$LIBS/lib/libMoltenVK.dylib" "$LIBS/lib/libSDL3.0.dylib=libSDL3.dylib"
+    cat > "$B/lib/MoltenVK_icd.json" <<JSON
 {
     "file_format_version": "1.0.0",
     "ICD": {
@@ -70,15 +78,21 @@ cat > "$B/lib/MoltenVK_icd.json" <<JSON
     }
 }
 JSON
-
-codesign --force -s - "$B/lib/"*.dylib
-codesign --force -s - "$B/RaCACiT"
+    codesign --force -s - "$B/lib/"*.dylib
+    codesign --force -s - "$B/RaCACiT"
+}
+BUILDS=("$REL/builds/v$VER")
+put_build "$GAME" "$REL/builds/v$VER"
+if [ -n "$GAME120" ]; then BUILDS+=("$REL/builds/v$VER-u120"); put_build "$GAME120" "$REL/builds/v$VER-u120"; fi
 codesign --force -s - "$REL/RaCACiT Launcher.app/Contents/Frameworks/"*.dylib
 codesign --force -s - "$REL/RaCACiT Launcher.app"
 
 # Check: nothing outside the system and the bundle, every signature good.
 bad=0
-for f in "$B/RaCACiT" "$B/lib/"*.dylib "$REL/RaCACiT Launcher.app/Contents/MacOS/RaCACiT Launcher" "$REL/RaCACiT Launcher.app/Contents/Frameworks/"*.dylib; do
+MACHOS=("$REL/RaCACiT Launcher.app/Contents/MacOS/RaCACiT Launcher" "$REL/RaCACiT Launcher.app/Contents/Frameworks/"*.dylib)
+for B in "${BUILDS[@]}"; do MACHOS+=("$B/RaCACiT" "$B/lib/"*.dylib); done
+for f in "${MACHOS[@]}"; do
+    B="$(dirname "$f")"; [ "$(basename "$B")" = lib ] && B="$(dirname "$B")"
     left="$(foreign_deps "$f")"
     [ -z "$left" ] || { echo "still outside the bundle in $f: $left" >&2; bad=1; }
     for d in $(otool -L "$f" | tail -n +2 | awk '{print $1}' | grep '^@rpath/'); do
@@ -87,13 +101,13 @@ for f in "$B/RaCACiT" "$B/lib/"*.dylib "$REL/RaCACiT Launcher.app/Contents/MacOS
     done
 done
 codesign --verify --strict "$REL/RaCACiT Launcher.app" || bad=1
-codesign --verify --strict "$B/RaCACiT" || bad=1
+for B in "${BUILDS[@]}"; do codesign --verify --strict "$B/RaCACiT" || bad=1; done
 [ $bad = 0 ] || exit 1
 echo "lowest macOS each Mach-O needs (must be <= $MACOS_MIN):"
 _vnum() { echo "$1" | awk -F. '{printf "%d%03d%03d", $1, $2, $3}'; }
-for f in "$B/RaCACiT" "$B/lib/"*.dylib "$REL/RaCACiT Launcher.app/Contents/MacOS/RaCACiT Launcher" "$REL/RaCACiT Launcher.app/Contents/Frameworks/"*.dylib; do
+for f in "${MACHOS[@]}"; do
     m="$(vtool -show-build "$f" 2>/dev/null | awk '/minos/{print $2; exit}')"
-    printf '  %-28s %s\n' "$(basename "$f")" "$m"
+    printf '  %-56s %s\n' "${f#$REL/}" "$m"
     { [ -n "$m" ] && [ "$(_vnum "$m")" -le "$(_vnum "$MACOS_MIN")" ]; } || { echo "$f needs macOS $m, newer than $MACOS_MIN" >&2; bad=1; }
     ! strings "$f" | grep -q '/opt/homebrew' || echo "  (note: $(basename "$f") still mentions /opt/homebrew in a string)"
 done
