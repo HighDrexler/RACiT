@@ -1,0 +1,7 @@
+{
+  "name": "Nexus hello (example code mod)",
+  "version": "1.0",
+  "author": "RACiT",
+  "description": "Logs the main menu appearing, each level change and the game's frame time to log.txt. A small code mod to start from: see docs/MODDING.md.",
+  "code": "nexus_hello.dll"
+}
