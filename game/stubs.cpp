@@ -619,7 +619,8 @@ extern "C" uint32_t racacit_movie_update_hook(uint32_t slot, uint32_t playing)
 }
 
 /* ---------------------------------------------------------------------------
- * Boot straight to PRESS START (RACACIT_SKIP_INTRO=1; off by default)
+ * Boot without the logos (RACACIT_SKIP_INTRO=1) and without PRESS START
+ * (RACACIT_SKIP_PRESS_START=1); both off by default, both in the Settings menu
  *
  * The title's cards (the Insomniac Games and Sony logos, the autosave notice
  * and the seizure warning) are the Scaleform main menu's own ActionScript
@@ -629,57 +630,155 @@ extern "C" uint32_t racacit_movie_update_hook(uint32_t slot, uint32_t playing)
  * CreateMenu (the PRESS START screen) once cardIndex reaches the list's length
  * or the list is empty. func_004C8898 (update 1.20: func_004C9018) tells the
  * movie its startMode through the movie's SetVariable (vtable +0x30: r3 movie,
- * r4 name, r5 a GFxValue -- type at +0, value at +8 -- r6 1), before Init
- * runs. patch_lift.py (1.20: versions/BCUS98124-1.20-hooks.json) calls this
- * right after that call returns: for "regular" and "afterInstall" the same
- * SetVariable sets that mode's card list to "" (an AS2 string: length 0), so
- * the menu's first CardController goes straight to CreateMenu. The install
- * mode's cards (the HDD install and subtitle choice) are left alone.
+ * r4 name, r5 a GFxValue -- type at +0, value at +8 -- r6 1), then invokes the
+ * movie's Init (func_0094EF08: r3 movie, r4 method, r5 argument format).
+ *
+ * racacit_front_end_cards runs right after the startMode SetVariable: for
+ * "regular" and "afterInstall" the same SetVariable sets that mode's card list
+ * to "" (an AS2 string: length 0), so the menu's first CardController goes
+ * straight to CreateMenu. The install mode's cards (the HDD install and
+ * subtitle choice) are left alone.
+ *
+ * racacit_front_end_menu runs right after Init and, with RACACIT_SKIP_PRESS_START=1
+ * as well, skips PRESS START. It does what the movie itself does: it
+ * calls CreateMenu (as CardController would), with introPause 0 so the
+ * CardController never runs, then what the movie's onKeyDown does for START
+ * on that screen -- RemoveTitle, RemoveStartPrompt, tempTimer 10 and tempFunc
+ * "CreateOptions", which MenuController runs ten frames later. No input is
+ * injected, so nothing else sees a START press; the save, profile and options
+ * values the game sets before Init are read by the menu as usual. With the
+ * logos shown, PRESS START stays: the menu would have to be opened after the
+ * CardController's last card, which no hook here sees.
  * -----------------------------------------------------------------------*/
 void func_004C64C8(ppu_context* ctx);
+void func_0094EF08(ppu_context* ctx);
 extern "C" void ps3_indirect_call(ppu_context* ctx);
 extern "C" void vm_write8(uint64_t a, uint8_t v);
 extern "C" PPU_THREAD_LOCAL void (*g_trampoline_fn)(void*);
-extern "C" void racacit_front_end_cards(ppu_context* ctx)
+
+static int front_end_skip_intro(void)
 {
     static int on = -1;
     if (on < 0) { const char* e = getenv("RACACIT_SKIP_INTRO"); on = (e && *e == '1') ? 1 : 0; }   /* off unless chosen: the seizure warning shows */
-    if (!on) return;
-    const uint32_t sp = (uint32_t)ctx->gpr[1], val = sp + 0x90u;
+    return on;
+}
+static uint32_t s_front_end_menu;   /* movie handle whose PRESS START is skipped after Init */
+
+/* The guest context around a call into the movie, and scratch memory for
+ * strings and GFxValues below the guest stack pointer. */
+struct FrontEndCall {
+    uint64_t gpr[32], lr, ctr; double fpr[32]; u128 vr[32]; uint32_t cr, xer, fpscr, vscr;
+    uint32_t buf, used;
+};
+static void front_end_enter(ppu_context* ctx, FrontEndCall& c)
+{
+    memcpy(c.gpr, ctx->gpr, sizeof c.gpr); memcpy(c.fpr, ctx->fpr, sizeof c.fpr); memcpy(c.vr, ctx->vr, sizeof c.vr);
+    c.cr = ctx->cr; c.lr = ctx->lr; c.ctr = ctx->ctr; c.xer = ctx->xer; c.fpscr = ctx->fpscr; c.vscr = ctx->vscr;
+    const uint32_t sp = (uint32_t)ctx->gpr[1];
+    c.buf = (sp - 0x200u) & ~15u; c.used = 0;
+    const uint32_t nsp = (sp - 0x400u) & ~15u;                /* a new frame below the scratch */
+    vm_write32(nsp, 0); vm_write32(nsp + 4, sp);              /* back chain */
+    ctx->gpr[1] = nsp;
+}
+static void front_end_leave(ppu_context* ctx, const FrontEndCall& c)
+{
+    memcpy(ctx->gpr, c.gpr, sizeof c.gpr); memcpy(ctx->fpr, c.fpr, sizeof c.fpr); memcpy(ctx->vr, c.vr, sizeof c.vr);
+    ctx->cr = c.cr; ctx->lr = c.lr; ctx->ctr = c.ctr; ctx->xer = c.xer; ctx->fpscr = c.fpscr; ctx->vscr = c.vscr;
+}
+static uint32_t front_end_str(FrontEndCall& c, const char* s)
+{
+    const uint32_t n = (uint32_t)strlen(s) + 1u, at = c.buf + c.used;
+    memcpy(vm_base + at, s, n);
+    c.used = (c.used + n + 15u) & ~15u;
+    return at;
+}
+static void front_end_drain(ppu_context* ctx)
+{
+    while (g_trampoline_fn) { void (*tf)(void*) = g_trampoline_fn; g_trampoline_fn = 0; tf(ctx); }
+}
+static uint32_t front_end_movie(ppu_context* ctx, uint32_t handle)
+{
+    ctx->gpr[3] = handle;                                     /* as func_004C8898: the movie from its handle */
+    func_004C64C8(ctx);
+    front_end_drain(ctx);
+    return (uint32_t)ctx->gpr[3];
+}
+/* The movie's SetVariable with a GFxValue built from `like` (0x18 bytes, or zero). */
+static int front_end_set(ppu_context* ctx, FrontEndCall& c, uint32_t movie, const char* name,
+                         uint32_t type, uint64_t value, uint32_t like)
+{
+    const uint32_t nm = front_end_str(c, name), val = c.buf + c.used;
+    c.used += 0x20u;
+    for (uint32_t k = 0; k < 0x18u; k += 4) vm_write32(val + k, like ? vm_read32(like + k) : 0u);
+    vm_write32(val, type);
+    if (type == 3u) { vm_write32(val + 8u, (uint32_t)(value >> 32)); vm_write32(val + 12u, (uint32_t)value); }   /* big-endian double */
+    else vm_write32(val + 8u, (uint32_t)value);
+    const uint32_t opd = vm_read32(vm_read32(movie) + 0x30u);  /* SetVariable */
+    ctx->gpr[3] = movie; ctx->gpr[4] = nm; ctx->gpr[5] = val; ctx->gpr[6] = 1;
+    ctx->gpr[2] = vm_read32(opd + 4u);
+    ctx->ctr = vm_read32(opd); ctx->lr = (uint32_t)c.lr;
+    ps3_indirect_call(ctx);
+    front_end_drain(ctx);
+    ctx->gpr[2] = c.gpr[2];
+    return (int)(uint8_t)ctx->gpr[3];
+}
+static int front_end_set_number(ppu_context* ctx, FrontEndCall& c, uint32_t movie, const char* name, double v)
+{
+    uint64_t bits; memcpy(&bits, &v, 8);
+    return front_end_set(ctx, c, movie, name, 3u, bits, 0);   /* GFxValue number */
+}
+/* The movie's Invoke(method, "") through the game's own helper, as Init is called. */
+static void front_end_invoke(ppu_context* ctx, FrontEndCall& c, uint32_t movie, const char* method)
+{
+    const uint32_t m = front_end_str(c, method), fmt = front_end_str(c, "");
+    ctx->gpr[3] = movie; ctx->gpr[4] = m; ctx->gpr[5] = fmt; ctx->lr = (uint32_t)c.lr;
+    func_0094EF08(ctx);
+    front_end_drain(ctx);
+    ctx->gpr[2] = c.gpr[2];
+}
+
+extern "C" void racacit_front_end_cards(ppu_context* ctx)
+{
+    if (!front_end_skip_intro()) return;
+    const uint32_t val = (uint32_t)ctx->gpr[1] + 0x90u;
     if (vm_read32(val) != 4u) return;                         /* not a string: leave it */
     const uint32_t mode_ea = vm_read32(val + 8u);
     char mode[16] = {0};
     for (unsigned i = 0; mode_ea && i + 1 < sizeof mode; i++) { mode[i] = (char)vm_read8(mode_ea + i); if (!mode[i]) break; }
     if (strcmp(mode, "regular") && strcmp(mode, "afterInstall")) return;
 
-    static uint64_t gpr[32], lr, ctr; static double fpr[32]; static u128 vr[32]; static uint32_t cr, xer, fpscr, vscr;
-    memcpy(gpr, ctx->gpr, sizeof gpr); memcpy(fpr, ctx->fpr, sizeof fpr); memcpy(vr, ctx->vr, sizeof vr);
-    cr = ctx->cr; lr = ctx->lr; ctr = ctx->ctr; xer = ctx->xer; fpscr = ctx->fpscr; vscr = ctx->vscr;
-    /* name, empty string and GFxValue below the guest stack pointer, then a new frame below them */
-    const uint32_t buf = (sp - 0x200u) & ~15u, nsp = (sp - 0x400u) & ~15u;
-    const uint32_t name = buf, empty = buf + 0x40u, nval = buf + 0x80u;
+    static FrontEndCall c;
+    front_end_enter(ctx, c);
     char nm[32]; snprintf(nm, sizeof nm, "%sCards", mode);
-    memcpy(vm_base + name, nm, strlen(nm) + 1);
-    vm_write8(empty, 0);
-    for (uint32_t k = 0; k < 0x18u; k += 4) vm_write32(nval + k, vm_read32(val + k));   /* the game's own string GFxValue */
-    vm_write32(nval + 8u, empty);
-    vm_write32(nsp, 0); vm_write32(nsp + 4, sp);              /* back chain */
-    ctx->gpr[1] = nsp;
-    ctx->gpr[3] = ctx->gpr[27];                               /* as func_004C8898: the movie from its handle */
-    func_004C64C8(ctx);
-    while (g_trampoline_fn) { void (*tf)(void*) = g_trampoline_fn; g_trampoline_fn = 0; tf(ctx); }
-    const uint32_t movie = (uint32_t)ctx->gpr[3];
-    const uint32_t opd = vm_read32(vm_read32(movie) + 0x30u);  /* SetVariable */
-    ctx->gpr[3] = movie; ctx->gpr[4] = name; ctx->gpr[5] = nval; ctx->gpr[6] = 1;
-    ctx->gpr[2] = vm_read32(opd + 4u);
-    ctx->ctr = vm_read32(opd); ctx->lr = (uint32_t)lr;
-    ps3_indirect_call(ctx);
-    while (g_trampoline_fn) { void (*tf)(void*) = g_trampoline_fn; g_trampoline_fn = 0; tf(ctx); }
-    const int ok = (int)(uint8_t)ctx->gpr[3];
-    memcpy(ctx->gpr, gpr, sizeof gpr); memcpy(ctx->fpr, fpr, sizeof fpr); memcpy(ctx->vr, vr, sizeof vr);
-    ctx->cr = cr; ctx->lr = lr; ctx->ctr = ctr; ctx->xer = xer; ctx->fpscr = fpscr; ctx->vscr = vscr;
+    const uint32_t empty = front_end_str(c, "");
+    const uint32_t movie = front_end_movie(ctx, (uint32_t)c.gpr[27]);
+    const int ok = front_end_set(ctx, c, movie, nm, 4u, empty, val);   /* the game's own string GFxValue */
+    front_end_leave(ctx, c);
     fprintf(stderr, "[front-end] startMode %s: %s = \"\" (intro cards skipped, RACACIT_SKIP_INTRO)%s\n",
             mode, nm, ok ? "" : " -- SetVariable said no");
+    static int skip_start = -1;
+    if (skip_start < 0) { const char* e = getenv("RACACIT_SKIP_PRESS_START"); skip_start = (e && *e == '1') ? 1 : 0; }
+    s_front_end_menu = (ok && skip_start) ? (uint32_t)c.gpr[27] : 0u;
+}
+
+extern "C" void racacit_front_end_menu(ppu_context* ctx)
+{
+    const uint32_t handle = s_front_end_menu;
+    if (!handle) return;
+    s_front_end_menu = 0;
+    static FrontEndCall c;
+    front_end_enter(ctx, c);
+    const uint32_t movie = front_end_movie(ctx, handle);
+    int ok = front_end_set_number(ctx, c, movie, "introPause", 0.0);   /* no CardController */
+    front_end_invoke(ctx, c, movie, "CreateMenu");
+    /* the movie's onKeyDown for START on the PRESS START screen */
+    front_end_invoke(ctx, c, movie, "RemoveTitle");
+    front_end_invoke(ctx, c, movie, "RemoveStartPrompt");
+    ok &= front_end_set_number(ctx, c, movie, "tempTimer", 10.0);
+    ok &= front_end_set(ctx, c, movie, "tempFunc", 4u, front_end_str(c, "CreateOptions"), 0);
+    front_end_leave(ctx, c);
+    fprintf(stderr, "[front-end] PRESS START skipped: main menu opens (RACACIT_SKIP_PRESS_START)%s\n",
+            ok ? "" : " -- SetVariable said no");
 }
 
 /* ---------------------------------------------------------------------------

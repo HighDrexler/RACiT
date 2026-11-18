@@ -602,9 +602,11 @@ def patch_file(path):
                 src = src[:i] + '#include "menu_keycaps.h"\n' + src[i:]
             changed = True
 
-    # 19. Boot straight to PRESS START (game/stubs.cpp racacit_front_end_cards): right
-    #     after func_004C8898 hands the Scaleform main menu its startMode (the movie's
-    #     SetVariable, name from r30 - 0x7F28), the intro cards' list is emptied.
+    # 19. Boot straight to the main menu (game/stubs.cpp racacit_front_end_cards and
+    #     racacit_front_end_menu): right after func_004C8898 hands the Scaleform main
+    #     menu its startMode (the movie's SetVariable, name from r30 - 0x7F28), the
+    #     intro cards' list is emptied; right after it invokes the movie's Init (the
+    #     function's last call), PRESS START is skipped.
     sp = func_span(src, 'func_004C8898')
     if sp and 'racacit_front_end_cards' not in src[sp[0]:sp[2]]:
         a_, body_, end_ = sp
@@ -627,6 +629,25 @@ def patch_file(path):
             changed = True
         else:
             print('patch_lift #19: func_004C8898: startMode SetVariable not found once (%d)' % len(hits))
+    sp = func_span(src, 'func_004C8898')
+    if sp and 'racacit_front_end_menu' not in src[sp[0]:sp[2]]:
+        a_, body_, end_ = sp
+        fn = src[a_:end_]
+        # The Invoke of "Init" is the last call before the epilogue.
+        init = re.compile(r'        ctx->lr = 0x[0-9A-F]+; func_[0-9A-F]{8}\(ctx\); DRAIN_TRAMPOLINE\(ctx\);\n'
+                          r'        /\* nop \*/;\n'
+                          r'(?=loc_[0-9A-F]{8}:\n        ctx->gpr\[3\] = vm_read64\(ctx->gpr\[1\] \+ 0x140\);\n)')
+        hits = list(init.finditer(fn))
+        if len(hits) == 1:
+            cut = hits[0].end()
+            fn = fn[:cut] + '        racacit_front_end_menu(ctx);   /* racacit */\n' + fn[cut:]
+            src = src[:a_] + fn + src[end_:]
+            if 'void racacit_front_end_menu' not in src:
+                i = src.index('\n', src.index('#include')) + 1
+                src = src[:i] + 'extern "C" void racacit_front_end_menu(ppu_context* ctx);\n' + src[i:]
+            changed = True
+        else:
+            print('patch_lift #19: func_004C8898: Init call not found once (%d)' % len(hits))
 
     if (('racacit_jb_push(' in src or 'racacit_longjmp(' in src)
             and 'racacit: guest setjmp' not in src):
