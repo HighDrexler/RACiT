@@ -16802,10 +16802,10 @@ index cbec250..4359a3b 100644
   * PSO identity should use rsx_fp_structural_hash in buffered mode. */
 diff --git a/libs/video/rsx_host_ui.c b/libs/video/rsx_host_ui.c
 new file mode 100644
-index 0000000..b2a2271
+index 0000000..bcf5e01
 --- /dev/null
 +++ b/libs/video/rsx_host_ui.c
-@@ -0,0 +1,2192 @@
+@@ -0,0 +1,2202 @@
 +/*
 + * ps3recomp - host settings menu and on-screen display. See rsx_host_ui.h.
 + */
@@ -16926,6 +16926,8 @@ index 0000000..b2a2271
 +    o.fps = env_int("RACACIT_FPS", 0) ? 1 : 0;
 +    { const char* v = getenv("RACACIT_DISCORD"); o.discord = !(v && *v == '0'); }
 +    o.skip_clank = env_int("RACACIT_SKIP_CLANK", 0) ? 1 : 0;
++    o.skip_intro = env_int("RACACIT_SKIP_INTRO", 0) ? 1 : 0;
++    o.skip_press_start = env_int("RACACIT_SKIP_PRESS_START", 0) ? 1 : 0;
 +    o.armor_look = clampi(env_int("RACACIT_ARMOR_LOOK", 0), 0, 4);
 +    { const char* v = getenv("RACACIT_DS_SPEAKER"); o.ds_speaker = !(v && *v == '0'); }
 +    o.ds_volume = clampi(env_int("RACACIT_DS_SPK_VOL", 49), 0, 100);
@@ -17015,6 +17017,8 @@ index 0000000..b2a2271
 +    snprintf(kv[k++], 96, "RACACIT_FPS=%d", o->fps);
 +    snprintf(kv[k++], 96, "RACACIT_DISCORD=%d", o->discord);
 +    snprintf(kv[k++], 96, "RACACIT_SKIP_CLANK=%d", o->skip_clank);
++    snprintf(kv[k++], 96, "RACACIT_SKIP_INTRO=%d", o->skip_intro);
++    snprintf(kv[k++], 96, "RACACIT_SKIP_PRESS_START=%d", o->skip_press_start);
 +    snprintf(kv[k++], 96, "RACACIT_ARMOR_LOOK=%d", o->armor_look);
 +    snprintf(kv[k++], 96, "RACACIT_DS_SPEAKER=%d", o->ds_speaker);
 +    snprintf(kv[k++], 96, "RACACIT_DS_SPK_VOL=%d", o->ds_volume);
@@ -17192,7 +17196,7 @@ index 0000000..b2a2271
 +       R_RES, R_ANISO, R_TRI, R_DSSPK, R_DSVOL, R_DSHAP, R_DSHVOL, R_DSRUMBLE, R_DSTRIG, R_DSSWAP,
 +       R_DSLIGHT, R_DSMOTION, R_FPS, R_DISCORD, R_SKIPCLANK, R_RESUME, R_QUIT,
 +       R_PRESET, R_TEXQ, R_PACE, R_CPU, R_KBM, R_MSENS, R_MINV, R_DSTRIGSTR, R_TROPHIES,
-+       R_FOV, R_CAMDIST };
++       R_FOV, R_CAMDIST, R_SKIPINTRO, R_SKIPSTART };
 +typedef struct { int kind, id; const char* label; } ui_row;
 +/* Three pages: General; Graphics -- every option that changes how the game
 + * is drawn, for fitting it to a slower PC (each scales detail only: the
@@ -17209,6 +17213,8 @@ index 0000000..b2a2271
 +    { K_HEAD, 0, "Other" },
 +    { K_OPT, R_FPS,     "FPS counter" },
 +    { K_OPT, R_DISCORD, "Discord status" },
++    { K_OPT, R_SKIPINTRO, "Logos and notices at boot" },
++    { K_OPT, R_SKIPSTART, "PRESS START screen" },
 +    { K_OPT, R_SKIPCLANK, "Clank levels (testing)" },
 +    { K_GAP, 0, "" },
 +    { K_ACT, R_RESUME,  "Resume" },
@@ -17394,6 +17400,8 @@ index 0000000..b2a2271
 +    case R_FPS:    snprintf(b, n, "%s", o->fps ? "On" : "Off"); break;
 +    case R_DISCORD: snprintf(b, n, "%s", o->discord ? "On" : "Off"); break;
 +    case R_SKIPCLANK: snprintf(b, n, "%s", o->skip_clank ? "Skip" : "Play"); break;
++    case R_SKIPINTRO: snprintf(b, n, "%s", o->skip_intro ? "Skip" : "Show"); break;
++    case R_SKIPSTART: snprintf(b, n, "%s", !o->skip_press_start ? "Show" : o->skip_intro ? "Skip" : "Skip (with logos skipped)"); break;
 +    case R_QUIT:    if (s_quit_armed) snprintf(b, n, "Press again to quit"); break;
 +    default: break;
 +    }
@@ -17464,6 +17472,8 @@ index 0000000..b2a2271
 +    case R_FPS:    o->fps = !o->fps; break;
 +    case R_DISCORD: o->discord = !o->discord; break;
 +    case R_SKIPCLANK: o->skip_clank = !o->skip_clank; break;
++    case R_SKIPINTRO: o->skip_intro = !o->skip_intro; break;
++    case R_SKIPSTART: o->skip_press_start = !o->skip_press_start; break;
 +    default: UNLOCK(); return;
 +    }
 +    o->gen++;
@@ -19000,10 +19010,10 @@ index 0000000..b2a2271
 +#endif
 diff --git a/libs/video/rsx_host_ui.h b/libs/video/rsx_host_ui.h
 new file mode 100644
-index 0000000..eb0f6d0
+index 0000000..ef6a41c
 --- /dev/null
 +++ b/libs/video/rsx_host_ui.h
-@@ -0,0 +1,233 @@
+@@ -0,0 +1,235 @@
 +/*
 + * ps3recomp - host settings menu and on-screen display (RaCACiT)
 + *
@@ -19057,6 +19067,8 @@ index 0000000..eb0f6d0
 +    int   fps;            /* 0 off, 1 FPS counter                              */
 +    int   discord;        /* 1: Discord status on (when the build has an app) */
 +    int   skip_clank;     /* 1: a load into a Great Clock (Clank) level goes on to the next level (testing) */
++    int   skip_intro;     /* 1: boot without the logos and notices (game/stubs.cpp; from the next start) */
++    int   skip_press_start; /* 1: boot past PRESS START to the main menu (game/stubs.cpp; from the next start) */
 +    int   armor_look;     /* 0: the armor worn; 1-4: Holoflux..Hyperflux's look, the worn armor's protection -- picked in the game's Skins menu (game/stubs.cpp) */
 +    int   ds_speaker;     /* 1: the DualSense speaker plays (cellAudio.c, ds_player.c) */
 +    int   ds_volume;      /* its volume, 0..100 percent                       */

@@ -228,6 +228,7 @@ static const std::vector<Opt>& opts()
         // language, which the build answers from this (game/stubs.cpp). Unset = English.
         { "Game", "RACACIT_LANGUAGE", "Language", "", { { "", "English" }, { "fr", "Français (French)" }, { "es", "Español (Spanish)" }, { "de", "Deutsch (German)" }, { "it", "Italiano (Italian)" }, { "nl", "Nederlands (Dutch)" } } },
         { "Game", "RACACIT_SKIP_INTRO", "Logos and notices at boot", "0", { { "0", "Show (as the game)" }, { "1", "Skip" } } },
+        { "Game", "RACACIT_SKIP_PRESS_START", "PRESS START screen", "0", { { "0", "Show (as the game)" }, { "1", "Skip (with logos skipped)" } } },
         { "Game", "RACACIT_START_SKIPS_MOVIES", "START skips movies", "1", { { "1", "Yes" }, { "0", "No" } } },
         { "Game", "RACACIT_ALL_CUTSCENES_SKIPPABLE", "Every cutscene skippable", "1", { { "1", "Yes" }, { "0", "No (as the game)" } } },
         { "Game", "RACACIT_SPACE_FREE_LANDING", "Land anywhere in space", "1", { { "1", "Yes" }, { "0", "No (as the game)" } } },
