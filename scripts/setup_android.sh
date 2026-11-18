@@ -26,6 +26,12 @@ pin() {
     echo "tools/$1: $2 at $3"
 }
 
+echo "== Python tools (the lift: scripts/pipeline.sh)"
+[ -x tools/venv/Scripts/python.exe ] || ${PYTHON:-py -3.12} -m venv tools/venv
+tools/venv/Scripts/python.exe -m pip install -q --disable-pip-version-check \
+    ziglang==0.16.0 cmake==4.4.4 ninja==1.13.2 capstone==5.0.9 construct==2.10.70 \
+    pycryptodome==3.24.1 tabulate==0.10.0 tqdm==4.70.1
+
 echo "== Sources"
 fresh_runtime=0; fresh_sdl=0
 [ -d tools/ps3recomp/.git ] || fresh_runtime=1

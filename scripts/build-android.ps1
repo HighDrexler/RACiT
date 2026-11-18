@@ -12,9 +12,9 @@ param(
 $ErrorActionPreference = 'Stop'
 if (!$ToolchainsRoot) { throw 'Pass -ToolchainsRoot (android-ndk-r29, android-sdk, gradle-8.13, jdk-17.0.20.1+1) or set RACIT_ANDROID_TOOLCHAINS.' }
 $root = Split-Path $PSScriptRoot -Parent
-$workspace = Split-Path (Split-Path $root -Parent) -Parent
-$state = Join-Path $workspace 'work'
+# The build's own state (native objects, Gradle and Android user homes): -StateRoot, else work/ beside the repository.
 if ($StateRoot) { $state = [IO.Path]::GetFullPath($StateRoot) }
+else { $state = Join-Path (Split-Path $root -Parent) 'racit-android-work' }
 if (!$HostToolsRoot) { $HostToolsRoot = Join-Path $state 'toolchains' }
 $build = Join-Path $state 'native'
 $android = Join-Path $root 'android'
