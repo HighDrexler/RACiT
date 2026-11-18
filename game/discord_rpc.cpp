@@ -99,6 +99,9 @@ void json_str(std::string& out, const char* s)
 
 }  // namespace
 
+/* The level id, for the level fixes in stubs.cpp (master's discord_rpc.cpp has it the same way). */
+uint32_t racit_current_level() { return current_level(); }
+
 #ifdef _WIN32
 #include <windows.h>
 

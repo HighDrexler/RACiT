@@ -34,7 +34,6 @@ import glob, os, re, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-
 # An update of the same title can have a different code and data layout.
 # Check the decrypted executable before any generated source is touched.
 def check_game_profile(elf, selected='auto'):
@@ -61,6 +60,11 @@ if len(sys.argv) > 1 and sys.argv[1] == '--check-profile':
     check_game_profile(sys.argv[2], sys.argv[3] if len(sys.argv) == 4 else 'auto')
     sys.exit(0)
 RECOMP = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "game", "src", "recomp")
+
+# The disc this tree builds: scripts/retarget.py marks its copy's profile buildable.
+import json
+with open(os.path.join(ROOT, 'versions', 'profiles.json'), encoding='utf-8') as _f:
+    BUILD_TITLE = next((p['title_id'] for p in json.load(_f)['profiles'] if p.get('buildable')), 'BCUS98124')
 
 DECLS = '''
 /* racacit: guest setjmp/longjmp support (scripts/patch_lift.py) */
@@ -113,6 +117,11 @@ def func_span(src, name):
 def patch_file(path):
     src = open(path).read()
     changed = False
+    # The Android and Linux lifts declare ctx __restrict (all but the setjmp function):
+    # the patches below match the plain signature, so it is taken off here and put back
+    # on the same functions before writing.
+    restrict = re.findall(r'void (\w+)\(ppu_context\* __restrict ctx\) \{\n', src)
+    src = src.replace('(ppu_context* __restrict ctx) {\n', '(ppu_context* ctx) {\n')
 
     # Each half is tested on its own function: the lifter may put the setjmp
     # caller and longjmp in different chunks.
@@ -522,7 +531,60 @@ def patch_file(path):
             src = src[:i] + decl + src[i:]
         changed = True
 
-    # 19. Boot straight to PRESS START (game/stubs.cpp racacit_front_end_cards): right
+    # 19. The game's owner bonuses (game/stubs.cpp racacit_bonus_owned / racacit_bonus_grant).
+    #     func_0029AFCC (the "NP DRM" thread) looks for the other games installed on the PS3
+    #     (/dev_hdd0/game/<id>/PARAM.SFO) and the pre-order licences, and keeps what it found
+    #     as bytes at 0x00E20D98: +0..+3 the pre-order packs, +4 Tools of Destruction, +5
+    #     Quest for Booty, +6 "checked". The first hook runs right after it sets +6, before
+    #     func_0029B1D8 grants the bonuses to a save; the second at the end of that grant
+    #     (r30 still its pool: [r30-0x7FC4] = the player record, [r30-0x7FBC] the table
+    #     whose +4 is the Power pack's health bonus).
+    sp = func_span(src, 'func_0029AFCC')
+    if sp and 'racacit_bonus_owned(' not in src[sp[0]:sp[2]]:
+        a_, body_, end_ = sp
+        fn = src[a_:end_]
+        anchor = '        vm_write8(ctx->gpr[11] + 0x6, ctx->gpr[0]);\n'
+        if fn.count(anchor) != 1:
+            print('patch_lift #19: func_0029AFCC: anchor not found once (%d)' % fn.count(anchor))
+        else:
+            fn = fn.replace(anchor, anchor + '        racacit_bonus_owned((uint32_t)ctx->gpr[11]);   /* racacit */\n', 1)
+            src = src[:a_] + fn + src[end_:]
+            if 'void racacit_bonus_owned(' not in src:
+                i = src.index('\n', src.index('#include')) + 1
+                src = src[:i] + 'extern "C" void racacit_bonus_owned(uint32_t flags);\n' + src[i:]
+            changed = True
+    sp = func_span(src, 'func_0029B1D8')
+    if sp and 'racacit_bonus_grant(' not in src[sp[0]:sp[2]]:
+        a_, body_, end_ = sp
+        fn = src[a_:end_]
+        anchor = '        ctx->gpr[0] = vm_read64(ctx->gpr[1] + 0xA0);\n'
+        if fn.count(anchor) != 1:
+            print('patch_lift #19: func_0029B1D8: anchor not found once (%d)' % fn.count(anchor))
+        else:
+            fn = fn.replace(anchor, '        racacit_bonus_grant(vm_read32(ctx->gpr[30] + -0x7FC4), (uint32_t)ctx->gpr[30]);   /* racacit */\n' + anchor, 1)
+            src = src[:a_] + fn + src[end_:]
+            if 'void racacit_bonus_grant(' not in src:
+                i = src.index('\n', src.index('#include')) + 1
+                src = src[:i] + 'extern "C" void racacit_bonus_grant(uint32_t player, uint32_t pool);\n' + src[i:]
+            changed = True
+
+    # 20. The cheat menu's lockout (game/stubs.cpp racacit_skillpoint_blocked): every skill
+    #     point goes through func_0021EF30 (its only caller is the scripts' set_skillpoint_done,
+    #     func_0028597C); at its entry, while cheats are on or the loaded save was cheated in,
+    #     it returns before awarding anything.
+    sp = func_span(src, 'func_0021EF30')
+    if sp and 'racacit_skillpoint_blocked(' not in src[sp[0]:sp[2]]:
+        a_, body_, end_ = sp
+        fn = src[a_:end_]
+        head = 'void func_0021EF30(ppu_context* ctx) {\n'
+        fn = fn.replace(head, head + '        if (racacit_skillpoint_blocked((uint32_t)ctx->gpr[3])) return;   /* racacit */\n', 1)
+        src = src[:a_] + fn + src[end_:]
+        if 'int racacit_skillpoint_blocked(' not in src:
+            i = src.index('\n', src.index('#include')) + 1
+            src = src[:i] + 'extern "C" int racacit_skillpoint_blocked(uint32_t id);\n' + src[i:]
+        changed = True
+
+    # 21. Boot straight to PRESS START (game/stubs.cpp racacit_front_end_cards): right
     #     after func_004C8898 hands the Scaleform main menu its startMode (the movie's
     #     SetVariable, name from r30 - 0x7F28), the intro cards' list is emptied.
     sp = func_span(src, 'func_004C8898')
@@ -546,7 +608,185 @@ def patch_file(path):
                 src = src[:i] + 'extern "C" void racacit_front_end_cards(ppu_context* ctx);\n' + src[i:]
             changed = True
         else:
-            print('patch_lift #19: func_004C8898: startMode SetVariable not found once (%d)' % len(hits))
+            print('patch_lift #21: func_004C8898: startMode SetVariable not found once (%d)' % len(hits))
+
+    # 22. The mouse turns the follow camera directly (game/desktop_mouse.cpp; public PR #34,
+    #     petralithic). In func_000459D4, f1 before func_00633C34 is the game's yaw step and
+    #     f31 before the pitch subtraction its pitch target; while the mouse moved since the
+    #     last update, those come from the mouse instead, the pitch clamped to the game's own
+    #     limits ([r30-0x7F24], [r30-0x7F1C]). A still mouse returns 0, so a controller's
+    #     right stick keeps turning the camera with the mouse captured.
+    sp = func_span(src, 'func_000459D4')
+    if sp and 'racit_camera_take' not in src[sp[0]:sp[2]]:
+        a_, body_, end_ = sp
+        fn = src[a_:end_]
+        changes = (
+            ('void func_000459D4(ppu_context* ctx) {\n',
+             'void func_000459D4(ppu_context* ctx) {\n'
+             '        double mouse_angles[2] = {};   /* racacit */\n'
+             '        const int mouse_direct = racit_camera_take(mouse_angles, (uint64_t)((double)SDL_GetPerformanceCounter() * 1000000000.0 / (double)SDL_GetPerformanceFrequency()));\n'),
+            ('        ctx->lr = 0x00045D6C; func_00633C34(ctx); DRAIN_TRAMPOLINE(ctx);\n',
+             '        if (mouse_direct) ctx->fpr[1] = -mouse_angles[0];   /* racacit */\n'
+             '        ctx->lr = 0x00045D6C; func_00633C34(ctx); DRAIN_TRAMPOLINE(ctx);\n'),
+            ('        ctx->fpr[3] = ppu_fp_single(ppu_fsub(ctx->fpr[31], ctx->fpr[1]));\n',
+             '        if (mouse_direct) {   /* racacit */\n'
+             '            uint32_t lb = vm_read32(ctx->gpr[30] - 0x7F24), hb = vm_read32(ctx->gpr[30] - 0x7F1C);\n'
+             '            float lo, hi; memcpy(&lo, &lb, 4); memcpy(&hi, &hb, 4);\n'
+             '            const double target = mouse_angles[1] - ctx->fpr[1];\n'
+             '            ctx->fpr[31] = fmin(fmax(target, lo), hi) + ctx->fpr[1];\n'
+             '        }\n'
+             '        ctx->fpr[3] = ppu_fp_single(ppu_fsub(ctx->fpr[31], ctx->fpr[1]));\n'),
+        )
+        counts = [fn.count(old) for old, new in changes]
+        if counts != [1, 1, 1]:
+            print('patch_lift #22: func_000459D4: anchors not found once %s' % counts)
+        else:
+            for old, new in changes:
+                fn = fn.replace(old, new, 1)
+            src = src[:a_] + fn + src[end_:]
+            i = src.index('\n', src.index('#include')) + 1
+            src = src[:i] + ('extern "C" int racit_camera_take(double*, unsigned long long);\n'
+                             'extern "C" unsigned long long SDL_GetPerformanceCounter(void);\n'
+                             'extern "C" unsigned long long SDL_GetPerformanceFrequency(void);\n') + src[i:]
+            changed = True
+
+    # 23. Keyboard keycaps in the menus (game/menu_keycaps.h, game/menu_archive.cpp; public
+    #     PR #46, petralithic): the menu movies have two frame paths in BCUS98124 disc 1.00,
+    #     func_004C6F6C and func_004ADB3C. Before each frame the bound key labels and the
+    #     keyboard/controller mode go to the movie through its own string setter, outside
+    #     ActionScript, the guest context kept. Does nothing unless RACACIT_MENU_ARCHIVE names
+    #     an archive made by scripts/prepare_menu_keycaps.py.
+    for entry, offsets in (('func_004C6F6C', (4,)),
+                           ('func_004ADB3C', (8, 4))):
+        sp = func_span(src, entry)
+        if sp and 'racit_publish_menu_keyboard(' not in src[sp[0]:sp[2]]:
+            a_, body_, end_ = sp
+            fn = src[a_:end_]
+            marker = 'void %s(ppu_context* ctx) {\n' % entry
+            if fn.count(marker) != 1:
+                print('patch_lift #23: %s: function start not found once' % entry)
+                continue
+            calls = ''.join('        racit_publish_menu_keyboard(ctx, %d);   /* racacit */\n' % offset
+                            for offset in offsets)
+            fn = fn.replace(marker, marker + calls, 1)
+            src = src[:a_] + fn + src[end_:]
+            if '#include "menu_keycaps.h"' not in src:
+                i = src.index('\n', src.index('#include')) + 1
+                src = src[:i] + '#include "menu_keycaps.h"\n' + src[i:]
+            changed = True
+
+    # 24. Update 1.20's hero part masks in the disc build (game/stubs.cpp
+    #     racacit_u120_part_masks). func_004C3C44 unpacks the hero's appearance
+    #     (armor style, skin, group and its three row choices) and func_004C46FC
+    #     turns it into part masks. Update 1.20 changed three things here:
+    #     func_004C3C44's default for an unset row 3 of group 1 (0 -> 3, as
+    #     groups 0 and 2 already had), func_004C46FC's bound on row 3 (3 -> 4)
+    #     and the masks it builds (the stubs.cpp hook, called where its mask
+    #     paths meet). Every anchor is the disc's own code, so another
+    #     executable's lift is left alone. Public PR #43 (petralithic); on the European
+    #     disc retarget.py converts the anchors and REQUIRED checks that the hook landed.
+    #     USA disc only for now: BCES00511 compiles func_004C46FC differently (other
+    #     registers and lengths), so its join, its row bound and the hook's register reads
+    #     are unchecked there.
+    sp = func_span(src, 'func_004C3C44') if BUILD_TITLE == 'BCUS98124' else None
+    if sp and 'racacit: 1.20 default' not in src[sp[0]:sp[2]]:
+        a_, body_, end_ = sp
+        fn = src[a_:end_]
+        li = '        ctx->gpr[5] = (int64_t)(int32_t)(0);\n'
+        st = '        vm_write32(ctx->gpr[1] + 0x78, ctx->gpr[5]);\n'
+        if fn.count(li) == 1 and fn.count(st) == 1 and fn.count('vm_write32(ctx->gpr[1] + 0x78, ') == 3 \
+                and fn.index(li) < fn.index(st) \
+                and 'ctx->gpr[5] =' not in fn[fn.index(li) + len(li):fn.index(st)]:
+            fn = fn.replace(li, '        ctx->gpr[5] = (int64_t)(int32_t)(3);   /* racacit: 1.20 default (was 0) */\n', 1)
+            src = src[:a_] + fn + src[end_:]
+            changed = True
+        else:
+            sys.exit('patch_lift #24: func_004C3C44: group 1 row 3 default not found once. The function is in this lift but not the code update 1.20\'s port expects (another disc?): stopping rather than building without the fix.')
+    sp = func_span(src, 'func_004C46FC') if BUILD_TITLE == 'BCUS98124' else None
+    if sp and 'racacit_u120_part_masks' not in src[sp[0]:sp[2]]:
+        a_, body_, end_ = sp
+        fn = src[a_:end_]
+        bound = ('        ctx->gpr[28] = vm_read32(ctx->gpr[9] + 0x0);\n'
+                 '        { uint64_t a = (uint32_t)ctx->gpr[28]; uint64_t b = (uint64_t)0x3;')
+        join = '\nloc_004C4C68:\n'
+        if fn.count(bound) == 1 and fn.count(join) == 1 and fn.index(bound) < fn.index(join):
+            fn = fn.replace(bound, bound.replace('(uint64_t)0x3;', '(uint64_t)0x4; /* racacit: 1.20 bound (was 3) */'), 1)
+            fn = fn.replace(join, join + '        racacit_u120_part_masks(ctx);   /* racacit */\n', 1)
+            src = src[:a_] + fn + src[end_:]
+            if 'void racacit_u120_part_masks' not in src:
+                i = src.index('\n', src.index('#include')) + 1
+                src = src[:i] + 'extern "C" void racacit_u120_part_masks(ppu_context* ctx);\n' + src[i:]
+            changed = True
+        else:
+            sys.exit('patch_lift #24: func_004C46FC: row bound or mask join not found once. The function is in this lift but not the code update 1.20\'s port expects (another disc?): stopping rather than building without the fix.')
+
+    # 25. Update 1.20's level heap budget in the disc build (game/stubs.cpp
+    #     racacit_u120_level_budget). func_0032C7A4, the level loader, extends the
+    #     level pool so a level gets at least 0x740000 past its image; update 1.20
+    #     (func_0032C800) raised that to 0x820000, and to 0x8A0000 on the five
+    #     space sectors. The two loads of the constant are the anchor, so another
+    #     executable's lift is left alone.
+    #     Public PR #53 (petralithic). USA disc only for now, like #24: the TOC offsets
+    #     and (for #26) the function addresses are unchecked on BCES00511.
+    sp = func_span(src, 'func_0032C7A4') if BUILD_TITLE == 'BCUS98124' else None
+    if sp and 'racacit_u120_level_budget' not in src[sp[0]:sp[2]]:
+        a_, body_, end_ = sp
+        fn = src[a_:end_]
+        two = ('        ctx->gpr[0] = (int64_t)(int32_t)((uint32_t)0x74 << 16);\n'
+               '        ctx->gpr[19] = (int64_t)(int32_t)((uint32_t)0x74 << 16);\n')
+        if fn.count(two) == 1 and fn.count('0x74 << 16') == 2:
+            fn = fn.replace(two,
+                '        { const uint32_t b_ = racacit_u120_level_budget(ctx);   /* racacit: 1.20 level budget (was 0x740000) */\n'
+                '          ctx->gpr[0] = (int64_t)(int32_t)b_; ctx->gpr[19] = (int64_t)(int32_t)b_; }\n', 1)
+            src = src[:a_] + fn + src[end_:]
+            if 'uint32_t racacit_u120_level_budget' not in src:
+                i = src.index('\n', src.index('#include')) + 1
+                src = src[:i] + 'extern "C" uint32_t racacit_u120_level_budget(ppu_context* ctx);\n' + src[i:]
+            changed = True
+        else:
+            sys.exit('patch_lift #25: func_0032C7A4: level budget loads not found once. The function is in this lift but not the code update 1.20\'s port expects (another disc?): stopping rather than building without the fix.')
+
+    # 26. Update 1.20's space-mission bits resync in the disc build (game/stubs.cpp
+    #     racacit_u120_space_bits): update 1.20's func_0047B7E8, an init method,
+    #     re-derives two of the five mission bits at G+0x13D94 from saved mission
+    #     flags; the disc only sets them from a level script, so a save that missed
+    #     one could never complete the mask (entry 0x1E). Called at the disc
+    #     function's only return, anchored on its own epilogue.
+    #     Public PR #54 (petralithic). USA disc only for now, like #24: the TOC offsets
+    #     and (for #26) the function addresses are unchecked on BCES00511.
+    sp = func_span(src, 'func_0047B7E8') if BUILD_TITLE == 'BCUS98124' else None
+    if sp and 'racacit_u120_space_bits' not in src[sp[0]:sp[2]]:
+        a_, body_, end_ = sp
+        fn = src[a_:end_]
+        tail = ('        ctx->gpr[1] = ctx->gpr[1] + (int64_t)(0x90);\n'
+                '        return;')
+        if fn.count(tail) == 1 and fn.count('return;') == 1 and 'vm_write8(ctx->gpr[29] + 0x1B8, ' in fn:
+            fn = fn.replace(tail, '        ctx->gpr[1] = ctx->gpr[1] + (int64_t)(0x90);\n'
+                                  '        racacit_u120_space_bits(ctx);   /* racacit: 1.20 mission bits resync */\n'
+                                  '        return;', 1)
+            src = src[:a_] + fn + src[end_:]
+            if 'void racacit_u120_space_bits' not in src:
+                i = src.index('\n', src.index('#include')) + 1
+                src = src[:i] + 'extern "C" void racacit_u120_space_bits(ppu_context* ctx);\n' + src[i:]
+            changed = True
+        else:
+            sys.exit('patch_lift #26: func_0047B7E8: epilogue not found once. The function is in this lift but not the code update 1.20\'s port expects (another disc?): stopping rather than building without the fix.')
+
+    # 27. Frame-rate unlock, the game clock (game/stubs.cpp racacit_clock_tick;
+    #     docs in its comment): at the head of func_0066A424 (Clock_Tick, r3 =
+    #     the clock), which every level load leaves with a 1/60 s minimum step.
+    #     Does nothing unless RACACIT_FPS_CAP is above 60. Public PR #57 (petralithic); USA disc only.
+    sp = func_span(src, 'func_0066A424') if BUILD_TITLE == 'BCUS98124' else None
+    if sp and 'racacit_clock_tick' not in src[sp[0]:sp[2]]:
+        a_, body_, end_ = sp
+        if 'ppu_timebase_now()' not in src[body_:end_]:
+            sys.exit('patch_lift #27: func_0066A424 does not read the timebase: not the game clock on this disc. '
+                     'Stopping rather than hooking the wrong function.')
+        src = src[:body_] + '        racacit_clock_tick(ctx);   /* racacit: frame-rate unlock */\n' + src[body_:]
+        if 'void racacit_clock_tick' not in src:
+            i = src.index('\n', src.index('#include')) + 1
+            src = src[:i] + 'extern "C" void racacit_clock_tick(ppu_context* ctx);\n' + src[i:]
+        changed = True
 
     if (('racacit_jb_push(' in src or 'racacit_longjmp(' in src)
             and 'racacit: guest setjmp' not in src):
@@ -555,6 +795,10 @@ def patch_file(path):
         src = src[:i] + DECLS + src[i:]
         changed = True
     if changed:
+        for name in restrict:
+            plain = 'void %s(ppu_context* ctx) {\n' % name
+            assert src.count(plain) == 1, name
+            src = src.replace(plain, 'void %s(ppu_context* __restrict ctx) {\n' % name, 1)
         open(path, 'w').write(src)
     return changed
 
@@ -589,3 +833,26 @@ for lift in ('sub_BFD480_04000', 'spu_0001_at_00BED400'):
 #     The current ppu_lifter.py does this itself; on its output this is a no-op.
 import subprocess
 subprocess.run([sys.executable, os.path.join(ROOT, 'scripts', 'fix_vmx_alias.py'), RECOMP], check=False)
+
+# 14. The PPU spin hint, "or 31,31,31" (32 in a row in the collision module's 25 wait loops: the
+#     record's done bit and friends), lifted as racacit_ppu_spin_hint(ctx) (game/stubs.cpp). As an
+#     instruction it does nothing; there it lets a collision lane living on the main thread's core
+#     (RACACIT_COLOC, v113-android.26) have that core while the main thread waits for it. Without
+#     it the main thread spun on the lane's own core: 2.5 fps at Space Sector 1 (.23).
+SPIN_DECL = ('/* racacit (v113-android.24): the PPU spin hint, "or 31,31,31", done 32 times in each of the\n'
+             ' * collision module\'s wait loops. A no-op as an instruction; stubs.cpp racacit_ppu_spin_hint\n'
+             ' * lets a co-located collision lane have the core here (RACACIT_COLOC). */\n'
+             'extern "C" void racacit_ppu_spin_hint(ppu_context* ctx);\n')
+SPIN_RUN = re.compile(r'((?:[ \t]*ctx->gpr\[31\] = ctx->gpr\[31\] \| ctx->gpr\[31\];\n){4,})')
+for p in sorted(glob.glob(os.path.join(RECOMP, 'ppu_recomp_*.cpp'))):
+    src = open(p, encoding='latin-1', newline='').read()
+    def _hint(m):
+        ind = re.match(r'[ \t]*', m.group(1)).group(0)
+        return ind + 'racacit_ppu_spin_hint(ctx);   /* or 31,31,31 x%d: the PPU spin hint */\n' % m.group(1).count('\n')
+    out, k = SPIN_RUN.subn(_hint, src)
+    if k or ('racacit_ppu_spin_hint(ctx)' in out and SPIN_DECL not in out):
+        if SPIN_DECL not in out:
+            i = out.index('#include <math.h>\n') + len('#include <math.h>\n')
+            out = out[:i] + SPIN_DECL + out[i:]
+        open(p, 'w', encoding='latin-1', newline='').write(out)
+        print('spin hint', os.path.basename(p), k)

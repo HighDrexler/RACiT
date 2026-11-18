@@ -1,0 +1,8 @@
+.gradle/
+build/
+app/build/
+.cx/
+local.properties
+# Native libraries: built by build_apk.sh from the repo's native build, never committed.
+app/src/main/jniLibs/
+*.keystore

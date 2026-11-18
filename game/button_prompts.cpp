@@ -49,6 +49,13 @@
 /* VirtualQuery, CreateThread, Sleep: <windows.h> on Windows; off it the
  * runtime's shim gives the same names over /proc/self/maps and pthreads. */
 #include "win32_compat.h"
+#if defined(__linux__)
+#include <cerrno>
+#include <fcntl.h>
+#include <unistd.h>
+#include <utility>
+#include <vector>
+#endif
 
 extern "C" uint8_t* vm_base;
 extern "C" volatile int g_racacit_pad_layout;   /* cellPad.c racacit_pad_layout at the last poll: 0 PS3 layout, 1 PS pad swapped, 2 other pad swapped */
@@ -56,6 +63,7 @@ extern "C" uint32_t cellGcmResolveLocated(int local, uint32_t offset);   /* cell
 extern "C" volatile int g_racacit_ctx_quickselect;   /* cellPad.c: the quick select ring is open (TRIANGLE held) */
 extern "C" volatile unsigned g_racacit_level_changes;   /* stubs.cpp: level loads so far */
 
+extern "C" int racit_keyboard_prompts_active(void);
 namespace {
 
 const uint16_t kL1x = 0x003C, kL2x = 0x0097, kR1x = 0x00F2, kR2x = 0x014D, kRowY = 0x0074;
@@ -93,6 +101,85 @@ int s_nfont;
 
 uint32_t be32(const uint8_t* p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
 
+#if defined(__linux__)
+/* Off Windows, VirtualQuery is the runtime shim's (win32_compat.c os_region):
+ * it opens /proc/self/maps and reads it from the top on EVERY call. Android's
+ * write watch splits guest memory into thousands of mappings (3,000-5,300 in
+ * the .21 diagnostics), so the scan's VirtualQuery per region re-read that
+ * file thousands of times -- 0.4-1.0 s a scan (owner's .36 log: 395-972 ms,
+ * five scans in the first minute after every level load), all of this
+ * thread's time in the .35 profile -- and readable() for the HUD picture and
+ * the ring badges re-read it six times a second all through play. Every read
+ * of the file holds the kernel's mmap lock, which each write-watch fault's
+ * mprotect (on any game thread) must take, from a low-priority thread on a
+ * little core. So here a page is readable when the kernel can copy a byte out
+ * of it -- a write of it into a pipe, which fails with EFAULT (never a
+ * signal, never a demand commit) for a page that is not -- and the scan reads
+ * the maps once (scan_ranges). */
+uint64_t host_page(void)
+{
+    static uint64_t pg;
+    if (!pg) { const long v = sysconf(_SC_PAGESIZE); pg = v > 0 ? (uint64_t)v : 4096u; }
+    return pg;
+}
+bool page_readable(uint64_t ga)
+{
+    static int fd[2] = { -1, -1 };
+    if (fd[0] < 0 && pipe2(fd, O_NONBLOCK | O_CLOEXEC) != 0) { fd[0] = fd[1] = -1; return false; }
+    if (ga >= 0x100000000ull) return false;
+    for (int tries = 0; tries < 2; tries++) {
+        if (write(fd[1], vm_base + ga, 1) == 1) { char c; (void)!read(fd[0], &c, 1); return true; }
+        if (errno != EAGAIN) return false;                /* EFAULT: not readable */
+        char junk[4096]; while (read(fd[0], junk, sizeof junk) > 0) {}   /* a missed drain: empty it, retry */
+    }
+    return false;
+}
+/* Whether guest [ea, ea + n) is committed and readable: a probe a host page. */
+bool readable(uint32_t ea, uint32_t n)
+{
+    const uint64_t pg = host_page(), end = (uint64_t)ea + n;
+    if (end > 0x100000000ull) return false;
+    for (uint64_t a = ea; a < end; a = (a & ~(pg - 1u)) + pg)
+        if (!page_readable(a)) return false;
+    return true;
+}
+/* Where the readable memory that holds `ea` ends (0: none); stops looking
+ * 128 KB on, which is far enough for every caller. */
+uint32_t readable_end(uint32_t ea)
+{
+    const uint64_t pg = host_page();
+    if (!page_readable(ea)) return 0;
+    uint64_t a = ((uint64_t)ea & ~(pg - 1u)) + pg;
+    for (; a < 0x100000000ull && a - ea < 0x20000u; a += pg)
+        if (!page_readable(a)) return (uint32_t)a;
+    return a >= 0x100000000ull ? 0xFFFFFFFFu : (uint32_t)a;
+}
+/* The readable guest ranges in [lo, hi), neighbouring mappings merged (the
+ * write watch's read-only runs and the writable pages around them are one
+ * piece of memory): one pass over /proc/self/maps. */
+void scan_ranges(uint32_t lo, uint32_t hi, std::vector<std::pair<uint32_t, uint32_t>>& out)
+{
+    out.clear();
+    FILE* f = fopen("/proc/self/maps", "r");
+    if (!f) return;
+    const uint64_t vb = (uint64_t)(uintptr_t)vm_base, glo = vb + lo, ghi = vb + hi;
+    char line[512];
+    while (fgets(line, sizeof line, f)) {
+        char* p = line;
+        const uint64_t a = strtoull(p, &p, 16);
+        if (*p != '-') continue;                          /* the tail of a long line */
+        const uint64_t b = strtoull(p + 1, &p, 16);
+        if (*p != ' ' || b <= a) continue;
+        if (b <= glo) continue;
+        if (a >= ghi) break;                              /* the file is in address order */
+        if (p[1] != 'r') continue;
+        const uint32_t s = (uint32_t)((a < glo ? glo : a) - vb), e = (uint32_t)((b > ghi ? ghi : b) - vb);
+        if (!out.empty() && out.back().second == s) out.back().second = e;
+        else out.emplace_back(s, e);
+    }
+    fclose(f);
+}
+#else
 /* Whether guest [ea, ea + n) is committed and readable. */
 bool readable(uint32_t ea, uint32_t n)
 {
@@ -122,6 +209,7 @@ uint32_t readable_end(uint32_t ea)
         if (a - ea >= 0x20000u) return (uint32_t)a;   /* far enough for every caller */
     }
 }
+#endif
 
 void dxt5_decode(const uint8_t* b, uint8_t px[16][4])
 {
@@ -201,9 +289,9 @@ const int kHudRows = (kKeyH + 3) / 4, kKeyBytes = kHudRows * kKeyCols * 16;
  * texture header the game loads right after the font's records: section
  * 0x5200, 32-byte entries, RSX local offset at +0, format at +6, width
  * at +0x18). Host pointer to a DXT5 page and its pitch, or NULL. */
-const uint8_t* font_page(uint32_t rec, uint32_t* pitch)
+const uint8_t* font_page_at(uint32_t rec, int page, uint32_t* pitch, int* width=nullptr, int* height=nullptr)
 {
-    const int page = be16(vm_base + rec + 64 + 6);   /* the E00B record's page */
+    /* Explicit page permits face, stick and keyboard glyphs too. */   /* the E00B record's page */
     const uint32_t a0 = (rec + 255u) & ~255u, re = readable_end(a0);
     for (uint32_t a = a0, end = rec + 0x10000u; a < end; a += 16) {
         if (a + 0x30u > re) return nullptr;
@@ -217,10 +305,13 @@ const uint8_t* font_page(uint32_t rec, uint32_t* pitch)
         const uint32_t ea = cellGcmResolveLocated(1, be32(t));
         *pitch = (uint32_t)w / 4u * 16u;
         if (!ea || !readable(ea, *pitch * (uint32_t)(hh / 4))) return nullptr;
+        if (width) *width=w; if (height) *height=hh;
         return vm_base + ea;
     }
     return nullptr;
 }
+
+const uint8_t* font_page(uint32_t rec, uint32_t* pitch) { return font_page_at(rec, be16(vm_base + rec + 70), pitch); }
 
 struct {
     uint32_t entry, ea;                 /* the table entry; the picture's guest address */
@@ -519,17 +610,14 @@ void badge_sync(int want)
 
 /* Every committed page of guest memory, 16-byte steps: the records sit at
  * 16-byte offsets in a font.dat that the game loads 16-byte aligned. */
+#include "desktop_prompts.h"
+
 void scan(void)
 {
     const unsigned long long t0 = GetTickCount64(); s_lf_calls = 0;
     int n = 0, nb = 0;
     uint32_t hud = 0, badges[2] = {};
-    for (uint32_t a = 0x10000u; a < 0x40000000u; ) {
-        MEMORY_BASIC_INFORMATION mbi;
-        if (!VirtualQuery(vm_base + a, &mbi, sizeof mbi)) break;
-        uint32_t end = (uint32_t)((uint8_t*)mbi.BaseAddress + mbi.RegionSize - vm_base);
-        if (end > 0x40000000u || end <= a) end = 0x40000000u;
-        if (mbi.State == MEM_COMMIT && !(mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) && end - a >= 96)
+    auto scan_range = [&](uint32_t a, uint32_t end) {
             for (uint32_t p = (a + 15u) & ~15u; p + 96 <= end; p += 16) {
                 const uint8_t* q = vm_base + p;
                 if (q[0x19] == 0xB7 && q[0x1B] == 0x34 && q[0x18] == 0 && q[0x1A] == 0 && q[6] == 0xA8 &&
@@ -544,8 +632,24 @@ void scan(void)
                     if (!dup) s_font[n++] = p;
                 }
             }
+    };
+#if defined(__linux__)
+    std::vector<std::pair<uint32_t, uint32_t>> ranges;
+    scan_ranges(0x10000u, 0x40000000u, ranges);
+    for (const auto& r : ranges)
+        if (r.second - r.first >= 96 && page_readable(r.first))   /* not freed since the maps were read */
+            scan_range(r.first, r.second);
+#else
+    for (uint32_t a = 0x10000u; a < 0x40000000u; ) {
+        MEMORY_BASIC_INFORMATION mbi;
+        if (!VirtualQuery(vm_base + a, &mbi, sizeof mbi)) break;
+        uint32_t end = (uint32_t)((uint8_t*)mbi.BaseAddress + mbi.RegionSize - vm_base);
+        if (end > 0x40000000u || end <= a) end = 0x40000000u;
+        if (mbi.State == MEM_COMMIT && !(mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) && end - a >= 96)
+            scan_range(a, end);
         a = end;
     }
+#endif
     fprintf(stderr, "[prompts] memory scan: %llu ms, %d letter-font candidates%c", GetTickCount64() - t0, s_lf_calls, 10);
     if (n != s_nfont) fprintf(stderr, "[prompts] button glyphs found in %d font(s)%c", n, 10);
     s_nfont = n;
@@ -563,6 +667,11 @@ void scan(void)
                   fprintf(stderr, "[prompts] HUD picture \"R2 + square\" found at %08X (table %08X)%c", ea, hud, 10); } }
 }
 
+#if defined(__ANDROID__)
+}  // namespace
+extern "C" void racacit_background_thread(const char* name);
+namespace {
+#endif
 DWORD WINAPI prompts_thread(LPVOID)
 {
     /* Fonts load at boot and with a level's own assets: scan a few times
@@ -571,6 +680,9 @@ DWORD WINAPI prompts_thread(LPVOID)
      * ~62 s, for up to 9 s, in step with it.) The layout is followed every
      * 50 ms: the quick select ring's page prompts change as it opens (v70). */
     static const unsigned kScanAt[] = { 5, 10, 20, 40, 60 };
+#if defined(__ANDROID__)
+    racacit_background_thread("button prompts");   /* main.cpp: the small cores, low priority */
+#endif
     unsigned t = 0, next = 0, last_layout = ~0u, ms = 0, levels = g_racacit_level_changes;
     for (;; Sleep(50), ms += 50) {
         if (levels != g_racacit_level_changes) { levels = g_racacit_level_changes; t = 0; next = 0; }
@@ -578,12 +690,14 @@ DWORD WINAPI prompts_thread(LPVOID)
             if (next < sizeof kScanAt / sizeof kScanAt[0] && t == kScanAt[next]) { scan(); next++; } }
         static int force = -2;   /* RACACIT_PROMPT_LAYOUT=<0|1|2>: a layout for tests */
         if (force == -2) { const char* e = getenv("RACACIT_PROMPT_LAYOUT"); force = e && *e ? atoi(e) : -1; }
-        const int layout = force >= 0 ? force : g_racacit_pad_layout;
+        const bool keyboard = racit_keyboard_prompts_active() != 0;
+        const int layout = keyboard ? 0 : force >= 0 ? force : g_racacit_pad_layout;
         /* R1 <-> R2 with the layout swapped (R2 fires); L1 <-> L2 only while
          * the quick select ring is open, where L2 / R2 page (cellPad.c). */
         static int force_qs = -1;   /* RACACIT_PROMPT_QS=1: the quick select state on (tests: scripted input bypasses cellPad's check) */
         if (force_qs < 0) { const char* e = getenv("RACACIT_PROMPT_QS"); force_qs = e && *e == '1'; }
         const int want_r = layout != 0, want_l = layout != 0 && (g_racacit_ctx_quickselect || force_qs);
+        if (!keyboard) desktop_prompts(false);
         int changed = 0;
         for (int i = 0; i < s_nfont; i++) {
             const int st = font_state(s_font[i]);
@@ -592,6 +706,7 @@ DWORD WINAPI prompts_thread(LPVOID)
             if (has_l != want_l) { swap_records(s_font[i], s_font[i] + 16); changed = 1; }        /* L1 <-> L2 */
             if (has_r != want_r) { swap_records(s_font[i] + 64, s_font[i] + 80); changed = 1; }   /* R1 <-> R2 */
         }
+        if (keyboard) desktop_prompts(true);
         if (!ms) { hud_sync(want_r); badge_sync(want_r); }
         if ((changed && !want_l) || (unsigned)layout != last_layout)
             if (s_nfont) fprintf(stderr, "[prompts] controller layout %d: shoulder buttons in the text %s%c", layout,

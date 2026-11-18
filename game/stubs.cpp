@@ -276,9 +276,12 @@ static void racacit_trophy_unlocked(int id)
             for (int j = i - 1; j >= 0; j--)
                 sceNpTrophyHostUnlock(tiers[j], "its bolt count is below the one just reached");
 }
+extern "C" void sceNpTrophySetUnlockGate(int (*gate)(void));
+static void racacit_cheats_register(void);   /* the cheat menu (below, with the Lua runner) */
 extern "C" void racacit_register_trophies(void)   /* main.cpp, after ppu_hle_init */
 {
     sceNpTrophySetUnlockHook(racacit_trophy_unlocked);
+    racacit_cheats_register();
 }
 
 extern "C" const char* racacit_lua_last_exec(void);
@@ -388,6 +391,8 @@ static void racacit_lua_alltrace_init(void)   /* first script execute(): setting
 extern "C" void vm_write32(uint64_t a, uint32_t v);
 static void racacit_lua_note_state(uint32_t L);
 static void racacit_lua_file(ppu_context* ctx, uint32_t L);
+static int racacit_lua_run(ppu_context* ctx, uint32_t L, const char* code, int quiet = 0);
+static void racacit_level_fix(ppu_context* ctx, uint32_t L, int at_wait);
 extern "C" void ds_player_stop_lines(int all);
 extern "C" void ds_player_stream_pause(uint32_t stream, int on);
 extern "C" unsigned long long ps3_qpc_us(void);
@@ -411,6 +416,7 @@ extern "C" void racacit_luac_trace(ppu_context* ctx, const char* name)
     }
     racacit_lua_note_state((uint32_t)ctx->gpr[3]);   /* RACACIT_LUA_FILE (test hook) */
     racacit_lua_file(ctx, (uint32_t)ctx->gpr[3]);
+    racacit_level_fix(ctx, (uint32_t)ctx->gpr[3], 0);
     /* RACACIT_SPACE_FREE_LANDING (default 1): every moon and planet in space
      * can be landed on. The space scripts gate them on story progress --
      * space_enable_moon / space_enable_planet(clue, enable, show), all false
@@ -827,6 +833,101 @@ extern "C" double racacit_follow_dist_unscale(double d)
     return k == 100 ? d : d * (100.0 / k);
 }
 
+/* The game's owner bonuses (patch_lift.py #19; RACACIT_BONUSES=0 leaves the
+ * game's own answers). On a PS3 the "NP DRM" thread (func_0029AFCC) looks for
+ * the pre-order licences (/dev_hdd0/game/<ACiT id>/USRDIR/preorder_*.edat) and
+ * for the other two games installed (/dev_hdd0/game/<id>/PARAM.SFO) and keeps
+ * the answers as bytes at 0x00E20D98; func_0029B1D8 then grants each once per
+ * save (player record 0x00E248E0, "granted" bytes +0xE0BC..+0xE0C1):
+ *   +0 Discovery pack: the Insomniac Museum on the map -- NOT set: the museum
+ *      stays behind the 40 Zoni and the Vorselon fight (owner, 2026-11-05).
+ *   +1 Power pack: more health (player +0x584 += [[pool-0x7FBC]+4]), the
+ *      CryoMine Glove, and the starting outfit's variant (+0xE0C9; part mask
+ *      func_001709B4, base armor only). Its own toggle, RACACIT_POWER_PACK
+ *      (launcher Settings > Game, default on). Off: not granted; a save that
+ *      already has it loses the health and the outfit as it loads, and gets
+ *      them back when it is turned on again (the outfit byte is set only
+ *      with the grant, so it says whether the health is in). The glove stays:
+ *      nothing here takes a weapon away, and the vendor sells it anyway.
+ *   +2 Bolt pack: 5,000 bolts, the Bolt Magnetizer and the Box Basher.
+ *   +3 Space pack: the Aphelion's hot rod skin and 5,000 bolts.
+ *   +4 Tools of Destruction (BCUS98127 ...): a discount on five weapons at the
+ *      vendor (func_0029E584: weapons 2, 3, 4, 6, 12; the menu's weaponDiscount).
+ *      Its own toggle, RACACIT_TOD_DISCOUNT (launcher Settings > Game, default
+ *      on). The discount reads the save's "granted" byte (+0xE0C0), not +4,
+ *      so racacit_bonus_grant sets or clears that byte in each save as it
+ *      loads: turning it off takes the discount back from a save too.
+ *   +5 Quest for Booty (NPUA80145, BCUS98187, NPEA00088, ...): the Captain
+ *      Ratchet skin (skin 7; unlock word +0x5D0 + 4*7 = 2, and the Skins menu
+ *      says "Congratulations Mutineer! ... a fine captain's hat!" once).
+ * No drive here holds those, so RACiT answers yes for +1..+5. The models, art
+ * and text are all on the disc. */
+static int racacit_bonuses_on(void)
+{
+    static int on = -1;
+    if (on < 0) { const char* e = getenv("RACACIT_BONUSES"); on = !(e && *e == '0'); }
+    return on;
+}
+static int racacit_tod_discount_on(void)
+{
+    static int on = -1;
+    if (on < 0) { const char* e = getenv("RACACIT_TOD_DISCOUNT"); on = !(e && *e == '0'); }
+    return on;
+}
+static int racacit_power_pack_on(void)
+{
+    static int on = -1;
+    if (on < 0) { const char* e = getenv("RACACIT_POWER_PACK"); on = !(e && *e == '0'); }
+    return on;
+}
+extern "C" void racacit_bonus_owned(uint32_t flags)
+{
+    if (!flags || flags >= 0x40000000u) return;
+    const int bonuses = racacit_bonuses_on(), tod = racacit_tod_discount_on(), power = racacit_power_pack_on();
+    if (bonuses) for (int k = 2; k <= 5; k++) if (k != 4) vm_base[flags + k] = 1;
+    vm_base[flags + 1] = (uint8_t)(power ? 1 : 0);
+    vm_base[flags + 4] = (uint8_t)(tod ? 1 : 0);
+    static int said;
+    if (!said) { said = 1; fprintf(stderr, "[racacit] owner bonuses %s (Bolt and Space packs, Quest for Booty, Bancho Ratchet; not the Discovery pack's museum; RACACIT_BONUSES); Power pack %s (RACACIT_POWER_PACK); Tools of Destruction discount %s (RACACIT_TOD_DISCOUNT)%c",
+                                   bonuses ? "on" : "off", power ? "on" : "off", tod ? "on" : "off", 10); }
+}
+/* At the end of that grant, in the save just loaded: the Tools of Destruction
+ * discount's byte and the Power pack's health and outfit follow their toggles,
+ * and skin 4, Bancho Ratchet (the Koro Koro contest skin, hidden until
+ * unlocked; the game sets its unlock word to 1 in func_0048E1BC, a code entry),
+ * is unlocked. */
+extern "C" void racacit_bonus_grant(uint32_t player, uint32_t pool)
+{
+    if (!player || player >= 0x40000000u) return;
+    vm_base[player + 0x10000 - 0x1F40] = (uint8_t)(racacit_tod_discount_on() ? 1 : 0);
+    {   /* Power pack: granted (+0xE0BD) and its outfit (+0xE0C9) in = health in */
+        const uint32_t g = player + 0x10000 - 0x1F43, outfit = player + 0x10000 - 0x1F37;
+        const uint32_t tab = pool && pool < 0x40000000u ? vm_read32(pool - 0x7FBC) : 0;
+        const uint32_t bonus = tab && tab < 0x40000000u ? vm_read32(tab + 4) : 0;
+        const int on = racacit_power_pack_on();
+        if (vm_base[g] && bonus && bonus < 1000u) {
+            if (!on && vm_base[outfit]) {
+                vm_write32(player + 0x584, vm_read32(player + 0x584) - bonus); vm_base[outfit] = 0;
+                fprintf(stderr, "[racacit] Power pack off: health bonus (%u) and outfit taken back from this save%c", bonus, 10);
+            } else if (on && !vm_base[outfit]) {
+                vm_write32(player + 0x584, vm_read32(player + 0x584) + bonus); vm_base[outfit] = 1;
+                fprintf(stderr, "[racacit] Power pack on again: health bonus (%u) and outfit back in this save%c", bonus, 10);
+            }
+        }
+    }
+    { static int n; if (n < 20) { n++;
+        fprintf(stderr, "[racacit] save bonuses: ToD discount %s, Power pack %s, packs granted %d%d%d%d, QFB %d, health %u, bolts %u%c",
+                racacit_tod_discount_on() ? "on" : "off", racacit_power_pack_on() ? "on" : "off",
+                vm_base[player + 0x10000 - 0x1F44], vm_base[player + 0x10000 - 0x1F43], vm_base[player + 0x10000 - 0x1F42],
+                vm_base[player + 0x10000 - 0x1F41], vm_base[player + 0x10000 - 0x1F3F], vm_read32(player + 0x584),
+                vm_read32(player + 0x588), 10); } }
+    if (racacit_bonuses_on() && !vm_read32(player + 0x5D0 + 4 * 4)) {
+        vm_write32(player + 0x5D0 + 4 * 4, 1);
+        static int said;
+        if (!said) { said = 1; fprintf(stderr, "[racacit] Bancho Ratchet skin unlocked%c", 10); }
+    }
+}
+
 /* Armor looks, picked in the game's own Extras > Skins menu (settings.txt
  * RACACIT_ARMOR_LOOK; scripts/patch_lift.py #16 and #17): Ratchet wears the
  * chosen armor's look -- 1 Holoflux, 2 Ectoflux, 3 Thermaflux, 4 Hyperflux --
@@ -1040,7 +1141,28 @@ static CollRec s_crec[kCollSlots];      /* this block's state: written under the
 static int s_crec_n;
 static uint32_t s_crec_inc;
 static long s_crec_resets, s_crec_drops, s_crec_fetched_done;
-static thread_local CollSnap t_csnap[2];
+/* The fetch a context's write-back is checked against: kept per SPU context, not per thread
+ * (v113-android.34). A collision job run as a fiber (spu_drain.c, Android) can fetch the record on
+ * its lane and write "done" back from the main thread, or the other way round; that thread's
+ * snapshot of the same context from an earlier command then read the write-back as stale and
+ * dropped the done mark, and the main thread waited on the record for good (the .29-.31 freezes in
+ * Space Sector 1: record +0x18 without bit 15, the narrow phase polling an empty queue). Read and
+ * written under the lock-line lock only: both hooks hold it there. */
+struct CollCtxSnap { const void* spu; CollSnap s[2]; };
+enum { kCollCtxSlots = 64 };
+static CollCtxSnap s_csnap[kCollCtxSlots];
+static CollSnap* collrec_snap(const void* spu, int k, bool add)
+{
+    int fre = -1;
+    for (int i = 0; i < kCollCtxSlots; i++) {
+        if (s_csnap[i].spu == spu) return &s_csnap[i].s[k];
+        if (!s_csnap[i].spu && fre < 0) fre = i;
+    }
+    if (!add) return nullptr;
+    if (fre < 0) fre = (int)(((uintptr_t)spu >> 6) & (kCollCtxSlots - 1));   /* full (never seen: a few dozen contexts): reuse one */
+    s_csnap[fre] = CollCtxSnap{ spu, { CollSnap{ nullptr, 0u, 0u, 0u }, CollSnap{ nullptr, 0u, 0u, 0u } } };
+    return &s_csnap[fre].s[k];
+}
 static thread_local CollLog t_clog;     /* filled under the lock, printed after it */
 static int collrec_keep(void) { static int v = -1; if (v < 0) { const char* e = getenv("RACACIT_COLLREC_KEEP"); v = (e && *e == '1') ? 1 : 0; } return v; }
 static inline uint32_t collrec_be32(const uint8_t* p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
@@ -1126,7 +1248,7 @@ static int racacit_collrec_get(void* spu, const uint8_t* ls, uint32_t lsa, uint3
         r.last_prod = now;
     }
     if (!r.marked) {                                /* reused too rarely to race: the plain copy */
-        t_csnap[k].spu = nullptr;
+        if (CollSnap* cs = collrec_snap(spu, k, false)) cs->spu = nullptr;
         spu_lockline_unlock();
         if (k == 0 && (src[0x18] & 0x80u)) {
             s_crec_fetched_done++;
@@ -1136,7 +1258,7 @@ static int racacit_collrec_get(void* spu, const uint8_t* ls, uint32_t lsa, uint3
         return 0;
     }
     memcpy(dst, src, size);
-    t_csnap[k] = CollSnap{ spu, ea, r.gen, r.inc };
+    *collrec_snap(spu, k, true) = CollSnap{ spu, ea, r.gen, r.inc };
     if (k == 0 && (dst[0x18] & 0x80u)) {
         s_crec_fetched_done++;
         t_clog = CollLog{ 2, k, s_crec[i].done_by, ea, (uint32_t)dst[0x18] << 8 | dst[0x19], 0u, s_crec[i].gen, s_crec[i].done_gen };
@@ -1152,7 +1274,9 @@ static int racacit_collrec_put(void* spu, const uint8_t* ls, uint32_t lsa, uint3
     if (size != 16u) return 0;
     const int k = lsa == kCollCopy[0] + 0x10u ? 0 : lsa == kCollCopy[1] + 0x10u ? 1 : -1;
     if (k < 0) return 0;
-    const CollSnap s = t_csnap[k];
+    const CollSnap* sp = collrec_snap(spu, k, false);
+    if (!sp) return 0;
+    const CollSnap s = *sp;
     if (s.spu != spu || ea != s.ea + 0x10u || collrec_be32(ls + 0x100) != kCollGuid[k]) return 0;
     const int i = collrec_find(s.ea, false);
     if (i < 0 || s_crec[i].inc != s.inc) return 0;     /* table restarted since this copy: unchecked, as before */
@@ -1177,6 +1301,13 @@ static void racacit_collrec_write(uint32_t ea)
     if (i >= 0) s_crec[i].gen++;
 }
 
+/* main.cpp's stall report: the counts, since a thread's own log line waits for its next fetch. */
+extern "C" void racacit_collrec_stats(void)
+{
+    fprintf(stderr, "[collrec] %d records tracked, %ld done-marks dropped as stale, %ld fetches of a record already done, %ld restarts\n",
+            s_crec_n, s_crec_drops, s_crec_fetched_done, s_crec_resets);
+}
+
 __attribute__((constructor)) static void racacit_collrec_install(void)
 {
     g_coh_write_hook    = racacit_collrec_write;
@@ -1195,9 +1326,27 @@ __attribute__((constructor)) static void racacit_collrec_install(void)
  * and prints the top ones every 5 s as ms per second of play.
  * ------------------------------------------------------------------------- */
 #include <chrono>
+#include <time.h>
 #include <mutex>
 extern "C" void racacit_spu_kick(void);
-static int rac_wait_stats(void) { static int v = -1; if (v < 0) v = getenv("RACACIT_WAIT_STATS") ? 1 : 0; return v; }
+/* RACACIT_WAIT_STATS: "[frame-waits]" every 5 s, the main thread's SPU job waits by caller. Off
+ * unless asked for (RACACIT_WAIT_STATS=1, or RACACIT_PROFILE=1 on Android: racacit_diag.h): two
+ * clock reads and a locked table update at the end of every wait, on the main thread's critical
+ * path, thousands of times a second. */
+#include "../tools/ps3recomp/runtime/platform/racacit_diag.h"
+static int rac_wait_stats(void)
+{
+    static int v = -1;
+    if (v < 0) {
+#if defined(__ANDROID__)
+        v = racacit_diag_switch("RACACIT_WAIT_STATS");
+#else
+        const char* e = getenv("RACACIT_WAIT_STATS");
+        v = e ? 1 : 0;
+#endif
+    }
+    return v;
+}
 static unsigned long long rac_us(void)
 {
     return (unsigned long long)std::chrono::duration_cast<std::chrono::microseconds>(
@@ -1211,7 +1360,7 @@ extern "C" volatile int g_racacit_watch_img;
 extern "C" volatile unsigned long long g_racacit_watch_t;
 static thread_local uint32_t t_watch_obj;
 /* The wait the main thread is in (its key), 0 = none: PS3_SAMPLE_INWAIT. */
-#ifdef __ANDROID__
+#if defined(__ANDROID__) || defined(__APPLE__)
 /* Defined by the Windows sampler (ppu_loader.cpp); here only this file uses it. */
 extern "C" { volatile uint32_t g_racacit_main_wait_lr = 0; }
 #else
@@ -1241,37 +1390,66 @@ static std::mutex s_ws_lock;
 void func_005004BC(ppu_context* ctx);
 extern "C" PPU_THREAD_LOCAL void (*g_trampoline_fn)(void*);
 static volatile uint32_t s_lua_main;
+static unsigned s_lua_level;   /* g_racacit_level_changes when s_lua_main was last confirmed */
+#if defined(__ANDROID__)
+extern "C" int racacit_companion_take_equip(void);   /* android_companion.cpp: a tap on the second screen */
+#endif
 static const char* racacit_lua_file_path(void)
 {
     static const char* path = (const char*)1;
     if (path == (const char*)1) path = getenv("RACACIT_LUA_FILE");
     return path;
 }
+static int racacit_cheats_on(void);
 static void racacit_lua_note_state(uint32_t L)
 {
-    if (!racacit_lua_file_path()) return;   /* only the test hook needs it: no guest reads per script call otherwise */
+#if !defined(__ANDROID__)   /* on Android the companion's equip needs it too */
+    /* only the test hook and the cheat menu need it: no guest reads per script call otherwise */
+    if (!racacit_lua_file_path() && !racacit_cheats_on()) return;
+#endif
     if (!L || L >= 0x40000000u) return;
     const uint32_t G = vm_read32(L + 16u);
     if (!G || G >= 0x40000000u) return;
     const uint32_t M = vm_read32(G + 100u);
     if (!M || M >= 0x40000000u || vm_read32(M + 16u) != G) return;
     if (M != s_lua_main) { s_lua_main = M; fprintf(stderr, "[lua-file] level Lua main thread 0x%08X (global 0x%08X)%c", M, G, 10); }
+    s_lua_level = g_racacit_level_changes;
 }
 static void racacit_lua_file(ppu_context* ctx, uint32_t L)
 {
-    const char* path = racacit_lua_file_path();
-    if (!path || !L) return;
-    static unsigned long long next;
-    const unsigned long long now = ps3_qpc_us();
-    if (now < next) return;
-    next = now + 500000ull;
-    FILE* f = fopen(path, "rb");
-    if (!f) return;
+    if (!L) return;
     char code[1024];
-    const size_t n = fread(code, 1, sizeof code - 1, f);
-    fclose(f); remove(path);
-    code[n] = 0;
-    if (!n) return;
+    size_t n = 0;
+#if defined(__ANDROID__)
+    /* A weapon tapped on the second screen, by the call the level scripts use.
+     * Not on a Lua state from before a level change: it may be gone. */
+    if (s_lua_level == g_racacit_level_changes) {
+        const int weapon = racacit_companion_take_equip();
+        if (weapon >= 0) n = (size_t)snprintf(code, sizeof code, "hero_equip(get_hero(), %d)", weapon);
+    }
+#endif
+    if (!n) {
+        const char* path = racacit_lua_file_path();
+        if (!path) return;
+        static unsigned long long next;
+        const unsigned long long now = ps3_qpc_us();
+        if (now < next) return;
+        next = now + 500000ull;
+        FILE* f = fopen(path, "rb");
+        if (!f) return;
+        n = fread(code, 1, sizeof code - 1, f);
+        fclose(f); remove(path);
+        code[n] = 0;
+        if (!n) return;
+    }
+    racacit_lua_run(ctx, L, code);
+}
+/* `code` run on Lua state L through func_005004BC, everything put back after.
+ * Returns the call's status (0 = ran). The chunk is copied below the guest sp. */
+static int racacit_lua_run(ppu_context* ctx, uint32_t L, const char* code, int quiet)
+{
+    const size_t n = strlen(code);
+    if (!L || !n || n > 3000) return -1;
     static uint64_t gpr[32], lr, ctr; static double fpr[32]; static u128 vr[32]; static uint32_t cr, xer, fpscr, vscr;
     memcpy(gpr, ctx->gpr, sizeof gpr); memcpy(fpr, ctx->fpr, sizeof fpr); memcpy(vr, ctx->vr, sizeof vr);
     cr = ctx->cr; lr = ctx->lr; ctr = ctx->ctr; xer = ctx->xer; fpscr = ctx->fpscr; vscr = ctx->vscr;
@@ -1284,15 +1462,462 @@ static void racacit_lua_file(ppu_context* ctx, uint32_t L)
     const int status = (int)(int32_t)ctx->gpr[3];
     memcpy(ctx->gpr, gpr, sizeof gpr); memcpy(ctx->fpr, fpr, sizeof fpr); memcpy(ctx->vr, vr, sizeof vr);
     ctx->cr = cr; ctx->lr = lr; ctx->ctr = ctr; ctx->xer = xer; ctx->fpscr = fpscr; ctx->vscr = vscr;
-    fprintf(stderr, "[lua-file] ran \"%s\" on 0x%08X: status %d%c", code, L, status, 10);
+    if (!quiet || status) fprintf(stderr, "[lua-file] ran \"%s\" on 0x%08X: status %d%c", code, L, status, 10);
+    return status;
+}
+
+/* ===========================================================================
+ * The cheat menu (launcher Settings > Game "Cheat menu", RACACIT_CHEATS=1;
+ * the in-game Settings menu's Cheats page, rsx_host_ui.c, where the Trophies
+ * page is). The menu only queues; the work is done here, on the main game
+ * thread at its per-frame wait (racacit_wait_begin), with the game's own
+ * script calls and functions:
+ *   bolts      hero_add_bolts(get_hero(), n)
+ *   weapons    the player record's inventory (0x00E248F0, 0x17 entries of
+ *              0x18: +0x0 id, +0x4 experience (float), +0x8 ammo, +0x15
+ *              owned, +0x16 level from 0). func_00467A58(entry) = its top
+ *              level, func_004672EC(id) = its config (the experience to leave
+ *              level L at +0x140 + 4*L), func_00467C30(entry, f1 = xp) sets
+ *              the experience and the level it reaches (the game's own level
+ *              up), func_00467D98(entry) = the game's max-out (level 5 for a
+ *              weapon with more than 4 levels), func_0046724C(entry) = its name
+ *              in the game's language (the Omega name at the top).
+ *   god mode   health_set_invulnerability(get_hero(), true), again every 2 s
+ *              (a respawn or a new level brings a new hero), hero_heal once
+ *   teleport   set_level(LEVEL_...); a boss: then the new level's debug
+ *              go(n) (it sets the story flags up to that checkpoint, saves
+ *              there and kills the hero with damage 1000 so he respawns in
+ *              it). The wait is the level's own Lua (__rc_try, once a second,
+ *              at least 11 s into the level): the hero shown, alive and
+ *              standing still for 2 s -- a kill a few seconds in, while the
+ *              ship is still landing, left Axiom with no hero (2026-11-05).
+ *              God mode is dropped for the kill (__rc_hold, 15 s) and only
+ *              re-applied to a live hero; after 2 min the jump is dropped.
+ * Skill points and trophies: none while the menu is on, and none ever again
+ * in a save a cheat was used in -- the mark is byte +0xE0C3 of the player
+ * record, which is GAME.SAV itself (padding before the save counter at
+ * +0xE0C4; no game code reads or writes it). A copy of the save from before
+ * keeps no mark. Skill points: func_0021EF30 (patch_lift.py #20); trophies:
+ * the runtime's unlock gate (sceNpTrophySetUnlockGate). The Insomniac Museum
+ * is not a destination (owner: it stays behind the 40 Zoni and Vorselon).
+ * ======================================================================== */
+void func_00467A58(ppu_context* ctx);
+void func_004672EC(ppu_context* ctx);
+void func_00467C30(ppu_context* ctx);
+void func_00467D98(ppu_context* ctx);
+void func_0046724C(ppu_context* ctx);
+void func_00466D7C(ppu_context* ctx);
+static const uint32_t kChPlayer = 0x00E248E0u;            /* [pool 0xC97940 - 0x7FC4] */
+static const uint32_t kChInv = kChPlayer + 0x10u;
+static const uint32_t kChMark = kChPlayer + 0xE0C3u;
+static int racacit_cheats_on(void)
+{
+    static int on = -1;
+    if (on < 0) { const char* e = getenv("RACACIT_CHEATS"); on = e && *e == '1'; }
+    return on;
+}
+static int racacit_rewards_blocked(void) { return racacit_cheats_on() || vm_base[kChMark] != 0; }
+static int racacit_trophy_gate(void) { return racacit_rewards_blocked(); }
+extern "C" int racacit_skillpoint_blocked(uint32_t id)
+{
+    if (!racacit_rewards_blocked()) return 0;
+    static int said;
+    if (said++ < 16) fprintf(stderr, "[cheats] skill point %u not awarded: cheats %s%c", id,
+                             racacit_cheats_on() ? "are on" : "were used in this save", 10);
+    return 1;
+}
+/* A guest function called from here (the main thread, at its wait): r3 and f1
+ * in, r3 and f1 out, every register put back. */
+static uint32_t racacit_guest_call(ppu_context* ctx, void (*fn)(ppu_context*), uint32_t r3, double f1, double* f1_out)
+{
+    static uint64_t gpr[32], lr, ctr; static double fpr[32]; static u128 vr[32]; static uint32_t cr, xer, fpscr, vscr;
+    memcpy(gpr, ctx->gpr, sizeof gpr); memcpy(fpr, ctx->fpr, sizeof fpr); memcpy(vr, ctx->vr, sizeof vr);
+    cr = ctx->cr; lr = ctx->lr; ctr = ctx->ctr; xer = ctx->xer; fpscr = ctx->fpscr; vscr = ctx->vscr;
+    const uint32_t sp = (uint32_t)ctx->gpr[1], nsp = (sp - 0x1400u) & ~15u;
+    vm_write32(nsp, 0); vm_write32(nsp + 4, sp);
+    ctx->gpr[1] = nsp; ctx->gpr[3] = r3; ctx->fpr[1] = f1;
+    fn(ctx);
+    while (g_trampoline_fn) { void (*tf)(void*) = g_trampoline_fn; g_trampoline_fn = 0; tf(ctx); }
+    const uint32_t r = (uint32_t)ctx->gpr[3];
+    if (f1_out) *f1_out = ctx->fpr[1];
+    memcpy(ctx->gpr, gpr, sizeof gpr); memcpy(ctx->fpr, fpr, sizeof fpr); memcpy(ctx->vr, vr, sizeof vr);
+    ctx->cr = cr; ctx->lr = lr; ctx->ctr = ctr; ctx->xer = xer; ctx->fpscr = fpscr; ctx->vscr = vscr;
+    return r;
+}
+static const struct { const char* name; const char* level; int go; } k_ch_dest[] = {
+    { "Great Clock: Sector A (Clank)", "LEVEL_GREAT_CLOCK_A", 0 },
+    { "Zolar Forest",                  "LEVEL_ZOLAR_FOREST", 0 },
+    { "Space: sector 1",               "LEVEL_SPACE_SECTOR_1", 0 },
+    { "Vorselon's ship",               "LEVEL_GALACTON_SHIP", 0 },
+    { "Great Clock: Sector B (Clank)", "LEVEL_GREAT_CLOCK_B", 0 },
+    { "Space: sector 2",               "LEVEL_SPACE_SECTOR_2", 0 },
+    { "Molonoth Fields",               "LEVEL_MOLONOTH", 0 },
+    { "Axiom City",                    "LEVEL_AXIOM_CITY", 0 },
+    { "Great Clock: Sector C (Clank)", "LEVEL_GREAT_CLOCK_C", 0 },
+    { "Space: sector 3",               "LEVEL_SPACE_SECTOR_3", 0 },
+    { "Krell Canyon",                  "LEVEL_KRELL_CANYON", 0 },
+    { "Agorian Battleplex",            "LEVEL_AGORIAN_ARENA", 0 },
+    { "Tombli Outpost",                "LEVEL_TOMBLI", 0 },
+    { "Great Clock: Sector D (Clank)", "LEVEL_GREAT_CLOCK_D", 0 },
+    { "Space: sector 4",               "LEVEL_SPACE_SECTOR_4", 0 },
+    { "Valkyrie Fleet",                "LEVEL_VALKYRIE_FLEET", 0 },
+    { "Nefarious Station",             "LEVEL_NEFARIOUS_STATION", 0 },
+    { "Space: sector 5",               "LEVEL_SPACE_SECTOR_5", 0 },
+    { "Gimlick Valley",                "LEVEL_GIMLICK", 0 },
+    { "Great Clock: Sector E",         "LEVEL_GREAT_CLOCK_E", 0 },
+    { "Boss: Great Clock B (Clank)",   "LEVEL_GREAT_CLOCK_B", 16 },
+    { "Boss: Axiom City",              "LEVEL_AXIOM_CITY", 9 },
+    { "Boss: Valkyrie Fleet",          "LEVEL_VALKYRIE_FLEET", 16 },
+    { "Boss: Nefarious Station",       "LEVEL_NEFARIOUS_STATION", 17 },
+    { "Boss: the final battle",        "LEVEL_GREAT_CLOCK_E", 5 },
+};
+struct RacChWeapon { int level, top; char name[64]; };
+static std::mutex s_ch_mu;
+static RacChWeapon s_ch_w[0x17];
+static int s_ch_ids[0x17], s_ch_n;
+static struct { int cmd, arg; } s_ch_q[16];
+static int s_ch_qn;
+static volatile int s_ch_god;
+static int racacit_ch_weapons(int* ids, int max)
+{
+    std::lock_guard<std::mutex> g(s_ch_mu);
+    const int n = s_ch_n < max ? s_ch_n : max;
+    for (int i = 0; i < n; i++) ids[i] = s_ch_ids[i];
+    return n;
+}
+static int racacit_ch_weapon(int id, char* name, int n, int* level, int* top)
+{
+    std::lock_guard<std::mutex> g(s_ch_mu);
+    if (id < 0 || id >= 0x17 || !s_ch_w[id].top) return 0;
+    snprintf(name, (size_t)n, "%s", s_ch_w[id].name);
+    *level = s_ch_w[id].level; *top = s_ch_w[id].top;
+    return 1;
+}
+static int racacit_ch_n_dests(void) { return (int)(sizeof k_ch_dest / sizeof k_ch_dest[0]); }
+static const char* racacit_ch_dest(int i) { return i >= 0 && i < racacit_ch_n_dests() ? k_ch_dest[i].name : ""; }
+static void racacit_ch_command(int cmd, int arg)
+{
+    std::lock_guard<std::mutex> g(s_ch_mu);
+    if (cmd == RSX_CHEAT_GOD) s_ch_god = arg ? 1 : 0;   /* the row shows it at once */
+    if (s_ch_qn < 16) { s_ch_q[s_ch_qn].cmd = cmd; s_ch_q[s_ch_qn].arg = arg; s_ch_qn++; }
+}
+static int racacit_ch_god(void) { return s_ch_god; }
+static const rsx_cheat_api k_ch_api = { racacit_ch_weapons, racacit_ch_weapon, racacit_ch_n_dests,
+                                        racacit_ch_dest, racacit_ch_command, racacit_ch_god };
+static void racacit_cheats_register(void)
+{
+    sceNpTrophySetUnlockGate(racacit_trophy_gate);
+    if (!racacit_cheats_on()) return;
+    rsx_host_ui_set_cheats(&k_ch_api);
+    fprintf(stderr, "[cheats] the cheat menu is on (Settings > Cheats): no skill points or trophies while it is%c", 10);
+}
+/* The inventory as the menu shows it: owned weapons that have levels. */
+static void racacit_ch_snapshot(ppu_context* ctx)
+{
+    RacChWeapon w[0x17]; int ids[0x17], n = 0;
+    memset(w, 0, sizeof w);
+    for (int id = 0; id < 0x17; id++) {
+        const uint32_t e = kChInv + (uint32_t)id * 0x18u;
+        if (!vm_base[e + 0x15] || vm_read32(e) != (uint32_t)id) continue;
+        const uint32_t top = racacit_guest_call(ctx, func_00467A58, e, 0.0, nullptr);
+        if (!top || top > 16) continue;
+        w[id].level = vm_base[e + 0x16]; w[id].top = (int)top;
+        const uint32_t nm = racacit_guest_call(ctx, func_0046724C, e, 0.0, nullptr);
+        if (nm && nm < 0x40000000u) {
+            int k = 0;
+            for (; k < 63 && vm_base[nm + k]; k++) w[id].name[k] = (char)vm_base[nm + k];
+            w[id].name[k] = 0;
+        }
+        if (!w[id].name[0]) snprintf(w[id].name, sizeof w[id].name, "Weapon %d", id);
+        ids[n++] = id;
+    }
+    std::lock_guard<std::mutex> g(s_ch_mu);
+    memcpy(s_ch_w, w, sizeof w); memcpy(s_ch_ids, ids, sizeof ids); s_ch_n = n;
+}
+static void racacit_ch_mark(void)
+{
+    if (!vm_base[kChMark]) fprintf(stderr, "[cheats] this save is marked: no skill points or trophies in it from now on%c", 10);
+    vm_base[kChMark] = 1;
+}
+static void racacit_ch_weapon_xp(ppu_context* ctx, uint32_t e, float xp)
+{
+    double before = 0.0, after = 0.0;
+    racacit_guest_call(ctx, func_00466D7C, e, 0.0, &before);   /* ammo capacity at the old level */
+    racacit_guest_call(ctx, func_00467C30, e, xp, nullptr);
+    racacit_guest_call(ctx, func_00466D7C, e, 0.0, &after);
+    uint32_t a = vm_read32(e + 8); float ammo; memcpy(&ammo, &a, 4);
+    if (after > 0.0 && ammo > (float)after) { ammo = (float)after; memcpy(&a, &ammo, 4); vm_write32(e + 8, a); }
+    (void)before;
+}
+static void racacit_cheats_tick(ppu_context* ctx)
+{
+    if (!racacit_cheats_on()) return;
+    const uint32_t L = s_lua_main;
+    if (!L) return;
+    const unsigned long long now = ps3_qpc_us();
+    struct { int cmd, arg; } q[16]; int nq;
+    { std::lock_guard<std::mutex> g(s_ch_mu); nq = s_ch_qn; memcpy(q, s_ch_q, sizeof q); s_ch_qn = 0; }
+    static int go_n; static uint32_t go_from; static unsigned long long go_t, god_t, snap_t;
+    char code[640];
+    for (int i = 0; i < nq; i++) {
+        const int cmd = q[i].cmd, arg = q[i].arg;
+        racacit_ch_mark();
+        if (cmd == RSX_CHEAT_BOLTS) {
+            snprintf(code, sizeof code, "hero_add_bolts(get_hero(), %d)", arg);
+            racacit_lua_run(ctx, L, code);
+        } else if (cmd == RSX_CHEAT_WEAPON_UP && arg >= 0 && arg < 0x17) {
+            const uint32_t e = kChInv + (uint32_t)arg * 0x18u;
+            const uint32_t top = racacit_guest_call(ctx, func_00467A58, e, 0.0, nullptr);
+            const uint32_t lv = vm_base[e + 0x16];
+            if (!vm_base[e + 0x15] || !top || lv >= top) continue;
+            const uint32_t cfg = racacit_guest_call(ctx, func_004672EC, (uint32_t)arg, 0.0, nullptr);
+            if (!cfg || cfg >= 0x40000000u) continue;
+            const uint32_t t = vm_read32(cfg + 0x140u + 4u * lv); float xp; memcpy(&xp, &t, 4);
+            racacit_ch_weapon_xp(ctx, e, xp);
+            fprintf(stderr, "[cheats] weapon %d: level %u -> %u%c", arg, lv + 1, vm_base[e + 0x16] + 1u, 10);
+        } else if (cmd == RSX_CHEAT_WEAPONS_MAX || cmd == RSX_CHEAT_WEAPONS_RESET) {
+            int k = 0;
+            for (int id = 0; id < 0x17; id++) {
+                const uint32_t e = kChInv + (uint32_t)id * 0x18u;
+                if (!vm_base[e + 0x15] || vm_read32(e) != (uint32_t)id) continue;
+                if (!racacit_guest_call(ctx, func_00467A58, e, 0.0, nullptr)) continue;
+                if (cmd == RSX_CHEAT_WEAPONS_MAX) racacit_guest_call(ctx, func_00467D98, e, 0.0, nullptr);
+                else racacit_ch_weapon_xp(ctx, e, 0.0f);
+                k++;
+            }
+            fprintf(stderr, "[cheats] %d weapons %s%c", k, cmd == RSX_CHEAT_WEAPONS_MAX ? "maxed out" : "back to level 1", 10);
+        } else if (cmd == RSX_CHEAT_GOD) {
+            snprintf(code, sizeof code, arg ? "health_set_invulnerability(get_hero(), true); hero_heal(get_hero())"
+                                            : "health_set_invulnerability(get_hero(), false)");
+            racacit_lua_run(ctx, L, code);
+            god_t = now;
+        } else if (cmd == RSX_CHEAT_GO && arg >= 0 && arg < racacit_ch_n_dests()) {
+            snprintf(code, sizeof code, "set_level(%s)", k_ch_dest[arg].level);
+            racacit_lua_run(ctx, L, code);
+            go_n = k_ch_dest[arg].go; go_from = L; go_t = 0;
+            fprintf(stderr, "[cheats] teleport: %s%c", k_ch_dest[arg].name, 10);
+        }
+        snap_t = 0;   /* the menu sees the change at once */
+    }
+    if (go_n && L != go_from) {   /* the new level's scripts are running */
+        if (!go_t) go_t = now;
+        else if (now - go_t > 3000000ull) {
+            snprintf(code, sizeof code,
+                     "__rc_n = 0 __rc_p = nil __rc_t = 0 "
+                     "function __rc_try() "
+                     "__rc_t = __rc_t + 1 "
+                     "if __rc_t > 120 then return end "
+                     "local h = get_hero() "
+                     "if __rc_t < 8 or is_hidden(h) or not is_alive(h) then __rc_n = 0 __rc_p = nil on_elapsed(1, __rc_try) return end "
+                     "local p = get_pos(h) "
+                     "if __rc_p and get_dist(p, __rc_p) < 0.05 then __rc_n = __rc_n + 1 else __rc_n = 0 end "
+                     "__rc_p = p "
+                     "if __rc_n < 2 then on_elapsed(1, __rc_try) return end "
+                     "__rc_hold = true health_set_invulnerability(h, false) go(%d) "
+                     "on_elapsed(15, function() __rc_hold = nil end) "
+                     "end "
+                     "on_elapsed(1, __rc_try)", go_n);
+            racacit_lua_run(ctx, L, code, 1);
+            fprintf(stderr, "[cheats] boss jump: go(%d) once the hero has stood free for 2 s%c", go_n, 10);
+            go_n = 0;
+        }
+    }
+    if (s_ch_god && now - god_t > 2000000ull) {   /* not while a boss jump respawns him */
+        god_t = now;
+        racacit_lua_run(ctx, L, "if not __rc_hold and is_alive(get_hero()) then health_set_invulnerability(get_hero(), true) end", 1);
+    }
+    if (now - snap_t > 1000000ull) { snap_t = now; racacit_ch_snapshot(ctx); }
+}
+
+/* The main thread's two waits on SPU jobs, 10-15 ms of a heavy frame: the game spins, as it
+ * could on a PS3 with its own PPU. On a phone that holds the fastest core while the lanes that
+ * it waits for queue up on the others. After a short spin (most hand-offs are quick) it sleeps
+ * in small steps instead. RACACIT_WAIT_SPIN_US, RACACIT_WAIT_SLEEP_US (0: spin as the game does). */
+extern "C" uint64_t ppu_timebase_now(void);
+#if defined(__ANDROID__)
+#include <sys/auxv.h>
+#include <sched.h>
+/* Set by main.cpp: the main thread has a core of its own (android_cpu_policy). */
+extern "C" { int g_racacit_main_core_own; }
+/* Where the main thread has a core nobody else may use, waiting on it holds nothing up, so it need
+ * not go through the scheduler: 16,000 sleeps a second at 30-60 us a wake, dozens of waits a frame.
+ * WFE stops the core until the line of the word it waits for is written, and wakes at once; the
+ * kernel's event stream ends it within ~100 us regardless (without one, the sleep below). The word
+ * can change just before the WFE: then that is the 100 us. RACACIT_WAIT_WFE=0: always sleep. */
+static int racacit_wfe_ok(void)
+{
+    static int ok = -1;
+    if (ok < 0) {
+        const char* e = getenv("RACACIT_WAIT_WFE");
+        ok = !(e && *e == '0') && g_racacit_main_core_own && (getauxval(AT_HWCAP) & (1ul << 2));   /* HWCAP_EVTSTRM */
+    }
+    return ok;
+}
+#endif
+#if defined(__ANDROID__)
+/* Time the main thread has spent in these waits, in timebase ticks: the companion's Status
+ * page shows it beside the thread's CPU share, which counts the WFE below as running. */
+extern "C" { unsigned long long g_racacit_main_wait_ticks; }
+/* main.cpp: the core swap, polled once a wait is long, undone when it ends. */
+extern "C" void racacit_swap_poll(unsigned long long waited_tb);
+extern "C" void racacit_swap_end(void);
+#endif
+/* The PPU spin hint ("or 31,31,31", 32 in a row) in the collision module's 25 wait loops, lifted as
+ * this call (game/src/recomp/ppu_recomp_016/019.cpp, v113-android.24). As an instruction it does
+ * nothing. With the collision jobs as fibers (RACACIT_COLL_FIBER=1, spu_drain.c) the main thread
+ * runs them from here; otherwise it is one load. (It also slept here for the co-located collision
+ * lanes of .23-.26, RACACIT_COLOC: removed, measured worse.) */
+#if defined(__ANDROID__)
+#include <unistd.h>
+#include <sys/syscall.h>
+extern "C" { extern long g_racacit_main_tid; }
+#endif
+#if defined(__ANDROID__)
+/* spu_drain.c: the collision jobs as fibers (v113-android.27). Published ones the main thread runs
+ * from its waits: the answer it spins for is what they compute. */
+extern "C" { extern volatile int g_racacit_fibers_live; int racacit_fibers_service(void); }
+#endif
+extern "C" void racacit_ppu_spin_hint(ppu_context* ctx)
+{
+    (void)ctx;
+#if defined(__ANDROID__)
+    if (__builtin_expect(!__atomic_load_n(&g_racacit_fibers_live, __ATOMIC_RELAXED), 1)) return;
+    static thread_local int t_main = -1;
+    if (t_main < 0) t_main = g_racacit_main_tid && (long)syscall(SYS_gettid) == g_racacit_main_tid;
+    if (t_main) racacit_fibers_service();
+#endif
+}
+#if defined(__ANDROID__)
+extern "C" { extern volatile int g_racacit_top_lent; void racacit_lend_top_end(void); }   /* main.cpp */
+#endif
+extern "C" void racacit_wait_poll(uint64_t* since, uint32_t ea)
+{
+#if defined(__ANDROID__)
+    static long s_spin = -1, s_sleep_ns;
+    if (s_spin < 0) {
+        const char* e = getenv("RACACIT_WAIT_SLEEP_US");
+        s_sleep_ns = (e ? atol(e) : 20) * 1000;
+        e = getenv("RACACIT_WAIT_SPIN_US");
+        s_spin = (e ? atol(e) : 20) * 80;   /* 79.8 ticks of the timebase a microsecond */
+    }
+    if (!s_sleep_ns) return;
+    { if (__builtin_expect(g_racacit_top_lent, 0) && g_racacit_main_tid && (long)syscall(SYS_gettid) == g_racacit_main_tid) racacit_lend_top_end(); }
+    const uint64_t now = ppu_timebase_now();
+    /* Each poll adds the time since the one before it in the same wait (a gap over 1 ms is
+     * not a poll loop). The two waits are the main thread's; only it writes the sum. */
+    static __thread uint64_t t_last;
+    if (*since && now - t_last < 79800u)
+        __atomic_store_n(&g_racacit_main_wait_ticks, g_racacit_main_wait_ticks + (now - t_last), __ATOMIC_RELAXED);
+    t_last = now;
+    /* Collision jobs as fibers (spu_drain.c): run the ones that have their answer, here. While any
+     * live, no WFE either -- a fiber's event can come from another core's write, and only this
+     * thread runs them. */
+    if (__atomic_load_n(&g_racacit_fibers_live, __ATOMIC_RELAXED)) {
+        if (!*since) *since = now;
+        /* v121-android.65: a wait in which no fiber had its answer, once long, gives the top core to the
+         * lane running the job (main.cpp racacit_swap_poll, RACACIT_SWAP_FIBERS); racacit_wait_end undoes it. */
+        if (!racacit_fibers_service() && now - *since >= (uint64_t)s_spin) racacit_swap_poll(now - *since);
+        return;
+    }
+    if (!*since) { *since = now; return; }
+    if (now - *since < (uint64_t)s_spin) return;
+    racacit_swap_poll(now - *since);   /* main.cpp: the top core to the lane running the job, once long */
+    if (ea >= 0x10000u && racacit_wfe_ok()) {
+        uint32_t v;
+        const volatile uint32_t* const p = (const volatile uint32_t*)(vm_base + (ea & ~3u));
+        __asm__ volatile("ldaxr %w0, [%1]\n\twfe" : "=&r"(v) : "r"(p) : "memory");
+        return;
+    }
+    const struct timespec ts = { 0, s_sleep_ns };
+    nanosleep(&ts, NULL);
+#else
+    (void)since; (void)ea;
+#endif
+}
+
+/* Inside one of these waits (this thread): ppu_loader.cpp's "[main]" leaves out the syscalls and
+ * library calls made within them, which [frame-waits] already counts. */
+thread_local int t_racacit_in_wait;
+
+/* ---------------------------------------------------------------------------
+ * Level fixes (RACACIT_LEVEL_FIXES, default on; =0 plays every level as the
+ * game wrote it): Lua run on the level's own scripts.
+ *
+ * Vorselon's ship (level 4), third visit, after the 40 Zoni
+ * (galacton_ship gameplay_third_visit.lua). The visit starts -- dropships,
+ * the hangar music, every wave and door after them -- only when its main loop
+ * sees Ratchet in the area hangar_is_view_thru_catalyst (the staircase at the
+ * back of the hangar) AND is_view_thru_volume(hangar_is_view_thru_target)
+ * (the camera turned back toward the open hangar door) in the same frame.
+ * Nothing on screen asks for that: the owner landed, walked the hangar and
+ * nothing happened (2026-11-07; reproduced with his save -- the trigger itself
+ * works). Here both checks also answer yes while Ratchet is in
+ * visit_2_enemy_spawn_vol_1 (the landing pad by the Aphelion) or in
+ * hangar_is_view_thru_target (the hangar mouth: every way in crosses it), so the
+ * fight starts as he arrives
+ * at the hangar. The stairs-and-camera way still works; everything after the trigger
+ * is the game's own.
+ *
+ * Each level script runs with its own globals, so the chunk goes where the
+ * proven test (RACACIT_LUA_FILE) put it: on the Lua thread of a script call
+ * (the scripts' own environment) and at the main thread's per-frame wait (the
+ * level's main thread, seen at a script call in this level, never a freed
+ * one). Tried once a second per path, on level 4 only; a death or reload
+ * re-runs the scripts and the next try puts it back (__racit_v3fix). */
+uint32_t racit_current_level();   /* discord_rpc.cpp */
+static const char kFixVorselon3[] =
+    "if __racit_v3fix == nil and current_visit == 3 and hangar_is_view_thru_catalyst ~= nil and "
+    "hangar_is_view_thru_target ~= nil and visit_2_enemy_spawn_vol_1 ~= nil then "
+    "__racit_v3fix = true "
+    "local inside0, view0 = is_inside, is_view_thru_volume "
+    "local function arriving() return inside0(get_hero(), visit_2_enemy_spawn_vol_1) or "
+    "inside0(get_hero(), hangar_is_view_thru_target) end "
+    "is_inside = function(a, b, ...) "
+    "if b == hangar_is_view_thru_catalyst and arriving() then return true end "
+    "return inside0(a, b, ...) end "
+    "is_view_thru_volume = function(v, ...) "
+    "if v == hangar_is_view_thru_target and arriving() then return true end "
+    "return view0(v, ...) end "
+    "assert(false, \"RACiT level fix: Vorselon's ship visit 3 starts at the landing pad or the hangar mouth\") "
+    "end";
+static void racacit_level_fix(ppu_context* ctx, uint32_t L, int at_wait)
+{
+    static int on = -1;
+    if (on < 0) { const char* e = getenv("RACACIT_LEVEL_FIXES"); on = !(e && *e == '0'); }
+    if (!on || racit_current_level() != 4u) return;
+    static uint32_t s_main; static unsigned s_main_gen = ~0u;
+    if (!at_wait) {
+        if (!L || L >= 0x40000000u) return;
+        const uint32_t G = vm_read32(L + 16u);
+        if (G && G < 0x40000000u) {
+            const uint32_t M = vm_read32(G + 100u);
+            if (M && M < 0x40000000u && vm_read32(M + 16u) == G) { s_main = M; s_main_gen = g_racacit_level_changes; }
+        }
+    } else {
+        if (s_main_gen != g_racacit_level_changes || !s_main) return;   /* not seen in this level */
+        L = s_main;
+    }
+    static unsigned long long next[2];
+    const unsigned long long now = ps3_qpc_us();
+    if (now < next[at_wait]) return;
+    next[at_wait] = now + 1000000ull;
+    if (racacit_lua_run(ctx, L, kFixVorselon3, 1) == 2) {
+        static int n;
+        if (n++ < 8) fprintf(stderr, "[level-fix] Vorselon's ship, third visit: the hangar fight starts at the landing pad or the hangar mouth (%s; RACACIT_LEVEL_FIXES=0 for the original trigger)%c",
+                             at_wait ? "main thread" : "script thread", 10);
+    }
 }
 
 extern "C" void racacit_wait_begin(ppu_context* ctx)
 {
+    t_racacit_in_wait++;
+#if defined(__ANDROID__)
+    racacit_swap_end();   /* (nothing to undo unless a wait ended unseen) */
+#endif
     racacit_spu_kick();
     /* The main game thread's context, for the stall watch (main.cpp): it is
      * the one that waits on MobyPreRender every frame. */
-    if ((uint32_t)ctx->lr == 0x006459D0u) { g_racacit_main_ctx = ctx; racacit_lua_file(ctx, s_lua_main); }
+    if ((uint32_t)ctx->lr == 0x006459D0u) { g_racacit_main_ctx = ctx; racacit_lua_file(ctx, s_lua_main); racacit_cheats_tick(ctx); racacit_level_fix(ctx, 0, 1); }
     if (!rac_wait_stats()) return;
     if (t_wait_depth++ == 0) {
         t_wait_t0 = rac_us(); t_wait_lr = (uint32_t)ctx->lr;
@@ -1316,6 +1941,10 @@ extern "C" void racacit_wait_begin(ppu_context* ctx)
 
 extern "C" void racacit_wait_end(void)
 {
+    if (t_racacit_in_wait > 0) t_racacit_in_wait--;
+#if defined(__ANDROID__)
+    racacit_swap_end();   /* the main thread back on the top core, the lane off it */
+#endif
     if (!rac_wait_stats() || t_wait_depth <= 0 || --t_wait_depth != 0) return;
     const unsigned long long now = rac_us(), d = now - t_wait_t0;
     g_racacit_main_wait_lr = 0;
@@ -1795,4 +2424,207 @@ extern "C" void racacit_snd_play_hook(ppu_context* ctx, int tag)
         fputc(10, stderr);
     }
     __sync_lock_release(&mu);
+}
+
+/* ---------------------------------------------------------------------------
+ * Update 1.20's hero part masks in the disc build
+ *
+ * func_004C46FC builds the 64-bit part masks (+0x118) of the hero's model
+ * and of the companion model func_00330774 returns, from the appearance
+ * globals func_004C3C44 unpacked (r2 - 0x5500 -> -0x7FFC): +0xF4 armor style
+ * (0..4, also +0x170), +0xF8 skin (1..7, 0 none), +0xFC group (0..2) and its
+ * three row choices at +0xD0 + group * 0xC. Update 1.20 (its function at 4C4D9C, not a disc address)
+ * changed what that produces:
+ *  - skin 7 adds bit 2 to its skin bits and takes reduced armor parts
+ *    (style 1 and 0: 0x2A8, 2: 0x20A8, 3: 0x220A8, 4: 0x2220A8), all with the
+ *    head test (the hero's +0x2000000 / +2 by func_0061D018);
+ *  - armor style 3 no longer takes the head test;
+ *  - group 1: row 3's columns give 0x200/0x400/0x800 (the disc swapped the
+ *    last two);
+ *  - groups 0 and 2: row 2's columns 1 and 2 swap, and an unset row (3) adds
+ *    no part (the disc read the byte after the row's three).
+ * patch_lift.py calls this where func_004C46FC's mask paths meet
+ * (loc_004C4C68) and it writes both masks as 1.20 would; the rows' bound (4
+ * in 1.20, 3 on the disc) and func_004C3C44's default are patched in place.
+ * Everything here is a disc 1.00 address: only that lift calls it.
+ * -----------------------------------------------------------------------*/
+extern "C" uint64_t vm_read64(uint64_t a);
+static inline uint64_t racacit_bit64(uint32_t b) { return (b & 64u) ? 0 : (1ull << (b & 63u)); }
+extern "C" void racacit_u120_part_masks(ppu_context* ctx)
+{
+    const uint32_t toc = (uint32_t)ctx->gpr[2];
+    const uint32_t tb = vm_read32(toc - 0x5500u);
+    const uint32_t G = vm_read32(tb - 0x7FFCu);
+    const uint32_t H = vm_read32((uint32_t)ctx->gpr[27] + 0x14u);
+    const uint32_t style = vm_read32(G + 0xF4u), skin = vm_read32(G + 0xF8u), group = vm_read32(G + 0xFCu);
+    const uint32_t rows = G + 0xD0u + group * 0xCu;
+    /* func_0061D018: 1 when the word at (r2 - 0x5088 -> -0x8000) + 4 is 0 */
+    const int32_t hw = (int32_t)vm_read32(vm_read32(vm_read32(toc - 0x5088u) - 0x8000u) + 4u);
+    const int head = hw == 0;
+
+    uint64_t m;
+    bool direct = false, full = true;
+    uint64_t sk = 0;
+    switch (skin) {
+    case 1: sk = 0x2000000000000000ull; break;
+    case 2: m = 0x8000000000000000ull; direct = true; break;
+    case 3: m = 0x1000000000000000ull; direct = true; break;
+    case 4: m = 0x0800000000000000ull | (head ? 0x2000000ull : 2ull) | 1ull; direct = true; break;
+    case 5: m = 0x4000000000000000ull; direct = true; break;
+    case 6: m = 0x80000000ull; direct = true; break;
+    case 7: sk = 0x0000002000000004ull; full = false; break;
+    default: break;
+    }
+    if (!direct) {
+        bool test = true, one = true;
+        switch ((int32_t)style) {
+        case 2: m = sk | (full ? 0x121A8u : 0x20A8u); break;
+        case 3: m = sk | (full ? 0x1321A8u : 0x220A8u); test = !full; break;
+        case 4: m = sk | (full ? 0x12321A8u : 0x2220A8u); test = one = !full; break;
+        case 1: m = sk | (full ? 0x3A8u : 0x2A8u); break;
+        default: m = sk | (full ? 0x2ACu : 0x2A8u); break;
+        }
+        if (test) m |= head ? 0x2000000ull : 2ull;
+        if (one) m |= 1ull;
+        m |= 0x40ull;   /* +0x170 (the style) is the same in both versions: left as written */
+    }
+    vm_write64(H + 0x118u, m);
+
+    const uint32_t r0 = vm_read32(rows), r1 = vm_read32(rows + 4u), r2 = vm_read32(rows + 8u);
+    if (group == 1) {
+        m |= 0x100ull << 32;
+        if (r2 == 0) m |= 0x200ull << 32;
+        else if (r2 == 1) m |= 0x400ull << 32;
+        else if (r2 == 2) m |= 0x800ull << 32;
+        m |= racacit_bit64(44u + (r1 + 2u) % 3u);
+        vm_write64(H + 0x118u, m);
+    } else if (group == 0 || group == 2) {
+        /* func_00330774(group): the model the group's choices go on */
+        const uint32_t mb = vm_read32(toc - 0x6F60u);
+        const uint32_t idx = vm_read32(vm_read32(mb - 0x8000u) + group * 4u + 4u);
+        const uint32_t mt = vm_read32(mb - 0x7FFCu);
+        if (idx >= vm_read32(mt + 0x18u)) return;
+        const uint32_t P = vm_read32(mt) + idx * 0x180u;
+        const uint32_t t = vm_read32(vm_read32(P + 0x54u) + 0x94u);
+        const uint32_t T = vm_read32(tb - 0x7FCCu);
+        const uint32_t a0 = vm_read32(T + group * 12u), a1 = vm_read32(T + group * 12u + 4u),
+                       a2 = vm_read32(T + group * 12u + 8u), none = vm_read32(T + 0x24u + group * 4u);
+        uint64_t pm = racacit_bit64(vm_read8(t + a0 + r0)) | 1ull;
+        if (r1 == 0) pm |= racacit_bit64(vm_read8(t + a1));
+        else if (r1 == 1) pm |= racacit_bit64(vm_read8(t + a1 + 2u));
+        else if (r1 == 2) pm |= racacit_bit64(vm_read8(t + a1 + 1u));
+        if ((int32_t)r2 != (int32_t)none) pm |= racacit_bit64(vm_read8(t + a2 + r2));
+        vm_write64(P + 0x118u, pm);
+    }
+}
+
+/* ---------------------------------------------------------------------------
+ * Update 1.20's level heap budget in the disc build (patch_lift step 21).
+ * func_0032C7A4, the level loader, extends the level pool so a level gets at
+ * least a fixed budget past its image: 0x740000 on the disc for every level.
+ * Update 1.20 (func_0032C800) raised it to 0x820000, and to 0x8A0000 on the
+ * five space sectors (levels 3, 6, 10, 15 and 18). The current level is the
+ * read func_00299EB4 makes through the TOC.
+ * -------------------------------------------------------------------------*/
+extern "C" uint32_t racacit_u120_level_budget(ppu_context* ctx)
+{
+    const uint32_t t = vm_read32(ctx->gpr[2] - 0x72C8);
+    switch (vm_read32(vm_read32(t - 0x7FFC))) {
+    case 3: case 6: case 10: case 15: case 18: return 0x8A0000u;
+    default: return 0x820000u;
+    }
+}
+
+/* ---------------------------------------------------------------------------
+ * Update 1.20's space-mission bits resync in the disc build. Five bits at
+ * G+0x13D94 (func_002252A4 ORs one in; at 0x1F it unlocks entry 0x1E of the
+ * trophy-style table through func_0029DB40) are set on the disc only by a
+ * level-script command, so a save that finished those missions without the
+ * script setting a bit could never complete the mask. Update 1.20's
+ * func_0047B7E8 (an init method) re-derives two of them from saved mission
+ * flags, read through the game's named-flag lookup (disc func_00245AB4):
+ *   ss4_mission_convoy_completed                     -> bit 8
+ *   ss1_mission_radioactive_space_completed and
+ *   ss1_mission_tow_complete                         -> bit 1
+ * Called at the disc function's return; the flag names (absent from the disc
+ * executable) sit below the guest stack pointer during the calls, and every
+ * register is put back after them. RACACIT_U120_BITS_LOG=1 logs each run.
+ * -------------------------------------------------------------------------*/
+void func_00245AB4(ppu_context* ctx);   /* named flag -> r3 (byte) */
+void func_002252A4(ppu_context* ctx);   /* G+0x13D94 |= r3 */
+extern "C" void racacit_u120_space_bits(ppu_context* ctx)
+{
+    uint64_t gpr[32], lr = ctx->lr, ctr = ctx->ctr; double fpr[32]; u128 vr[32];
+    const uint32_t cr = ctx->cr, xer = ctx->xer, fpscr = ctx->fpscr, vscr = ctx->vscr;
+    memcpy(gpr, ctx->gpr, sizeof gpr); memcpy(fpr, ctx->fpr, sizeof fpr); memcpy(vr, ctx->vr, sizeof vr);
+    const uint32_t sp = (uint32_t)ctx->gpr[1], nsp = (sp - 0x400u) & ~15u, data = nsp + 0x100u;
+    vm_write32(nsp, 0); vm_write32(nsp + 4u, sp);   /* back chain */
+    auto flag = [&](const char* name) -> int {
+        uint32_t i = 0;
+        for (; name[i]; i++) vm_write8(data + i, (uint8_t)name[i]);
+        vm_write8(data + i, 0);
+        ctx->gpr[1] = nsp; ctx->gpr[2] = gpr[2]; ctx->gpr[3] = data; ctx->gpr[4] = 0; ctx->lr = 0x0047B828u;
+        func_00245AB4(ctx); racacit_guest_drain(ctx);
+        return (ctx->gpr[3] & 0xFFu) != 0;
+    };
+    auto set_bit = [&](uint32_t bit) {
+        ctx->gpr[1] = nsp; ctx->gpr[2] = gpr[2]; ctx->gpr[3] = bit; ctx->lr = 0x0047B828u;
+        func_002252A4(ctx); racacit_guest_drain(ctx);
+    };
+    const int convoy = flag("ss4_mission_convoy_completed");
+    if (convoy) set_bit(8u);
+    const int radio = flag("ss1_mission_radioactive_space_completed");
+    const int tow = radio ? flag("ss1_mission_tow_complete") : 0;
+    if (radio && tow) set_bit(1u);
+    static int log = -1;
+    if (log < 0) log = getenv("RACACIT_U120_BITS_LOG") ? 1 : 0;
+    if (log) {
+        const uint32_t g = vm_read32(vm_read32((uint32_t)gpr[2] - 0x7300u) - 0x7FD4u);
+        fprintf(stderr, "[u120-bits] convoy %d radioactive %d tow %d -> mask 0x%02X%c",
+                convoy, radio, tow, vm_read8(g + 0x13D94u), 10);
+    }
+    memcpy(ctx->gpr, gpr, sizeof gpr); memcpy(ctx->fpr, fpr, sizeof fpr); memcpy(ctx->vr, vr, sizeof vr);
+    ctx->cr = cr; ctx->lr = lr; ctx->ctr = ctr; ctx->xer = xer; ctx->fpscr = fpscr; ctx->vscr = vscr;
+}
+
+/* ---------------------------------------------------------------------------
+ * Frame-rate unlock, step 1: the game clock (patch_lift step 27).
+ *
+ * The engine steps by real elapsed time: Clock_Tick (func_0066A424, r3 =
+ * the clock at 0xF70D00) advances its timers by the timebase delta, clamped
+ * to [min_dt, max_dt] (clock+0x04 / +0x08). Every level load (func_0032AD18)
+ * sets min_dt to 1/60 s, so above 60 FPS each frame would still advance
+ * 1/60 s of game time and the game would run fast. The frame end also sleeps
+ * until 0.9 * min_dt has passed (a 66.7 FPS cap in the sync modes gameplay
+ * uses).
+ *
+ * RACACIT_FPS_CAP=<fps> above 60 lowers min_dt to 1/(2*cap) at every tick,
+ * which also undoes the level-load reset and shortens that sleep. Unset or
+ * <= 60, nothing changes. RACACIT_CLOCK_LOG=1 (or a cap) logs game time and
+ * real time against wall time every 5 s: both must stay 1.000.
+ * -------------------------------------------------------------------------*/
+extern "C" void racacit_clock_tick(ppu_context* ctx)
+{
+    static int cap = -1;
+    if (cap < 0) { const char* e = getenv("RACACIT_FPS_CAP"); cap = e ? atoi(e) : 0; }
+    static int log = -1;
+    if (log < 0) log = (cap > 60 || getenv("RACACIT_CLOCK_LOG")) ? 1 : 0;
+    const uint32_t clk = (uint32_t)ctx->gpr[3];
+    if (cap > 60) {
+        const float want = 1.0f / (2.0f * (float)cap);
+        if (racacit_rdf(clk + 0x04u) > want) racacit_wrf(clk + 0x04u, want);
+    }
+    if (!log) return;
+    static unsigned long long w0; static float r0, g0; static uint32_t n0;
+    const unsigned long long w = (unsigned long long)std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    const float r = racacit_rdf(clk + 0x24u), g = racacit_rdf(clk + 0x84u);
+    const uint32_t n = vm_read32(clk + 0xD0u);
+    if (!w0) { w0 = w; r0 = r; g0 = g; n0 = n; return; }
+    if (w - w0 < 5000000ull) return;
+    const double dw = (double)(w - w0) / 1e6;
+    fprintf(stderr, "[clock] 5 s: real %.3f game %.3f (x wall), %.1f ticked frames/s, min_dt %.5f max_dt %.4f mode %u%c",
+            (r - r0) / dw, (g - g0) / dw, (double)(n - n0) / dw, racacit_rdf(clk + 0x04u), racacit_rdf(clk + 0x08u),
+            vm_read32(clk), 10);
+    w0 = w; r0 = r; g0 = g; n0 = n;
 }

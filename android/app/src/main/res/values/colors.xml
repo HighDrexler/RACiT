@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="acitNavy">#FF07101E</color>
+    <color name="acitCyan">#FF4CC3F5</color>
+    <color name="acitOrange">#FFFF9B21</color>
+    <!-- 0.1.0: the launcher icon's plate, the game's deep teal (Acit.BG_BOTTOM). The emblem alone was
+         white on transparent: invisible on light home screens and white icon plates (One UI). -->
+    <color name="ic_launcher_bg">#FF0B2228</color>
+</resources>

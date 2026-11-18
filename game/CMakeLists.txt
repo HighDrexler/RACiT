@@ -86,9 +86,44 @@ set(RACACIT_LIFTED_FLAGS "")
 if(WIN32 AND NOT MSVC)
     set(RACACIT_LIFTED_FLAGS "-fno-auto-import")
 endif()
+# RACACIT_CPU_COMPAT=ON: the older-CPU build, RaCACiT_compat.exe, for CPUs without
+# AVX2/FMA/BMI2 (Sandy/Ivy Bridge, AMD FX and older). x86-64-v2 (SSE4.2 + POPCNT,
+# Intel Nehalem / AMD Bulldozer, 2008-2011 on). PPC fmadd then goes through
+# libm's exact software fma(): the same results, slower. The launcher picks
+# this exe on such CPUs (Settings > Performance > Game build). A build tree of
+# its own: game/build-win-compat.
+option(RACACIT_CPU_COMPAT "Build for x86-64 CPUs without AVX2 (RaCACiT_compat.exe)" OFF)
 if(NOT ANDROID AND (WIN32 OR CMAKE_SYSTEM_PROCESSOR MATCHES "AMD64|x86_64|X86_64"))
-    set(RACACIT_SIMD_FLAGS "-mavx2;-mfma;-mbmi2")
-    set(PS3RECOMP_AVX2 ON CACHE BOOL "" FORCE)
+    if(RACACIT_CPU_COMPAT)
+        set(RACACIT_SIMD_FLAGS "-msse4.2;-mpopcnt")
+        set(PS3RECOMP_AVX2 OFF CACHE BOOL "" FORCE)
+    else()
+        set(RACACIT_SIMD_FLAGS "-mavx2;-mfma;-mbmi2")
+        set(PS3RECOMP_AVX2 ON CACHE BOOL "" FORCE)
+    endif()
+endif()
+# The hot code lists (scripts/dev/hot_funcs.py) name COFF sections, which the Windows
+# linker groups by the part before the $. On ELF the same code gets one output section
+# per tier: ".text_hot_hp0" and so on. lld leaves those names alone, as it would not
+# ".text.hot." without an extra flag.
+set(RACACIT_HOT_DIR "${CMAKE_CURRENT_LIST_DIR}")
+set(RACACIT_HOT OFF)
+if(WIN32 AND NOT MSVC)
+    set(RACACIT_HOT ON)
+elseif((ANDROID OR CMAKE_SYSTEM_NAME STREQUAL "Linux") AND EXISTS "${CMAKE_CURRENT_LIST_DIR}/hot_ppu.h")
+    set(RACACIT_HOT ON)
+    set(RACACIT_HOT_DIR "${CMAKE_BINARY_DIR}/hot_elf")
+    foreach(f hot_ppu.h hot_spu0.h hot_spu1.h)
+        file(READ "${CMAKE_CURRENT_LIST_DIR}/${f}" hot_text)
+        string(REPLACE ".text$" ".text_hot_" hot_text "${hot_text}")
+        set(hot_old "")
+        if(EXISTS "${RACACIT_HOT_DIR}/${f}")
+            file(READ "${RACACIT_HOT_DIR}/${f}" hot_old)
+        endif()
+        if(NOT hot_old STREQUAL hot_text)
+            file(WRITE "${RACACIT_HOT_DIR}/${f}" "${hot_text}")
+        endif()
+    endforeach()
 endif()
 add_subdirectory("${PS3RECOMP_DIR}" "${CMAKE_BINARY_DIR}/ps3recomp_sdk"
                  EXCLUDE_FROM_ALL)
@@ -208,6 +243,8 @@ target_sources(${PROJECT_NAME} PRIVATE
     ${ZLIB_SOURCES}
     stubs.cpp
     button_prompts.cpp
+    menu_archive.cpp
+    desktop_mouse.cpp
     discord_rpc.cpp
     ${LIBSRE_SOURCES}
     ${PS3RECOMP_SCAFFOLD}
@@ -240,16 +277,6 @@ if(SPU_SOURCES)
         # three blocks in four behind real time). Every x86-64 CPU since 2008.
         if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64" AND NOT ANDROID)
             set_source_files_properties(${SPU_SOURCES} PROPERTIES COMPILE_OPTIONS "-O3;-msse4.1;-ffp-contract=off;${RACACIT_SIMD_FLAGS};${RACACIT_LIFTED_FLAGS}")
-            # The hot modules together in the exe (scripts/dev/hot_funcs.py).
-            if(WIN32 AND EXISTS "${CMAKE_CURRENT_LIST_DIR}/hot_spu_modules.cmake")
-                include("${CMAKE_CURRENT_LIST_DIR}/hot_spu_modules.cmake")
-                foreach(t 0 1)
-                    foreach(m ${RACACIT_HOT_SPU${t}})
-                        set_property(SOURCE "${SPU_DIR}/${m}/spu_recomp.c" APPEND PROPERTY
-                                     COMPILE_OPTIONS "-include;${CMAKE_CURRENT_LIST_DIR}/hot_spu${t}.h")
-                    endforeach()
-                endforeach()
-            endif()
         else()
             set_source_files_properties(${SPU_SOURCES} PROPERTIES COMPILE_OPTIONS "-O2")
         endif()
@@ -259,6 +286,33 @@ endif()
 # contraction (arm64 fuses a*b+c by default; the SPU rounds each step).
 if(ANDROID AND SPU_SOURCES)
     set_source_files_properties(${SPU_SOURCES} PROPERTIES COMPILE_OPTIONS "-O3;-ffp-contract=off")
+    # SPU float math as RPCS3's default "approximate" accuracy (spu_helpers.h, SPU_XF_APPROX):
+    # no range check after each float op. RACIT_SPU_FLOAT=exact in the environment builds
+    # the checked (bit-exact) way, as before v113-android.4.
+    if(NOT "$ENV{RACIT_SPU_FLOAT}" STREQUAL "exact")
+        set_property(SOURCE ${SPU_SOURCES} APPEND PROPERTY COMPILE_DEFINITIONS "SPU_XF_APPROX")
+        message(STATUS "RACiT: SPU float math approximate (RACIT_SPU_FLOAT=exact for the checked way)")
+    else()
+        message(STATUS "RACiT: SPU float math checked (exact)")
+    endif()
+    # v113-android.50: local store accesses never touch the context's own fields (spu_context.h,
+    # SPU_LS_SEPARATE): guest registers stay in host registers across LS stores. The lifted images
+    # only -- spu_dispatch_mt.c and the generated tables are runtime-side. RACIT_SPU_LS_SEPARATE=0 in
+    # the environment builds without it, as before.
+    if(SPU_LIFTED AND NOT "$ENV{RACIT_SPU_LS_SEPARATE}" STREQUAL "0")
+        set_property(SOURCE ${SPU_LIFTED} APPEND PROPERTY COMPILE_DEFINITIONS "SPU_LS_SEPARATE=1")
+        message(STATUS "RACiT: SPU local store kept apart from the registers (RACIT_SPU_LS_SEPARATE=0 for the old way)")
+    endif()
+endif()
+# The hot modules together in the exe (scripts/dev/hot_funcs.py).
+if(SPU_SOURCES AND RACACIT_HOT AND EXISTS "${CMAKE_CURRENT_LIST_DIR}/hot_spu_modules.cmake")
+    include("${CMAKE_CURRENT_LIST_DIR}/hot_spu_modules.cmake")
+    foreach(t 0 1)
+        foreach(m ${RACACIT_HOT_SPU${t}})
+            set_property(SOURCE "${SPU_DIR}/${m}/spu_recomp.c" APPEND PROPERTY
+                         COMPILE_OPTIONS "-include;${RACACIT_HOT_DIR}/hot_spu${t}.h")
+        endforeach()
+    endforeach()
 endif()
 
 # app.rc carries the icon, the version block and the manifest, and needs a
@@ -284,9 +338,21 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 target_link_libraries(${PROJECT_NAME} PRIVATE
     ps3recomp_runtime
 )
+if(APPLE)
+    find_package(ZLIB REQUIRED)
+    target_link_libraries(${PROJECT_NAME} PRIVATE ZLIB::ZLIB)
+    target_link_libraries(ps3recomp_runtime PRIVATE ZLIB::ZLIB)
+endif()
 if(ANDROID)
     # SDL_main / SDL_AndroidGetExternalStoragePath, and logcat.
     target_link_libraries(${PROJECT_NAME} PRIVATE SDL2::SDL2 log android)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    # main.cpp's error boxes; dladdr for the crash report.
+    target_link_libraries(${PROJECT_NAME} PRIVATE SDL2::SDL2 ${CMAKE_DL_LIBS})
+    # The game finds libSDL2 in its own folder first (a newer copy can be put
+    # there on a distro whose SDL2 is older than 2.0.18), then the system's.
+    set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME RaCACiT
+        BUILD_WITH_INSTALL_RPATH TRUE INSTALL_RPATH "$ORIGIN")
 endif()
 
 # The runtime is C++, and on Apple also Objective-C. Letting CMake infer the
@@ -322,7 +388,15 @@ if(WIN32)
         # zig writes RaCACiT.pdb beside the exe: crash offsets in log.txt
         # resolve with llvm-symbolizer --obj=RaCACiT.exe 0x140000000+off.
     endif()
-    set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME RaCACiT)
+    if(RACACIT_CPU_COMPAT)
+        set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME RaCACiT_compat)
+    else()
+        set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME RaCACiT)
+    endif()
+endif()
+# main.cpp's CPU check asks for what this build was compiled for.
+if(RACACIT_CPU_COMPAT)
+    set_property(SOURCE main.cpp APPEND PROPERTY COMPILE_DEFINITIONS RACACIT_CPU_COMPAT=1)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -366,10 +440,15 @@ endif()
 #     default; a PPC fmadd is spelt as one where the lifter means one.
 #   - /bigobj on MSVC. A single lifted file routinely passes the 65,536-section
 #     limit of the default object format.
+if(ANDROID AND LIBSRE_SOURCES)
+    # Lifted firmware obeys the same separate PPC multiply/add rounding as
+    # the lifted game. Explicit guest fused instructions remain explicit.
+    set_property(SOURCE ${LIBSRE_SOURCES} APPEND PROPERTY COMPILE_OPTIONS -ffp-contract=off)
+endif()
 # The hot functions together in the exe (scripts/dev/hot_funcs.py): only where they sit changes.
 set(RACACIT_HOT_PPU "")
-if(WIN32 AND NOT MSVC AND EXISTS "${CMAKE_CURRENT_LIST_DIR}/hot_ppu.h")
-    set(RACACIT_HOT_PPU "-include;${CMAKE_CURRENT_LIST_DIR}/hot_ppu.h")
+if(RACACIT_HOT AND EXISTS "${CMAKE_CURRENT_LIST_DIR}/hot_ppu.h")
+    set(RACACIT_HOT_PPU "-include;${RACACIT_HOT_DIR}/hot_ppu.h")
 endif()
 if(MSVC)
     set_source_files_properties(${RECOMP_SOURCES} PROPERTIES

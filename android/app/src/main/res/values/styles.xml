@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Full screen, no title bar; the launcher draws everything itself (Acit). -->
+    <style name="AppTheme" parent="android:Theme.Material.NoActionBar.Fullscreen">
+        <item name="android:windowBackground">@color/acitNavy</item>
+        <item name="android:colorAccent">@color/acitOrange</item>
+    </style>
+</resources>

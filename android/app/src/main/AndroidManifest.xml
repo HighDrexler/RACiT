@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-feature android:name="android.hardware.vulkan.version" android:version="0x400003" android:required="true" />
+    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+    <uses-feature android:name="android.hardware.gamepad" android:required="false" />
+    <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
+    <uses-feature android:name="android.hardware.usb.host" android:required="false" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- Only for "use the game where it is" (no copy into the app). -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
+
+    <!-- enableOnBackInvokedCallback="false": the back key and gesture still go to
+         onBackPressed (the launcher's Back; the game traps it, SDL_ANDROID_TRAP_BACK_BUTTON).
+         Targeting API 36, Android 16 otherwise skips onBackPressed and back closes the screen. -->
+    <application android:label="@string/app_name"
+        android:enableOnBackInvokedCallback="false"
+        android:icon="@mipmap/ic_launcher"
+        android:allowBackup="false"
+        android:largeHeap="true"
+        android:theme="@style/AppTheme"
+        android:appCategory="game"
+        android:hardwareAccelerated="true">
+
+        <!-- simpleperf over adb may attach to this release build (android/profile.sh). -->
+        <profileable android:shell="true" />
+
+        <provider android:name=".UpdateApkProvider"
+            android:authorities="${applicationId}.updates"
+            android:exported="false"
+            android:grantUriPermissions="true" />
+
+        <activity android:name=".LauncherActivity"
+            android:exported="true"
+            android:screenOrientation="sensorLandscape"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|navigation|uiMode|density"
+            android:launchMode="singleTask">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- The game, in its own process: the recompiled game exits the process when it quits.
+             Its own task, so it can run on the main screen while the launcher is on the other. -->
+        <activity android:name=".RecompActivity"
+            android:exported="false"
+            android:process=":game"
+            android:taskAffinity="${applicationId}.game"
+            android:label="@string/app_name"
+            android:screenOrientation="sensorLandscape"
+            android:alwaysRetainTaskState="true"
+            android:launchMode="singleTask"
+            android:configChanges="layoutDirection|locale|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation|density"
+            android:preferMinimalPostProcessing="true" />
+    </application>
+</manifest>

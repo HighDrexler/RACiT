@@ -1,0 +1,47 @@
+plugins { id 'com.android.application' }
+
+/*
+ * The game library (libmain.so, the recompiled game and its runtime) is built
+ * outside Gradle -- CMake + the NDK, see build_apk.sh -- and copied into
+ * src/main/jniLibs/arm64-v8a with libSDL2.so and libc++_shared.so. Gradle
+ * only builds the launcher (Java) and packages.
+ */
+android {
+    namespace 'com.racacit.recomp'
+    compileSdk 36
+    buildToolsVersion '36.0.0'
+
+    defaultConfig {
+        applicationId 'com.racit.android.independent'
+        minSdk 29            // native thread-local storage (API 29); Vulkan, AAudio
+        targetSdk 36
+        versionCode 12205
+        versionName '0.1.0'
+        ndk { abiFilters 'arm64-v8a' }
+    }
+
+    signingConfigs {
+        dev {
+            storeFile file('../racit-independent.keystore')
+            storePassword 'android'
+            keyAlias 'racacit'
+            keyPassword 'android'
+        }
+    }
+
+    buildTypes {
+        release { minifyEnabled false; signingConfig signingConfigs.dev }
+        debug { signingConfig signingConfigs.dev }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    // Native libraries stored uncompressed and page-aligned: loaded straight
+    // from the APK (a ~150 MB game library is not unpacked at install).
+    packaging { jniLibs { useLegacyPackaging false } }
+
+    lint { abortOnError false; checkReleaseBuilds false }
+}

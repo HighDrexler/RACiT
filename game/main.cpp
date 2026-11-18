@@ -59,10 +59,23 @@ extern "C" void ppu_threads_dump_stacks(ppu_context* main_ctx);
 /* SDLActivity loads libmain.so and calls SDL_main: SDL.h renames main(). */
 #include <SDL.h>
 #include <android/log.h>
+#ifdef __ANDROID__
+extern "C" { extern volatile long g_racacit_walker_tid; }   /* the FIFO walker thread, for racacit_lend_top_begin */
+#endif
 #include <unistd.h>
 #include <sys/stat.h>
+#include <sched.h>
+#include <sys/resource.h>
 #include <sys/prctl.h>
 #include <pthread.h>
+#include <linux/futex.h>
+#if defined(__ANDROID__) && defined(__aarch64__)
+extern "C" void racacit_fibers_dump(void);   /* spu_drain.c: the stall report's fiber and lane states */
+#endif
+#include <sys/syscall.h>
+#include <dirent.h>
+#include <errno.h>
+extern "C" int rsx_ww_on(void);
 #endif
 
 #ifdef _WIN32
@@ -73,8 +86,6 @@ extern "C" void ppu_threads_dump_stacks(ppu_context* main_ctx);
  * around is a Windows problem. */
 #include <timeapi.h>
 #include <io.h>      /* _dup2 / _fileno */
-#include <fcntl.h>   /* _O_TEXT */
-static void racacit_log_flush(void);
 #endif
 
 /* ---------------------------------------------------------------------------
@@ -107,6 +118,7 @@ extern int32_t g_sys_process_exit_code;
 /* Host-provided symbols the runtime and the HLE libraries link against. */
 uint8_t* vm_base = nullptr;
 extern "C" void racacit_ring_dump(void);   /* spu_channels.c: RACACIT_LINE_RING */
+extern "C" void racacit_collrec_stats(void);   /* stubs.cpp: collision record write-backs dropped */
 extern "C" uint32_t ppu_hle_inject_base;   /* libs/video/cellGcmSys.c */
 extern uint32_t ppu_vm_size;                  /* ppu_loader.cpp: the OOB guard */
 
@@ -195,7 +207,7 @@ extern "C" int  rsx_d3d12_backend_pump_messages(void);
 #  define rsx_backend_present rsx_d3d12_backend_present
 #  define rsx_backend_pump    rsx_d3d12_backend_pump_messages
 #  define RSX_BACKEND_NAME    "D3D12"
-#elif defined(__APPLE__)
+#elif defined(__APPLE__) && !defined(RACACIT_HAVE_VULKAN)
 extern "C" int  rsx_metal_backend_init(uint32_t w, uint32_t h, const char* title);
 extern "C" void rsx_metal_backend_present(void);
 extern "C" int  rsx_metal_backend_pump_messages(void);
@@ -221,7 +233,6 @@ static int rsx_null_backend_init(uint32_t, uint32_t, const char*)
                 "Details are in log.txt next to RaCACiT.exe.",
                 "Ratchet & Clank: A Crack in Time", MB_OK | MB_ICONERROR);
     fflush(stdout); fflush(stderr);
-    racacit_log_flush();
     TerminateProcess(GetCurrentProcess(), 3);
     return -1;
 }
@@ -236,6 +247,7 @@ extern "C" void rsx_vulkan_backend_present(void);
 extern "C" int  rsx_host_ui_modal(void);
 extern "C" unsigned long long g_rt_drain_total_us, g_rt_present_total_us;
 extern "C" int  rsx_vulkan_backend_pump_messages(void);
+extern "C" int  rsx_vulkan_prepare_shaders(void);
 #  endif
 static void (*g_rsx_present)(void) = rsx_null_backend_present;
 static int  (*g_rsx_pump)(void)    = rsx_null_backend_pump_messages;
@@ -251,10 +263,19 @@ static int rsx_backend_init_linux(uint32_t w, uint32_t h, const char* title)
             g_rsx_name    = "Vulkan";
             return 0;
         }
+#    if defined(__ANDROID__)
+        fprintf(stderr, "[rsx] Vulkan initialization failed; Android requires a working Vulkan renderer\n");
+        return -1;
+#    else
         fprintf(stderr, "[rsx] Vulkan init failed -- falling back to the null backend\n");
+#    endif
     }
 #  endif
+#  if defined(__ANDROID__)
+    return -1;
+#  else
     return rsx_null_backend_init(w, h, title);
+#  endif
 }
 #  define rsx_backend_init    rsx_backend_init_linux
 #  define rsx_backend_present g_rsx_present
@@ -577,10 +598,26 @@ static DWORD WINAPI frame_clock(LPVOID)
       if (getenv("PS3_SAMPLE_RSX")) g_samp_only_tid = GetCurrentThreadId(); }
 #endif
 
+#ifdef __ANDROID__
+    /* Named here, before the window opens: SDL attaches this thread to Java under its name
+     * then, and a new thread starts with its creator's ("SDLThread"), which stuck when the
+     * attach came before the log pump's rename (Thor, v113-android.2: top said SDLThread). */
+    prctl(PR_SET_NAME, "rsx frame clock", 0, 0, 0);
+    g_racacit_walker_tid = (long)gettid();   /* racacit_lend_top_begin */
+#endif
     { char _hb[160]; snprintf(_hb, sizeof _hb, "[hosttid] %lu rsx frame clock / FIFO walker%c", (unsigned long)GetCurrentThreadId(), 10); fputs(_hb, stderr); }
     int rsx_ok = (rsx_backend_init(WINDOW_WIDTH, WINDOW_HEIGHT, title) == 0);
     fprintf(stderr, "[rsx] %s backend init %s\n", RSX_BACKEND_NAME,
             rsx_ok ? "OK -- window open" : "FAILED");
+#ifdef __ANDROID__
+    if (!rsx_ok) {
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "RACiT graphics unavailable",
+            "The Vulkan renderer could not start on this device.\n\n"
+            "Its GPU or driver may lack a required feature, or graphics memory may be unavailable. "
+            "The game will close. Enable Logging in the launcher and share log.txt for the specific error.", nullptr);
+        exit(EXIT_FAILURE);
+    }
+#endif
 
     unsigned  last_flip = 0;
     /* The vblank beat, on the microsecond clock: GetTickCount64 only moves
@@ -610,17 +647,25 @@ static DWORD WINAPI frame_clock(LPVOID)
         if (!cellGcm_fifo_pending()) {
             /* RACACIT_WALKER_SPIN_US: how long (us) to spin before sleeping. */
             static LONGLONG s_spin_us = -1;
-            if (s_spin_us < 0) { const char* e = getenv("RACACIT_WALKER_SPIN_US");
-#if defined(_WIN32) && !defined(__ANDROID__)
-                /* Few CPU threads: the wake event is quick, and every ms spun here is a ms the SPU lanes wait. */
-                s_spin_us = e ? atoll(e) : (racacit_few_cpus() ? 50 : 1000);
-#else
-                s_spin_us = e ? atoll(e) : 1000;
-#endif
-            }
+            if (s_spin_us < 0) { const char* e = getenv("RACACIT_WALKER_SPIN_US"); s_spin_us = e ? atoll(e) : (racacit_few_cpus() ? 50 : 1000); }
             LARGE_INTEGER f_, a_, n_; QueryPerformanceFrequency(&f_); QueryPerformanceCounter(&a_);
             const LONGLONG lim_ = f_.QuadPart * s_spin_us / 1000000;
             int got_ = 0;
+#if defined(__ANDROID__)
+            /* v113-android.48: the window is polled every 10 us asleep, not with sched_yield. ~10,000
+             * yields a second here (3.0% of this thread's samples in the owner's .47 profile, the
+             * Fongoid fight); on the full mid cores one that finds a lane runnable gives it the core
+             * to the next 4 ms tick, and the guest waits on this thread's RSX labels every frame. A
+             * short sleep frees the core just the same and wakes ahead of the lane. The render thread
+             * has no timer slack (android_setup). RACACIT_WALKER_YIELD=1: as before. */
+            static int s_walk_yield = -1;
+            if (s_walk_yield < 0) { const char* e = getenv("RACACIT_WALKER_YIELD"); s_walk_yield = e && *e == '1'; }
+            if (!s_walk_yield) {
+                do { const struct timespec d_ = { 0, 10000L }; nanosleep(&d_, NULL);
+                     if (cellGcm_fifo_pending()) { got_ = 1; break; }
+                     QueryPerformanceCounter(&n_); } while (n_.QuadPart - a_.QuadPart < lim_);
+            } else
+#endif
             do { SwitchToThread(); if (cellGcm_fifo_pending()) { got_ = 1; break; }
                  QueryPerformanceCounter(&n_); } while (n_.QuadPart - a_.QuadPart < lim_);
             if (!got_) {
@@ -649,6 +694,9 @@ static DWORD WINAPI frame_clock(LPVOID)
                   s_dumps++; s_since = 0;   /* once per stall: re-armed by the next flip */
                   fprintf(stderr, "[stall] no guest flip for 5 s at flip %u: guest thread stacks follow\n", f);
                   ppu_threads_dump_stacks(g_racacit_main_ctx);
+#if defined(__ANDROID__) && defined(__aarch64__)
+                  racacit_fibers_dump();
+#endif
                   /* RACACIT_STALL_PEEK=<hex>[,<hex>...]: those guest 128-byte
                    * lines too -- the record and queue a stuck wait is on. */
                   { const char* pk = getenv("RACACIT_STALL_PEEK");
@@ -663,6 +711,7 @@ static DWORD WINAPI frame_clock(LPVOID)
                         pk = (*end == ',') ? end + 1 : end;
                     } }
                   racacit_stall_jobs_dump();
+                  racacit_collrec_stats();
                   racacit_ring_dump();   /* RACACIT_LINE_RING: the line's recent history */
                   fflush(stderr);
               }
@@ -747,7 +796,6 @@ static DWORD WINAPI frame_clock(LPVOID)
                 fprintf(stderr, "[rsx] window closed -- exiting\n");
                 fflush(stdout); fflush(stderr);
 #ifdef _WIN32
-                racacit_log_flush();
                 TerminateProcess(GetCurrentProcess(), 0);
 #else
                 _exit(0);
@@ -793,6 +841,7 @@ static DWORD WINAPI frame_clock(LPVOID)
 /* Derive the directory holding PS3_GAME from the EBOOT path
  * <root>/PS3_GAME/USRDIR/EBOOT.elf -> <root>. $PS3_VFS_ROOT overrides. */
 static char s_vfs_root[1024];
+extern bool racit_menu_archive_init();
 
 static void derive_vfs_root(const char* eboot)
 {
@@ -830,6 +879,11 @@ static void map_cellfs_devices(void)
     if (_fullpath(abs, ppu_vfs_root, sizeof abs)) {
         snprintf(m, sizeof m, "%s/", abs);
         cellfs_add_path_mapping("/dev_bdvd/", m);
+        cellfs_add_path_mapping("/dev_hdd1/", m);
+    }
+    const char* hdd1 = getenv("PS3_HDD1_ROOT");
+    if (hdd1 && *hdd1 && _fullpath(abs, hdd1, sizeof abs)) {
+        snprintf(m, sizeof m, "%s/", abs);
         cellfs_add_path_mapping("/dev_hdd1/", m);
     }
     const char* hdd0 = getenv("PS3_HDD0_ROOT");
@@ -973,6 +1027,28 @@ static void android_log_direct(const char* line)
  * "[SYS] sys_ppu_thread_create tid=<n> name="<guest name>"" ...
  * "[THREAD <n>] host thread started, ... hosttid=<tid>". */
 extern "C" void racacit_perf_thread(unsigned long tid, const char* name);   /* android_companion.cpp */
+static cpu_set_t s_cpus_others, s_cpus_fast, s_cpus_little;
+static int s_cpus_others_on, s_top_cpu, s_swap_ok;
+/* v113-android.49 (RACACIT_COLL_LITTLE=1): two small cores kept for the collision lanes (s_coll_cpu, the
+ * two highest-numbered), and the small cores left for everything else placed there (s_cpus_spare: the
+ * file streaming threads, helpers, the audio threads, the main thread's core-swap waits). Without it
+ * s_cpus_spare is all the small cores. */
+static cpu_set_t s_cpus_spare;
+static int s_coll_little_on, s_coll_cpu[2] = { -1, -1 };
+/* v121-android.63b (RACACIT_SPU_SPILL=1, off by default): the SPU lanes' home set -- the mid cores,
+ * or with the switch the mid cores and the small ones (s_cpus_spare). In the owner's 2026-11-17 Agorian
+ * Arena fights the five lanes waited 1.2-2.1 s a second for one of the four mid cores (one ran ~50 ms
+ * a second and waited ~500) while the three small cores held only the file threads; CollNarrow, the
+ * frame's critical job, went from ~11 ms to 21-35 ms a frame and the game to 22-43 fps. A lane running
+ * a collision job is held to the mid cores for it (racacit_coll_place): .49 measured that job on a
+ * small core as a loss (30.4 -> 17.9 fps). The other jobs may run on a small core at ~0.4x instead of
+ * waiting for a mid one. s_cpus_lane = s_cpus_others when off. */
+static cpu_set_t s_cpus_lane;
+static int s_spill_on;
+/* The threads "[sched]" reports (racacit_sched_thread): the main thread, the SPU lanes, the render
+ * threads and the first SPURS kernel (sound). Filled as they are named, before it reads them. */
+static struct { volatile long tid; char name[16]; } s_sched_th[16];
+static volatile int s_sched_n;
 extern "C" void racacit_profiler_start(const char* files_dir);             /* android_profiler.cpp */
 static void android_name_thread(const char* line)
 {
@@ -1003,6 +1079,44 @@ static void android_name_thread(const char* line)
     char path[64]; snprintf(path, sizeof path, "/proc/self/task/%lu/comm", tid);
     if (FILE* f = fopen(path, "w")) { fputs(name, f); fclose(f); }
     racacit_perf_thread(tid, name);
+    {   /* for "[sched]": the main thread, the lanes, the render threads, the sound kernel */
+        static int s_kern_seen;
+        const int want = !strncmp(name, "PPU main", 8) || !strncmp(name, "spu w", 5) || !strncmp(name, "rsx", 3) ||
+                         (!strcmp(name, "spurs kernel") && !s_kern_seen++);
+        const int k = s_sched_n;
+        if (want && k < 16) {
+            snprintf(s_sched_th[k].name, sizeof s_sched_th[k].name, "%s", name);
+            __atomic_store_n(&s_sched_th[k].tid, (long)tid, __ATOMIC_RELEASE);
+            __atomic_store_n(&s_sched_n, k + 1, __ATOMIC_RELEASE);
+        }
+    }
+    /* The first SPURS kernel is the sound synthesizer's. On the shared cores it saturates at loud
+     * moments and the sound stretches, with no dropouts; on the top core it keeps up, but where
+     * the main thread is the limit that costs far more (the moon: 37 fps shared, 33 and 27 with
+     * modes 1 and 3; Great Clock D gains 1-2). */
+    static int s_kernels;
+    const int sound = !strcmp(name, "spurs kernel") && s_kernels++ == 0;
+    /* RACACIT_SOUND_CPU: 0 the shared cores, 1 those and the top core, 2 the shared cores at a
+     * raised priority, 3 the top core alone. */
+    static const int s_sound_cpu = [] { const char* e = getenv("RACACIT_SOUND_CPU"); return e ? atoi(e) : 0; }();
+    /* The game's file-streaming threads (FIOS: "fios mediathread" x7, "fios scheduler" x3) go to
+     * the small cores, which no other game thread uses. They sleep in timed lwcond waits and wake
+     * at every timeout: in the .35 [sched] they ran 33 ms a second between them and sat runnable
+     * 1.1-1.6 s a second on the four shared cores (oversubscribed about 2x in play), every wake a
+     * chance to preempt the render thread or an SPU lane (nice -5, above both). On the idle small
+     * cores they run as soon as they wake. RACACIT_FIOS_LITTLE=0: the shared cores, as before.
+     * v113-android.37. */
+    static const int s_fios_little = [] { const char* e = getenv("RACACIT_FIOS_LITTLE"); return !(e && *e == '0'); }();
+    if (s_fios_little && s_cpus_others_on && CPU_COUNT(&s_cpus_spare) > 0 && !strncmp(name, "fios", 4)) {
+        sched_setaffinity((pid_t)tid, sizeof s_cpus_spare, &s_cpus_spare);
+    } else if (s_cpus_others_on && sound && s_sound_cpu == 3 && s_top_cpu >= 0) {
+        cpu_set_t top; CPU_ZERO(&top); CPU_SET(s_top_cpu, &top);
+        sched_setaffinity((pid_t)tid, sizeof top, &top);
+    } else if (s_cpus_others_on && (!sound || s_sound_cpu == 0 || s_sound_cpu == 2) && strncmp(name, "PPU main", 8)) {
+        const cpu_set_t* set = !strncmp(name, "spu w", 5) ? &s_cpus_lane : &s_cpus_others;
+        sched_setaffinity((pid_t)tid, sizeof *set, set);
+    }
+    if (sound && s_sound_cpu == 2) setpriority(PRIO_PROCESS, (id_t)tid, -10);
     /* The timer slack each busy thread really has (android_setup sets 1 ns
      * before they start), so a log shows that it took. */
     static int s_slack_lines;
@@ -1036,7 +1150,11 @@ static void android_log_pump_start(int fd, FILE* file)
                 const char c = chunk[i];
                 if (c != '\n' && n < sizeof line - 1) { line[n++] = c; continue; }
                 line[n] = 0;
-                if (line[0] == '[') android_name_thread(line);
+                /* Another thread's print can run into the line: a thread missed here is left
+                 * unnamed, and free to take the core kept for the main thread. */
+                if (const char* ann = strstr(line, "[hosttid] ")) android_name_thread(ann);
+                else if (const char* th = strstr(line, "[THREAD ")) android_name_thread(th);
+                else if (line[0] == '[') android_name_thread(line);
                 if (s_android_log || !strstr(line, "sys_memory] allocate")) android_log_direct(line);
                 n = 0;
                 if (c != '\n') line[n++] = c;
@@ -1044,6 +1162,479 @@ static void android_log_pump_start(int fd, FILE* file)
         }
         return NULL; }, NULL);
     pthread_detach(t);
+}
+
+#ifdef RACIT_PGO_GEN
+/* Profile-guided build, first stage: the counters to a file every 20 s, since Android
+ * kills the process rather than letting it exit. */
+extern "C" int __llvm_profile_write_file(void);
+extern "C" void __llvm_profile_set_filename(const char*);
+extern "C" void __llvm_profile_reset_counters(void);
+static void* android_pgo_thread(void*)
+{
+    for (;;) {
+        sleep(20);
+        const int r = __llvm_profile_write_file();
+        __llvm_profile_reset_counters();
+        char msg[64]; snprintf(msg, sizeof msg, "[pgo] counters written: %d", r);
+        android_log_direct(msg);
+    }
+    return NULL;
+}
+static void android_pgo_start(const char* base)
+{
+    static char path[600];
+    snprintf(path, sizeof path, "%s/pgo_%%m.profraw", base);
+    __llvm_profile_set_filename(path);
+    pthread_t t;
+    pthread_create(&t, NULL, android_pgo_thread, NULL);
+}
+#endif
+
+/* The game on the device's fast cores. Left to itself the scheduler gave its threads the small
+ * ones for about a tenth of their time: a third of the speed, and the main thread waits on the
+ * slowest job of the frame. Fast = at least half the top core's capacity. RACACIT_CPUS=0: all
+ * cores; 2: the top core only for the main thread as well, when four others remain.
+ * With under four fast cores (2 big + 6 small is common in midrange phones) the game's three to
+ * four cores of work does not fit on them: only the main thread stays there, the rest may use
+ * every core. RACACIT_TEST_FAST=<n> counts only the n strongest as fast, to test that. */
+static void android_cpu_policy(void)
+{
+    const char* e = getenv("RACACIT_CPUS");
+    const int mode = e && *e ? atoi(e) : 2;
+    if (mode <= 0) return;
+    long cap[CPU_SETSIZE]; long top = 0; int top_cpu = -1, n = 0;
+    for (int c = 0; c < CPU_SETSIZE && c < 32; c++) {
+        char path[96]; long v = 0;
+        snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu%d/cpu_capacity", c);
+        FILE* f = fopen(path, "r");
+        if (!f) break;
+        if (fscanf(f, "%ld", &v) != 1) v = 0;
+        fclose(f);
+        cap[c] = v; n = c + 1;
+        if (v >= top) { top = v; top_cpu = c; }
+    }
+    if (!top) return;
+    if (const char* tf = getenv("RACACIT_TEST_FAST")) {
+        long keep = atol(tf), seen = 0;
+        for (int c = n - 1; c >= 0; c--) { if (seen >= keep) cap[c] = 0; else if (cap[c]) seen++; }
+    }
+    cpu_set_t fast; CPU_ZERO(&fast); CPU_ZERO(&s_cpus_others); CPU_ZERO(&s_cpus_little);
+    int nfast = 0, nothers = 0, nlittle = 0;
+    for (int c = 0; c < n; c++) {
+        if (cap[c] * 2 < top) { if (cap[c]) { CPU_SET(c, &s_cpus_little); nlittle++; } continue; }
+        CPU_SET(c, &fast); nfast++;
+        if (c != top_cpu) { CPU_SET(c, &s_cpus_others); nothers++; }
+    }
+    if (nfast >= 1 && nfast < n) sched_setaffinity(0, sizeof fast, &fast);
+    s_cpus_fast = fast;
+    s_cpus_others_on = mode == 2 && nothers >= 4;
+    s_top_cpu = top_cpu;
+    { extern int g_racacit_main_core_own; g_racacit_main_core_own = s_cpus_others_on; }
+    /* The core swap (below) needs the top core kept for the main thread, and small cores that
+     * no game thread uses for the main thread to wait on meanwhile. */
+    s_swap_ok = s_cpus_others_on && nlittle > 0 && top_cpu >= 0;
+    const int spread = nfast < 4 && nfast < n;
+    if (spread) {
+        CPU_ZERO(&s_cpus_others);
+        for (int c = 0; c < n; c++) CPU_SET(c, &s_cpus_others);
+        s_cpus_others_on = 1;
+    }
+    char msg[96];
+    snprintf(msg, sizeof msg, "[android] cpus: %d fast of %d, mode %d, %s", nfast, n, mode,
+             spread ? "main thread on the fast ones, the rest anywhere"
+                    : s_cpus_others_on ? "top core kept for the main thread" : "top core shared");
+    android_log_direct(msg);
+    /* RACACIT_COLL_LITTLE=1 (v113-android.49, a test): the lanes running the two collision jobs move to
+     * two small cores of their own for the job (racacit_coll_place, from spu_drain.c). In a fight the
+     * four mid cores are full: the .48 A/B had the collision lanes running ~300 ms a second and waiting
+     * 273-412 more for a core, the main thread waiting on their records, while the three small cores
+     * idled. A small core is ~2.5x slower; nothing else runs there. Needs three small cores or more
+     * (one left for the rest) and the top core kept for the main thread. */
+    s_cpus_spare = s_cpus_little;
+    { const char* cl = getenv("RACACIT_COLL_LITTLE");
+      if (cl && *cl == '1' && s_cpus_others_on && !spread && nlittle >= 3) {
+          int k = 0;
+          for (int c = n - 1; c >= 0 && k < 2; c--) if (CPU_ISSET(c, &s_cpus_little)) { s_coll_cpu[k++] = c; CPU_CLR(c, &s_cpus_spare); }
+          s_coll_little_on = k == 2;
+          snprintf(msg, sizeof msg, "[android] collision lanes: small cores %d and %d (RACACIT_COLL_LITTLE)", s_coll_cpu[0], s_coll_cpu[1]);
+          android_log_direct(msg);
+      } }
+    s_cpus_lane = s_cpus_others;
+    { const char* sp = getenv("RACACIT_SPU_SPILL");
+      if (sp && *sp == '1' && s_cpus_others_on && !spread && !s_coll_little_on && CPU_COUNT(&s_cpus_spare) > 0) {
+          CPU_OR(&s_cpus_lane, &s_cpus_others, &s_cpus_spare);
+          s_spill_on = 1;
+          android_log_direct("[android] SPU lanes: mid and small cores; collision jobs on the mid cores (RACACIT_SPU_SPILL)");
+      } }
+}
+
+/* The collision lane's own small core while it runs CollNarrow (43593402) or CollBroad (4248d602), the
+ * mid cores again after (on = 0). Called by the lane itself. */
+extern "C" void racacit_coll_place(unsigned guid, int on)
+{
+    if (!s_coll_little_on) {
+        if (s_spill_on) { const cpu_set_t* set = on ? &s_cpus_others : &s_cpus_lane; sched_setaffinity(0, sizeof *set, set); }
+        return;
+    }
+    if (!on) { sched_setaffinity(0, sizeof s_cpus_others, &s_cpus_others); return; }
+    cpu_set_t one; CPU_ZERO(&one); CPU_SET(guid == 0x4248d602u ? s_coll_cpu[1] : s_coll_cpu[0], &one);
+    sched_setaffinity(0, sizeof one, &one);
+}
+extern "C" int racacit_coll_little(void) { return s_coll_little_on; }
+
+/* ---------------------------------------------------------------------------
+ * Core swap (RACACIT_CORE_SWAP=1; RACACIT_AB=<s> alternates it off and on)
+ *
+ * In a heavy scene the main thread spends about two thirds of each frame waiting on SPU jobs
+ * (racacit_wait_poll), and those jobs run one after another on the mid cores while the top core,
+ * the fastest by far, holds the main thread's wait. With the swap, a wait that has lasted
+ * RACACIT_SWAP_AFTER_US (150) moves the main thread to a small core to go on waiting there, and
+ * the lane most likely running the job (awake, and woken last: spu_lanes.h) to the top core. When
+ * the wait ends both go back, the lane first. A lane that goes to sleep meanwhile hands the top
+ * core to the next one woken, at most four times a wait. Only the main thread swaps, and only
+ * where the top core is kept for it and small cores exist (s_swap_ok).
+ * ---------------------------------------------------------------------------*/
+#include "spu_lanes.h"
+#include "../tools/ps3recomp/runtime/platform/racacit_diag.h"
+extern "C" { volatile int g_racacit_core_swap; long g_racacit_main_tid; }
+static unsigned long long s_swap_after_tb = 150ull * 80u;   /* timebase ticks (79.8 MHz) */
+static unsigned long s_swap_n[4];   /* swapped waits, picks, lanes moved back (relaxed atomics: the A/B thread reads them) */
+#define SWAP_COUNT(k) __atomic_fetch_add(&s_swap_n[k], 1ul, __ATOMIC_RELAXED)
+static thread_local int t_swap_lane = -1, t_swap_main, t_swap_picks, t_is_main = -1;
+static void swap_aff(long tid, const cpu_set_t* set) { sched_setaffinity((pid_t)tid, sizeof *set, set); }
+
+/* Collision jobs on the main thread's core (RACACIT_COLOC, v113-android.17 and .23-.26) were taken
+ * out in .36: measured worse both times -- .17 Space Sector 1 at 11-12 fps (the co-located lanes
+ * got ~5% of the top core), .26 the title screen and menus 60 -> 43-45 fps. The collision fibers
+ * (spu_drain.c, RACACIT_COLL_FIBER=1) are the form of that idea still being worked on. */
+extern "C" { extern volatile int g_racacit_fibers_live; extern volatile unsigned long g_racacit_fiber_n[4]; }   /* spu_drain.c */
+extern "C" { extern volatile unsigned long g_racacit_fiber_k[3][7]; }   /* spu_drain.c: the same by job (v113-android.44) */
+extern "C" { void racacit_ib2_report(char* out, int cap); extern volatile unsigned long g_racacit_ib2[20]; }
+
+/* The top core to the FIFO walker while the main thread waits for it (sys_timer.c, RACACIT_LEND_TOP):
+ * the game ends each frame polling for the RSX to reach a marker, and the walker that gets there
+ * runs on a middle core while the top one spins. One affinity call each way, about twice a frame. */
+extern "C" { volatile int g_racacit_top_lent; volatile long g_racacit_walker_tid; volatile unsigned long g_racacit_lend_n; }
+extern "C" void racacit_lend_top_begin(void)
+{
+    const long w = g_racacit_walker_tid;
+    if (!s_swap_ok || !w || s_top_cpu < 0) return;
+    cpu_set_t top; CPU_ZERO(&top); CPU_SET(s_top_cpu, &top);
+    if (sched_setaffinity((pid_t)w, sizeof top, &top) != 0) return;
+    g_racacit_top_lent = 1;
+    if (__atomic_fetch_add(&g_racacit_lend_n, 1ul, __ATOMIC_RELAXED) == 0)
+        fprintf(stderr, "[android] top core lent to the FIFO walker while the main thread waits for it (RACACIT_LEND_TOP)%c", 10);
+}
+extern "C" void racacit_lend_top_end(void)
+{
+    if (!g_racacit_top_lent) return;
+    const long w = g_racacit_walker_tid;
+    if (w) sched_setaffinity((pid_t)w, sizeof s_cpus_others, &s_cpus_others);
+    g_racacit_top_lent = 0;
+}
+
+/* v121-android.65 (RACACIT_SWAP_FIBERS, on unless 0): the swap also while collision fibers are live.
+ * It was off then because the main thread runs the fibers. The owner's 2026-11-17 Agorian Arena fights
+ * (.63/.64 profile_raw) say what that cost: the main thread's samples were 33% racacit_fiber_ready polls
+ * and 20% usleep spins and almost no fiber code, while it waited 300-525 ms a second on SPU jobs (each
+ * 3-5x its calm length: 4244aa02 0.29 -> 1.69 ms) and the lanes queued 0.7-2.1 s a second for the mid
+ * cores -- the top core spinning, the jobs it waits for crowded. With fibers live the collision lane is
+ * parked on the main thread's records, so it is never the pick; the lane whose job started last is. */
+static int swap_with_fibers(void)
+{
+    static int on = -1;
+    if (on < 0) { const char* e = getenv("RACACIT_SWAP_FIBERS"); on = !(e && *e == '0'); }
+    return on;
+}
+extern "C" void racacit_swap_poll(unsigned long long waited_tb)
+{
+    if (!g_racacit_core_swap || !s_swap_ok || waited_tb < s_swap_after_tb) return;
+    const int fibers = __atomic_load_n(&g_racacit_fibers_live, __ATOMIC_ACQUIRE) > 0;
+    if (fibers && !swap_with_fibers()) return;   /* the main thread runs the collision fibers */
+    if (t_is_main < 0) t_is_main = g_racacit_main_tid && (long)gettid() == g_racacit_main_tid;
+    if (!t_is_main) return;
+    if (t_swap_lane >= 0 && !__atomic_load_n(&g_racacit_lanes[t_swap_lane].asleep, __ATOMIC_ACQUIRE)) return;
+    if (t_swap_picks >= 4) return;
+    const int n = g_racacit_nlanes < RACACIT_LANES ? g_racacit_nlanes : RACACIT_LANES;
+    /* A lane awake in a collision job the main thread hands records to (spu_lanes.h): most of the
+     * main thread's waits are on its records. Else the lane whose job started last (spu_drain.c
+     * spu_job_time_begin): the main thread submits a job and then waits on it. Else the awake
+     * lane woken last. */
+    int best = -1; unsigned long long bw = 0;
+    /* (RACACIT_COLL_LITTLE: the collision lanes keep their own small cores; never picked.) */
+    if (!s_coll_little_on && !fibers)
+    for (int i = 0; i < n; i++) {
+        const racacit_lane& L = g_racacit_lanes[i];
+        if (L.tid && L.critical && !__atomic_load_n(&L.asleep, __ATOMIC_ACQUIRE)) { best = i; break; }
+    }
+    if (best < 0)
+        for (int i = 0; i < n; i++) {
+            const racacit_lane& L = g_racacit_lanes[i];
+            const unsigned long long j = L.job;
+            if ((s_coll_little_on || fibers) && L.critical) continue;
+            if (L.tid && j && (best < 0 || j > bw)) { best = i; bw = j; }
+        }
+    if (best < 0)
+        for (int i = 0; i < n; i++) {
+            const racacit_lane& L = g_racacit_lanes[i];
+            if ((s_coll_little_on || fibers) && L.critical) continue;
+            if (!L.tid || __atomic_load_n(&L.asleep, __ATOMIC_ACQUIRE)) continue;
+            if (best < 0 || L.woke > bw) { best = i; bw = L.woke; }
+        }
+    if (best == t_swap_lane) return;
+    if (t_swap_lane >= 0) {
+        swap_aff(g_racacit_lanes[t_swap_lane].tid, &s_cpus_lane);
+        SWAP_COUNT(2); t_swap_lane = -1;
+    }
+    if (best < 0) return;
+    if (!t_swap_main) {
+        swap_aff(0, &s_cpus_spare); t_swap_main = 1;   /* off the top core first */
+        SWAP_COUNT(0);
+    }
+    cpu_set_t top; CPU_ZERO(&top); CPU_SET(s_top_cpu, &top);
+    swap_aff(g_racacit_lanes[best].tid, &top);
+    t_swap_lane = best; t_swap_picks++; SWAP_COUNT(1);
+}
+
+/* racacit_pin_main (v113-android.14, removed in .15): the main thread pinned to the top core alone,
+ * so a swap's return took one affinity call instead of two. Threads inherit their creator's
+ * affinity, and the ones the main thread creates that are not placed by name (the cellAudio mixer
+ * among them) were held to the top core beside it: the game's sound ran at 62% speed. */
+
+extern "C" void racacit_swap_end(void)
+{
+    t_swap_picks = 0;
+    if (t_swap_lane >= 0) {
+        swap_aff(g_racacit_lanes[t_swap_lane].tid, &s_cpus_lane);
+        t_swap_lane = -1;
+    }
+    if (t_swap_main) {
+        /* Straight to the top core (a move into a wider set may land on any core of it), then
+         * the set the main thread had. (Its home stays the fast set: see racacit_pin_main.) */
+        cpu_set_t top; CPU_ZERO(&top); CPU_SET(s_top_cpu, &top);
+        swap_aff(0, &top);
+        swap_aff(0, &s_cpus_fast);
+        t_swap_main = 0;
+    }
+}
+
+/* For a helper thread whose timing does not matter (button_prompts.cpp's memory scans, the
+ * A/B clock): the small cores, which no game thread uses, at a low priority, and a name for the
+ * profiler. Unplaced, a helper inherits the fast cores from the thread that made it: the prompt
+ * scans (100-220 ms of one core, five times in the first minute of each level; owner's .7 log,
+ * Zolar) ran beside the SPU lanes, which the main thread waits on. */
+/* v113-android.48: a light thread that wakes often, at its own (raised) priority, to the small cores:
+ * the cellAudio mixer (~1,000 wakes a second at nice -16) and AAudio's callback thread. Made by game
+ * threads, they inherited the fast set -- the top core included, which is the main thread's -- and
+ * each wake took a core from the main thread or an SPU lane. 0 where there are no small cores kept
+ * apart (then nothing changes). */
+extern "C" int racacit_little_thread(void)
+{
+    if (!s_cpus_others_on || CPU_COUNT(&s_cpus_spare) == 0) return 0;
+    return sched_setaffinity(0, sizeof s_cpus_spare, &s_cpus_spare) == 0;
+}
+
+extern "C" void racacit_background_thread(const char* name)
+{
+    if (name) prctl(PR_SET_NAME, name, 0, 0, 0);
+    if (CPU_COUNT(&s_cpus_spare) > 0) sched_setaffinity(0, sizeof s_cpus_spare, &s_cpus_spare);
+    setpriority(PRIO_PROCESS, (id_t)gettid(), 10);
+}
+
+/* A helper whose work the frame does not wait on directly but that should not lag either: the
+ * Vulkan backend's pipeline builds (rsx_vulkan_backend.c, bursts of 30-370 ms each on a first
+ * visit; 256 in the first minutes of the owner's .7 Zolar run). Made by the render thread, they
+ * inherited its mid cores and took them from the SPU lanes; now the small cores too, never the top
+ * one. background = 1: as racacit_background_thread. */
+extern "C" void racacit_place_helper(const char* name, int background)
+{
+    if (background) { racacit_background_thread(name); return; }
+    if (name) prctl(PR_SET_NAME, name, 0, 0, 0);
+    if (!s_cpus_others_on || CPU_COUNT(&s_cpus_spare) == 0) return;
+    cpu_set_t set; CPU_OR(&set, &s_cpus_others, &s_cpus_spare);
+    sched_setaffinity(0, sizeof set, &set);
+}
+
+/* RACACIT_AB=<seconds>: the core swap off and on in turn, that long each, and the frame rate and
+ * the main thread's SPU-job waits of each phase in the log ("[ab]"), with running totals; the
+ * companion's Status page shows the totals (g_racacit_ab). A phase under 5 fps (a load, a menu,
+ * a movie) is left out of the totals. */
+extern "C" { volatile long g_racacit_ab[6]; }   /* on, current mode, phases off, fps off x100, phases on, fps on x100 */
+extern "C" unsigned cellGcm_flip_request_count(void);
+extern "C" unsigned long long g_racacit_main_wait_ticks;   /* stubs.cpp racacit_wait_poll */
+static void* racacit_ab_thread(void* arg)
+{
+    const long secs = (long)(intptr_t)arg;
+    racacit_background_thread("ab clock");
+    double fr[2] = {0, 0}, sec[2] = {0, 0}, wt[2] = {0, 0}; long ph[2] = {0, 0};
+    int mode = 0; g_racacit_core_swap = 0;
+    g_racacit_ab[0] = 1;
+    for (;;) {
+        struct timespec a; clock_gettime(CLOCK_MONOTONIC, &a);
+        const unsigned f0 = cellGcm_flip_request_count();
+        const unsigned long long w0 = __atomic_load_n(&g_racacit_main_wait_ticks, __ATOMIC_RELAXED);
+        const unsigned long n0[2] = { __atomic_load_n(&s_swap_n[0], __ATOMIC_RELAXED), __atomic_load_n(&s_swap_n[1], __ATOMIC_RELAXED) };
+        sleep((unsigned)secs);
+        struct timespec b; clock_gettime(CLOCK_MONOTONIC, &b);
+        const double dt = (double)(b.tv_sec - a.tv_sec) + (double)(b.tv_nsec - a.tv_nsec) / 1e9;
+        const unsigned df = cellGcm_flip_request_count() - f0;
+        const double wait_ms = (double)(__atomic_load_n(&g_racacit_main_wait_ticks, __ATOMIC_RELAXED) - w0) / 79800.0;
+        const double fps = dt > 0 ? df / dt : 0;
+        if (fps >= 5) { fr[mode] += df; sec[mode] += dt; wt[mode] += wait_ms; ph[mode]++; }
+        char msg[320];
+        snprintf(msg, sizeof msg, "[ab] core swap %s: %.1f fps, %.1f ms a frame waiting on SPU jobs, %lu waits swapped, "
+                 "%lu lane picks%s | totals: off %.2f fps (%ld phases, %.1f ms wait), on %.2f fps (%ld phases, %.1f ms wait)",
+                 mode ? "on " : "off", fps, df ? wait_ms / df : 0.0,
+                 __atomic_load_n(&s_swap_n[0], __ATOMIC_RELAXED) - n0[0], __atomic_load_n(&s_swap_n[1], __ATOMIC_RELAXED) - n0[1],
+                 fps >= 5 ? "" : " (not counted)",
+                 sec[0] > 0 ? fr[0] / sec[0] : 0.0, ph[0], fr[0] > 0 ? wt[0] / fr[0] : 0.0,
+                 sec[1] > 0 ? fr[1] / sec[1] : 0.0, ph[1], fr[1] > 0 ? wt[1] / fr[1] : 0.0);
+        android_log_direct(msg);
+        g_racacit_ab[2] = ph[0]; g_racacit_ab[3] = sec[0] > 0 ? (long)(fr[0] / sec[0] * 100) : 0;
+        g_racacit_ab[4] = ph[1]; g_racacit_ab[5] = sec[1] > 0 ? (long)(fr[1] / sec[1] * 100) : 0;
+        mode ^= 1; g_racacit_core_swap = mode; g_racacit_ab[1] = mode;
+    }
+    return NULL;
+}
+
+/* "[sched]" every 10 s (RACACIT_SCHED_STATS=0 off): for each key thread, ms a second on a core and
+ * ms a second runnable but waiting for one (/proc/self/task/<tid>/schedstat). The four mid cores
+ * carry the SPU lanes, the render threads and the sound kernel together; this says whether the
+ * ones the main thread waits on are kept waiting for a core. */
+static int s_sched_lines;   /* "[sched]" asked for (the thread may run for "[ib2]" alone) */
+static void* racacit_sched_thread(void*)
+{
+    racacit_background_thread("sched stats");
+    unsigned long long run0[16] = {0}, wait0[16] = {0};
+    long tid0[16] = {0};
+    /* The threads the table above does not hold, by name, all threads of a name summed: the
+     * sound feeders (.16 raised them), the cellAudio clock, the archive inflaters. */
+    static const char* const k_more[] = { "cellAudio mix", "syn_tick_timer_", "snd_stream_thre", "fios mediathrea", "fios scheduler", "Bink Audio" };
+    enum { NMORE = sizeof k_more / sizeof k_more[0], NTID = 96 };
+    struct { long tid; int k; unsigned long long run, wait; } prev[NTID]; int nprev = 0;
+    struct timespec a; clock_gettime(CLOCK_MONOTONIC, &a);
+    for (;;) {
+        sleep(10);
+        struct timespec b; clock_gettime(CLOCK_MONOTONIC, &b);
+        const double secs = (double)(b.tv_sec - a.tv_sec) + (double)(b.tv_nsec - a.tv_nsec) / 1e9;
+        a = b;
+        char msg[1800]; int o = snprintf(msg, sizeof msg, "[sched] %.0f s, ms a second on a core / waiting for one (nice):", secs);
+        const int n = __atomic_load_n(&s_sched_n, __ATOMIC_ACQUIRE);
+        int shown = 0;
+        for (int i = 0; i < n && i < 16 && o < (int)sizeof msg - 64; i++) {
+            const long tid = __atomic_load_n(&s_sched_th[i].tid, __ATOMIC_ACQUIRE);
+            char path[64]; snprintf(path, sizeof path, "/proc/self/task/%ld/schedstat", tid);
+            unsigned long long run = 0, wait = 0;
+            FILE* f = fopen(path, "r");
+            if (!f) continue;
+            const int ok = fscanf(f, "%llu %llu", &run, &wait) == 2;
+            fclose(f);
+            if (!ok) continue;
+            errno = 0; const int nice = getpriority(PRIO_PROCESS, (id_t)tid);
+            if (tid0[i] == tid && secs > 0)
+                o += snprintf(msg + o, sizeof msg - o, " %s %.0f/%.0f (%d);", s_sched_th[i].name,
+                              (double)(run - run0[i]) / 1e6 / secs, (double)(wait - wait0[i]) / 1e6 / secs, errno ? 99 : nice), shown++;
+            tid0[i] = tid; run0[i] = run; wait0[i] = wait;
+        }
+        /* The named extras: scan the process's threads. */
+        double mrun[NMORE] = {0}, mwait[NMORE] = {0}; int mn[NMORE] = {0}, mnice[NMORE];
+        for (int k = 0; k < NMORE; k++) mnice[k] = 99;
+        if (DIR* d = opendir("/proc/self/task")) {
+            while (struct dirent* e = readdir(d)) {
+                const long tid = atol(e->d_name);
+                if (tid <= 0) continue;
+                char path[64], comm[32] = "";
+                snprintf(path, sizeof path, "/proc/self/task/%ld/comm", tid);
+                if (FILE* f = fopen(path, "r")) { if (!fgets(comm, sizeof comm, f)) comm[0] = 0; fclose(f); }
+                comm[strcspn(comm, "\n")] = 0;
+                int k = 0;
+                while (k < NMORE && strncmp(comm, k_more[k], strlen(k_more[k]))) k++;
+                if (k == NMORE) continue;
+                snprintf(path, sizeof path, "/proc/self/task/%ld/schedstat", tid);
+                unsigned long long run = 0, wait = 0;
+                FILE* f = fopen(path, "r");
+                if (!f) continue;
+                const int ok = fscanf(f, "%llu %llu", &run, &wait) == 2;
+                fclose(f);
+                if (!ok) continue;
+                int j = 0;
+                while (j < nprev && prev[j].tid != tid) j++;
+                if (j < nprev && secs > 0) {
+                    mrun[k] += (double)(run - prev[j].run) / 1e6 / secs;
+                    mwait[k] += (double)(wait - prev[j].wait) / 1e6 / secs;
+                }
+                if (j == nprev && nprev < NTID) { prev[j].tid = tid; nprev++; }
+                if (j < nprev) { prev[j].k = k; prev[j].run = run; prev[j].wait = wait; }
+                mn[k]++;
+                errno = 0; const int nice = getpriority(PRIO_PROCESS, (id_t)tid);
+                if (!errno) mnice[k] = nice;
+            }
+            closedir(d);
+        }
+        for (int k = 0; k < NMORE && o < (int)sizeof msg - 80; k++)
+            if (mn[k]) o += snprintf(msg + o, sizeof msg - o, " %s x%d %.0f/%.0f (%d);", k_more[k], mn[k], mrun[k], mwait[k], mnice[k]);
+        /* Collision jobs as fibers (spu_drain.c): jobs, runs on the main thread, lane fallbacks, no slot. */
+        { static unsigned long fn0[4]; unsigned long fn[4];
+          for (int k = 0; k < 4; k++) fn[k] = __atomic_load_n(&g_racacit_fiber_n[k], __ATOMIC_RELAXED);
+          if (fn[0] != fn0[0] && secs > 0 && o < (int)sizeof msg - 160)
+              o += snprintf(msg + o, sizeof msg - o, " | collision fibers %.0f/s, run by the main thread %.0f/s, by their lane %.0f/s, no slot %lu",
+                            (fn[0] - fn0[0]) / secs, (fn[1] - fn0[1]) / secs, (fn[2] - fn0[2]) / secs, fn[3] - fn0[3]);
+          for (int k = 0; k < 4; k++) fn0[k] = fn[k]; }
+        /* ...and by job: which of the two the main thread really runs, how each parks, and what its
+         * lane does meanwhile (v113-android.44). */
+        { static unsigned long fk0[3][7]; static const char* const k_job[3] = { "narrow", "broad", "other" };
+          for (int j = 0; j < 3; j++) {
+              unsigned long v[7]; int any = 0;
+              for (int i = 0; i < 7; i++) { v[i] = __atomic_load_n(&g_racacit_fiber_k[j][i], __ATOMIC_RELAXED); any |= v[i] != fk0[j][i]; }
+              if (any && secs > 0 && o < (int)sizeof msg - 200)
+                  o += snprintf(msg + o, sizeof msg - o, " | %s: %.0f jobs/s, main %.0f/s, lane %.0f/s, parks %.0f/s on a line + %.0f/s polling (%.0f/s lane-only), lane sleeps %.0f/s",
+                                k_job[j], (v[0] - fk0[j][0]) / secs, (v[1] - fk0[j][1]) / secs, (v[2] - fk0[j][2]) / secs, (v[3] - fk0[j][3]) / secs,
+                                (v[4] - fk0[j][4]) / secs, (v[5] - fk0[j][5]) / secs, (v[6] - fk0[j][6]) / secs);
+              for (int i = 0; i < 7; i++) fk0[j][i] = v[i];
+          } }
+        /* v121-android.65: the core swap -- waits that moved the main thread off the top core, lanes given it. */
+        { static unsigned long sw0[3]; unsigned long sw[3];
+          for (int k = 0; k < 3; k++) sw[k] = __atomic_load_n(&s_swap_n[k], __ATOMIC_RELAXED);
+          if (secs > 0 && o < (int)sizeof msg - 80)
+              o += snprintf(msg + o, sizeof msg - o, " | core swap: %.0f waits/s, %.0f lanes/s to the top core",
+                            (sw[0] - sw0[0]) / secs, (sw[1] - sw0[1]) / secs);
+          for (int k = 0; k < 3; k++) sw0[k] = sw[k]; }
+        if (shown && s_sched_lines) android_log_direct(msg);
+        /* The sound module's computed branches (spu_channels.c "[ib2]"): fast memo or slow walk, and why. */
+        { if (g_racacit_ib2[0]) { char ib[900]; racacit_ib2_report(ib, (int)sizeof ib); android_log_direct(ib); } }
+    }
+    return NULL;
+}
+
+static void android_swap_setup(void)
+{
+    /* "[sched]" off unless asked for (RACACIT_SCHED_STATS=1 or RACACIT_PROFILE=1: racacit_diag.h);
+     * the same thread prints "[ib2]" when RACACIT_IB_STATS=1 counts it. */
+    {   s_sched_lines = racacit_diag_switch("RACACIT_SCHED_STATS");
+        const char* ib = getenv("RACACIT_IB_STATS");
+        if (s_sched_lines || (ib && *ib == '1')) { pthread_t t; if (!pthread_create(&t, NULL, racacit_sched_thread, NULL)) pthread_detach(t); } }
+    if (const char* e = getenv("RACACIT_SWAP_AFTER_US")) s_swap_after_tb = (unsigned long long)atol(e) * 80u;
+    const char* ab = getenv("RACACIT_AB");
+    const char* cs = getenv("RACACIT_CORE_SWAP");
+    /* On unless set to 0. Measured with the A/B of .9-.11 (owner's .10 Zolar and .11 Space
+     * Sector logs): on won 6 of the 7 neighbouring gameplay phases, 2-4 ms a frame less waiting on
+     * SPU jobs. "ab", which those builds left in settings.txt, now means on: the A/B is only
+     * RACACIT_AB=<seconds>. */
+    const long secs = ab ? atol(ab) : 0;
+    char msg[160];
+    if (!s_swap_ok) {
+        snprintf(msg, sizeof msg, "[android] core swap: not available here (needs the top core kept for the main thread and small cores)");
+    } else if (secs > 0) {
+        pthread_t t;
+        pthread_create(&t, NULL, racacit_ab_thread, (void*)(intptr_t)(secs < 5 ? 5 : secs));
+        pthread_detach(t);
+        snprintf(msg, sizeof msg, "[android] core swap: A/B, %ld s off then %ld s on, in turn", secs < 5 ? 5 : secs, secs < 5 ? 5 : secs);
+    } else {
+        g_racacit_core_swap = !(cs && *cs == '0');
+        snprintf(msg, sizeof msg, "[android] core swap: %s", g_racacit_core_swap ? "on" : "off");
+    }
+    android_log_direct(msg);
 }
 
 static void android_setup(int* argc, char*** argv)
@@ -1072,15 +1663,25 @@ static void android_setup(int* argc, char*** argv)
     SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS5_RUMBLE, "1");
     SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS4_RUMBLE, "1");
     SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS5_PLAYER_LED, "1");
-    SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER | SDL_INIT_EVENTS);
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER | SDL_INIT_EVENTS) != 0) {
+        __android_log_print(ANDROID_LOG_ERROR, "RACiT", "SDL initialization failed: %s", SDL_GetError());
+        exit(EXIT_FAILURE);
+    }
     const char* base = SDL_AndroidGetExternalStoragePath();
-    if (!base) base = "/sdcard/Android/data/com.racacit.recomp/files";
+    if (!base || !*base) base = SDL_AndroidGetInternalStoragePath();
+    if (!base || !*base) {
+        __android_log_print(ANDROID_LOG_ERROR, "RACiT", "App storage is unavailable");
+        exit(EXIT_FAILURE);
+    }
     char path[1100];
     /* Relative paths resolve in the files folder, as they do beside the exe on
      * Windows. An app starts in "/", the read-only system partition: cellGame's
      * free-space query (content_free_kb from "./gamedata/...") then reads 0 KB
      * free there, and a fresh install stops on "Insufficient hard disk space". */
-    if (chdir(base) != 0) fprintf(stderr, "[android] chdir(%s) failed\n", base);
+    if (chdir(base) != 0) {
+        __android_log_print(ANDROID_LOG_ERROR, "RACiT", "Cannot enter app storage: %s", base);
+        exit(EXIT_FAILURE);
+    }
 
     /* Logging: a file only on request (the runtime is chatty, and a log on
      * flash costs frame time); otherwise logcat. */
@@ -1127,6 +1728,10 @@ static void android_setup(int* argc, char*** argv)
     setenv("RSX_PIPELINE_CACHE", path, 0);
     snprintf(path, sizeof path, "%s/pipelinelist.bin", base);
     setenv("RSX_PIPELINE_LIST", path, 0);
+    /* What each pipeline's shader text came from, so the launcher's Prepare
+     * shaders can regenerate it after a translator change. */
+    snprintf(path, sizeof path, "%s/programlist.bin", base);
+    setenv("RSX_PROGRAM_LIST", path, 0);
 
     /* KEY=VALUE files, later ones winning: env.txt (old builds), the
      * launcher's settings/settings.txt (the player's settings, same names as
@@ -1147,6 +1752,12 @@ static void android_setup(int* argc, char*** argv)
         fclose(f);
     }
 
+    android_cpu_policy();
+    android_swap_setup();
+#ifdef RACIT_PGO_GEN
+    android_pgo_start(base);
+#endif
+
     /* The built-in sampling profiler, when the launcher turned it on
      * (RACACIT_PROFILE=1; android_profiler.cpp). */
     racacit_profiler_start(base);
@@ -1155,9 +1766,21 @@ static void android_setup(int* argc, char*** argv)
      * into <files>/PS3_GAME. */
     const char* game = getenv("GAME");
     const char* root = game && *game ? game : base;
-    snprintf(s_android_eboot, sizeof s_android_eboot, "%s/PS3_GAME/USRDIR/EBOOT.elf", root);
-    if (access(s_android_eboot, R_OK) != 0)
-        snprintf(s_android_eboot, sizeof s_android_eboot, "%s/PS3_GAME/USRDIR/EBOOT.ELF", root);
+    const char* program = getenv("RACACIT_EBOOT");
+    int program_len;
+    if (program && *program) {
+        program_len = snprintf(s_android_eboot, sizeof s_android_eboot, "%s", program);
+        /* The independently imported program need not live in the disc dump. */
+        setenv("PS3_VFS_ROOT", root, 1);
+    } else {
+        program_len = snprintf(s_android_eboot, sizeof s_android_eboot, "%s/PS3_GAME/USRDIR/EBOOT.elf", root);
+        if (access(s_android_eboot, R_OK) != 0)
+            program_len = snprintf(s_android_eboot, sizeof s_android_eboot, "%s/PS3_GAME/USRDIR/EBOOT.ELF", root);
+    }
+    if (program_len < 0 || (size_t)program_len >= sizeof s_android_eboot) {
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "RACiT game path", "The selected game program path is too long.", nullptr);
+        exit(EXIT_FAILURE);
+    }
     static char* s_argv[3] = { (char*)"racacit", s_android_eboot, NULL };
     *argc = 2; *argv = s_argv;
     printf("[android] files dir: %s\n[android] EBOOT: %s\n", base, s_android_eboot);
@@ -1203,39 +1826,6 @@ static int win_file_exists(const char* p)
  * addresses found on the stack -- to log.txt, then lets the fault continue
  * as before. Offsets resolve against RaCACiT.map from the build. Static
  * buffers and a raw WriteFile: it must work on an overflowed stack too. */
-/* log.txt is written by its own thread: every print goes down a pipe. Printing was a
- * disk write on the printing thread, and one that blocked for 2.9 s (the owner's 0.9.4
- * boss fight, frame 68400, the render thread's once-a-minute memory line; C: was 98% full)
- * held up the frame long enough for the game's GPU watchdog to fire. RACACIT_LOG_SYNC=1:
- * as before. Whatever must reach the file before the process ends calls racacit_log_flush. */
-static HANDLE s_log_file, s_log_pipe_r, s_log_pipe_w;
-static DWORD s_log_tid;
-static DWORD WINAPI log_writer_thread(LPVOID)
-{
-    s_log_tid = GetCurrentThreadId();
-    static char buf[1 << 16];
-    DWORD n, w;
-    while (ReadFile(s_log_pipe_r, buf, sizeof buf, &n, NULL) && n) WriteFile(s_log_file, buf, n, &w, NULL);
-    return 0;
-}
-static void racacit_log_async(void)
-{
-    if (getenv("RACACIT_LOG_SYNC")) return;
-    const HANDLE me = GetCurrentProcess();
-    if (!DuplicateHandle(me, (HANDLE)_get_osfhandle(_fileno(stdout)), me, &s_log_file, 0, FALSE, DUPLICATE_SAME_ACCESS)) return;
-    if (!CreatePipe(&s_log_pipe_r, &s_log_pipe_w, NULL, 8u << 20)) { CloseHandle(s_log_file); return; }
-    const int fd = _open_osfhandle((intptr_t)s_log_pipe_w, _O_TEXT);
-    HANDLE th = fd >= 0 ? CreateThread(NULL, 0, log_writer_thread, NULL, 0, NULL) : NULL;
-    if (!th) return;   /* prints stay on the file */
-    CloseHandle(th);
-    _dup2(fd, _fileno(stdout));
-    _dup2(fd, 2);
-}
-static void racacit_log_flush(void)
-{
-    /* Until the writer has read it all. Not on the writer: it would wait for itself. */
-    if (s_log_pipe_w && GetCurrentThreadId() != s_log_tid) FlushFileBuffers(s_log_pipe_w);
-}
 static char s_crash_buf[4096];
 static volatile LONG s_crash_n = 0;
 static void crash_write(const char* s)
@@ -1306,14 +1896,13 @@ static LONG WINAPI crash_veh(EXCEPTION_POINTERS* ep)
         code == EXCEPTION_STACK_OVERFLOW || code == EXCEPTION_INT_DIVIDE_BY_ZERO ||
         code == EXCEPTION_PRIV_INSTRUCTION || code == EXCEPTION_IN_PAGE_ERROR ||
         code == 0xC0000409 /* fast-fail / stack buffer overrun */) {
-        if (InterlockedIncrement(&s_crash_n) <= 6) { crash_describe("first-chance", ep); racacit_log_flush(); }
+        if (InterlockedIncrement(&s_crash_n) <= 6) crash_describe("first-chance", ep);
     }
     return EXCEPTION_CONTINUE_SEARCH;
 }
 static LONG WINAPI crash_unhandled(EXCEPTION_POINTERS* ep)
 {
     crash_describe("UNHANDLED (process ending)", ep);
-    racacit_log_flush();
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
@@ -1372,8 +1961,6 @@ static void windows_setup(int* argc, char*** argv)
             _dup2(_fileno(stdout), _fileno(stderr) >= 0 ? _fileno(stderr) : 2);
             _dup2(_fileno(stdout), 2);
             setvbuf(stderr, NULL, _IONBF, 0);
-            racacit_log_async();
-            atexit(racacit_log_flush);
         }
     }
 
@@ -1482,11 +2069,20 @@ int main(int argc, char** argv)        /* SDL.h renames this to SDL_main */
 #if defined(_WIN32) && (defined(__x86_64__) || defined(_M_X64))
 /* The lifted PPU and SPU code is built for AVX2 + FMA + BMI2 (game/CMakeLists.txt:
  * hardware fused multiply-add for PPC fmadd, wider SPU vector ops), and so is
- * the runtime. Say so plainly on an older CPU rather than dying on an illegal
+ * the runtime; RaCACiT_compat.exe for SSE4.2 (RACACIT_CPU_COMPAT). Say so plainly on an older CPU rather than dying on an illegal
  * instruction. This file is built for plain x86-64. */
 static int racacit_cpu_ok(void)
 {
     unsigned c_a, c_b, c_c, c_d;
+#if defined(RACACIT_CPU_COMPAT)
+    /* RaCACiT_compat.exe (game/CMakeLists.txt RACACIT_CPU_COMPAT): x86-64-v2,
+     * SSE3, SSSE3, SSE4.1, SSE4.2 and POPCNT. */
+    int c_ok = __get_cpuid(1, &c_a, &c_b, &c_c, &c_d) && (c_c & (1u << 0)) && (c_c & (1u << 9)) &&
+               (c_c & (1u << 19)) && (c_c & (1u << 20)) && (c_c & (1u << 23));
+    /* RACACIT_TEST_NO_SSE42 (environment): the refusal on any CPU, to test it. */
+    if (GetEnvironmentVariableA("RACACIT_TEST_NO_SSE42", NULL, 0)) c_ok = 0;
+    return c_ok;
+#else
     int c_ok = __get_cpuid(1, &c_a, &c_b, &c_c, &c_d) && (c_c & (1u << 12)) && (c_c & (1u << 27)) &&
                (c_c & (1u << 28));                                   /* FMA, OSXSAVE, AVX */
     if (c_ok) {
@@ -1500,12 +2096,19 @@ static int racacit_cpu_ok(void)
      * refusal path on any CPU, to test it. */
     if (GetEnvironmentVariableA("RACACIT_TEST_NO_AVX2", NULL, 0)) c_ok = 0;
     return c_ok;
+#endif
 }
 static void racacit_cpu_refuse(void)
 {
+#if defined(RACACIT_CPU_COMPAT)
+    MessageBoxA(NULL, "This build needs a CPU with SSE4.2 (Intel Core i from 2008 or newer, AMD FX or "
+                      "newer). This computer's processor does not have it, so the game cannot run on it.",
+#else
     MessageBoxA(NULL, "This build needs a CPU with AVX2, FMA and BMI2 (Intel Haswell from 2013 or newer, "
-                      "AMD Ryzen or newer). This computer's processor does not have them, so the game "
-                      "cannot run on it.",
+                      "AMD Ryzen or newer). This computer's processor does not have them.\n\n"
+                      "For an older processor, start the game from the launcher with Settings > "
+                      "Performance > Game build set to Automatic or Older CPUs.",
+#endif
                 "Ratchet & Clank: A Crack in Time", MB_OK | MB_ICONERROR);
 }
 #if !defined(_MSC_VER)
@@ -1525,6 +2128,14 @@ extern "C" int racacit_entry(void)
 
 int main(int argc, char** argv)
 {
+#if defined(__APPLE__) && defined(RACACIT_HAVE_VULKAN)
+    /* Preserve IEEE shader guards before SDL or the Vulkan loader starts.
+     * Pending asynchronous pipelines currently skip draws in this backend. */
+    setenv("MVK_CONFIG_FAST_MATH_ENABLED", "0", 0);
+    setenv("RACACIT_ASYNC_PIPELINES", "0", 0);
+    setenv("RACACIT_HLE_SPURS", "1", 0);
+    setenv("PS3RECOMP_VK_WINDOW", "1", 0);
+#endif
 #ifdef __ANDROID__
     android_setup(&argc, &argv);
 #endif
@@ -1545,19 +2156,28 @@ int main(int argc, char** argv)
      * inflates every shorter wait the title makes and throttles the whole
      * thing. POSIX timers are already fine-grained. */
     timeBeginPeriod(1);
-    /* Windows may slow a process it decides is in the background, park it on a
-     * hybrid CPU's efficiency cores, and (Windows 11) ignore its timer resolution
-     * when the window is covered: all of it stutter here, where every thread paces
-     * another. Opt out of both. Older Windows refuses the call, which is fine. */
-    { typedef BOOL (WINAPI* spi_t)(HANDLE, int, void*, DWORD);
-      struct { ULONG Version, ControlMask, StateMask; } pt = { 1u, 0x1u | 0x4u, 0u };
-      HMODULE k32 = GetModuleHandleA("kernel32.dll");
-      spi_t spi = k32 ? (spi_t)(void*)GetProcAddress(k32, "SetProcessInformation") : NULL;
-      if (spi) spi(GetCurrentProcess(), 4 /* ProcessPowerThrottling */, &pt, (DWORD)sizeof pt); }
     setvbuf(stdout, NULL, _IONBF, 0);   /* unbuffered: do not lose prints on a kill */
 #endif
 
     printf("=== ps3recomp game runner ===\n");
+#if defined(_WIN32) && (defined(__x86_64__) || defined(_M_X64))
+    /* Which exe and which processor: a player's log said neither, and the
+     * older-CPU build's slow paths were found only by matching its stall
+     * stacks against each build's symbols. */
+    {   unsigned r[12] = { 0 }; char brand[49] = { 0 };
+        for (unsigned i = 0; i < 3; i++) __get_cpuid(0x80000002u + i, &r[i * 4], &r[i * 4 + 1], &r[i * 4 + 2], &r[i * 4 + 3]);
+        memcpy(brand, r, 48);
+        const char* b = brand; while (*b == ' ') b++;
+        for (size_t n = strlen(brand); n && brand[n - 1] == ' '; n--) brand[n - 1] = 0;
+        SYSTEM_INFO si; GetSystemInfo(&si);
+#if defined(RACACIT_CPU_COMPAT)
+        const char* build = "older-CPU build (RaCACiT_compat.exe, no AVX2)";
+#else
+        const char* build = "standard build (RaCACiT.exe, AVX2)";
+#endif
+        printf("[racacit] %s; CPU: %s, %lu logical processors\n", build, *b ? b : "unknown",
+               (unsigned long)si.dwNumberOfProcessors); }
+#endif
 
     if (!alloc_guest_vm()) {
         fprintf(stderr, "ERROR: could not allocate the guest address space\n");
@@ -1577,6 +2197,25 @@ int main(int argc, char** argv)
         ppu_inl_clip_hole = 1;
     }
 
+#if defined(__ANDROID__) && defined(RACACIT_HAVE_VULKAN)
+    /* RACACIT_PREPARE=1 (the launcher's "Prepare shaders"): Vulkan only, no
+     * game -- every pipeline the list holds built into the cache on all cores
+     * (rsx_vulkan_prepare_shaders), the game activity drawing the progress. */
+    if (getenv("RACACIT_PREPARE") && getenv("RACACIT_PREPARE")[0] == '1') {
+        const char* t = getenv("PS3_TITLE");
+        if (rsx_backend_init(WINDOW_WIDTH, WINDOW_HEIGHT, t ? t : "RACiT") != 0) {
+            fprintf(stderr, "[prepare] Vulkan init failed%c", 10);
+            fflush(stdout); fflush(stderr);
+            _exit(2);
+        }
+        const int r = rsx_vulkan_prepare_shaders();
+        fprintf(stderr, "[prepare] finished (%d)%c", r, 10);
+        fflush(stdout); fflush(stderr);
+        SDL_Delay(2500);          /* the bar shows "done" before the activity closes */
+        _exit(0);
+    }
+#endif
+    if (!racit_menu_archive_init()) return 1;
     uint32_t entry = ppu_load_elf(argv[1]);
     if (!entry) {
         fprintf(stderr, "ERROR: could not load %s\n", argv[1]);
@@ -1613,16 +2252,52 @@ int main(int argc, char** argv)
     ppu_sysprx_register();   /* boot-critical CRT */
     ppu_fs_register();       /* cellFs over the game directory */
     lv2_init_syscalls();     /* the lv2 syscall table */
+#ifdef __ANDROID__
+    /* Fix the write-watch mode before renderer/guest threads begin. Kernel
+     * write brackets must never straddle lazy initialization of protection. */
+    (void)rsx_ww_on();
+#endif
 
     /* Install the guest-callback hook, then start the frame clock. It no-ops
      * until the title registers its vblank and flip handlers during init. */
     g_ps3_guest_caller = harness_guest_caller;
+#if defined(__APPLE__) && defined(RACACIT_HAVE_VULKAN)
+    /* Cocoa creates and pumps windows on the process main thread. */
+    const char* window = getenv("PS3RECOMP_VK_WINDOW");
+    if (window && strcmp(window, "1") == 0) {
+        static uint32_t window_entry;
+        window_entry = entry;
+        HANDLE guest = CreateThread(NULL, 16u * 1024 * 1024,
+            [](LPVOID argument) -> DWORD {
+                int result = ppu_run(*(uint32_t*)argument, STACK_TOP);
+                fprintf(stderr, "[boot] windowed guest returned %d\n", result);
+                fflush(stdout); fflush(stderr);
+                _exit(g_sys_process_exit_called ? (int)g_sys_process_exit_code : result);
+                return 0;
+            }, &window_entry, 0, NULL);
+        if (!guest) return 1;
+        frame_clock(NULL);
+        return 0;
+    }
+#endif
     CreateThread(NULL, 4u * 1024 * 1024, frame_clock, NULL, 0, NULL);
     if (getenv("PS3_PEEK")) CreateThread(NULL, 0, peek_thread, NULL, 0, NULL);
 
     printf("\n[boot] dispatching entry OPD 0x%08X (stack top 0x%08X)\n\n",
            entry, STACK_TOP);
 
+#ifdef __ANDROID__
+    /* This thread runs the guest's main thread: named for the log pump (android_name_thread),
+     * so the profiler, the companion's Status page and the performance hint session know it.
+     * Unannounced, it had no name until SDL first attached it to Java, and then "Thread-N". */
+    prctl(PR_SET_NAME, "PPU main thread", 0, 0, 0);
+    g_racacit_main_tid = (long)gettid();   /* the core swap's (racacit_swap_poll) */
+    /* Not pinned to the top core (v113-android.14 did, racacit_pin_main): threads inherit their
+     * creator's affinity, and those the main thread makes that are not placed by name -- the
+     * cellAudio mixer among them -- were then held to the top core with the main thread, and the
+     * game's sound ran at 62% speed. */
+    fprintf(stderr, "[hosttid] %lu PPU main thread\n", (unsigned long)GetCurrentThreadId());
+#endif
     int rc = ppu_run(entry, STACK_TOP);
     printf("\n[boot] ppu_run returned %d (entry function unwound)\n", rc);
 
