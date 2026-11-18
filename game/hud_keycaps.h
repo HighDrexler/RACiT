@@ -197,3 +197,102 @@ static void hud_faces_sync(bool keyboard)
     }
 }
 
+/* "R2 + [square]" (the Kinetic Tether prompt) with keys: the R2 picture's 87
+ * columns and the square's 52 at its right edge become the R2 and SQUARE
+ * keys; the "+" between them stays. `before` is the picture as the game
+ * (or the R1 swap, hud_sync) left it. */
+struct {
+    uint32_t ea;
+    uint8_t  before[kHudRows * kHudPitch], keys[kHudRows * kHudPitch];
+    int      have;
+} s_hudkb;
+
+static void hud_keys_sync(bool keyboard)
+{
+    if (!s_hud.ea) { s_hudkb.have = 0; return; }
+    const uint32_t bytes = kHudRows * kHudPitch;
+    if (!readable(s_hud.entry, 32) || !readable(s_hud.ea, bytes)) return;   /* hud_sync drops it */
+    const uint8_t* t = vm_base + s_hud.entry;
+    if (be16(t + 0x18) != kHudW || be16(t + 0x1A) != kKeyH || t[6] != 0xA8) return;
+    if (s_hudkb.ea != s_hud.ea) { s_hudkb.ea = s_hud.ea; s_hudkb.have = 0; }
+    uint8_t* tex = vm_base + s_hud.ea;
+    const bool is_keys = s_hudkb.have && !memcmp(tex, s_hudkb.keys, bytes);
+    if (!keyboard) {
+        if (is_keys) { memcpy(tex, s_hudkb.before, bytes);
+                       fprintf(stderr, "[prompts] HUD picture \"R2 + square\" at %08X: put back%c", s_hud.ea, 10); }
+        return;
+    }
+    if (is_keys) return;
+    const int cols = kHudPitch / 16, w = cols * 4;
+    static uint8_t a[(kHudPitch / 16 * 4) * kHudRows * 4 * 4], b[sizeof a];
+    memcpy(s_hudkb.before, tex, bytes);
+    dxt5_to_rgba(tex, kHudPitch, cols, kHudRows, a);
+    memcpy(b, a, sizeof b);
+    static uint8_t key[kKeyW * kKeyH * 4];
+    char label[8];
+    desktop_label(11, label);           /* R2 */
+    keycap_rgba(kKeyW, kKeyH, label, key);
+    for (int y = 0; y < kKeyH; y++) memcpy(b + 4 * (y * w), key + 4 * (y * kKeyW), 4 * kKeyW);
+    desktop_label(1, label);            /* SQUARE */
+    keycap_rgba(kFaceW, kKeyH, label, key);
+    const int sx = kHudW - kFaceW;
+    for (int y = 0; y < kKeyH; y++) memcpy(b + 4 * (y * w + sx), key + 4 * (y * kFaceW), 4 * kFaceW);
+    rgba_to_dxt5(b, cols, kHudRows, kHudPitch, 0, (kHudW + 3) / 4, s_hudkb.before, s_hudkb.keys);
+    for (int c = (kKeyW + 3) / 4; c < sx / 4; c++)       /* the "+" between: the game's own blocks */
+        for (int r = 0; r < kHudRows; r++) memcpy(s_hudkb.keys + r * kHudPitch + c * 16, s_hudkb.before + r * kHudPitch + c * 16, 16);
+    if (!s_hudkb.have) {
+        dxt5_to_rgba(s_hudkb.keys, kHudPitch, cols, kHudRows, b);
+        hudkey_dump(s_hud.ea, a, b, w, kHudRows * 4);
+    }
+    s_hudkb.have = 1;
+    memcpy(tex, s_hudkb.keys, bytes);
+    fprintf(stderr, "[prompts] HUD picture \"R2 + square\" at %08X: keys drawn in%c", s_hud.ea, 10);
+}
+
+/* The quick select badges with keys: "L1" -> the L1 key, "R1" -> the R1 key.
+ * The badge's letter tells which: an "R" has ink in the upper right of its
+ * box, an "L" none. */
+struct { uint32_t ea; uint8_t before[kBadgeBytes], keys[kBadgeBytes]; int have; } s_badgekb[2];
+
+static void badge_keys_sync(bool keyboard)
+{
+    for (int i = 0; i < 2; i++) {
+        Badge& bd = s_badge[i];
+        auto& k = s_badgekb[i];
+        if (!bd.ea || !readable(bd.ea, kBadgeBytes)) { k.have = 0; continue; }
+        if (k.ea != bd.ea) { k.ea = bd.ea; k.have = 0; }
+        uint8_t* tex = vm_base + bd.ea;
+        const bool is_keys = k.have && !memcmp(tex, k.keys, kBadgeBytes);
+        if (!keyboard) {
+            if (is_keys) { memcpy(tex, k.before, kBadgeBytes);
+                           fprintf(stderr, "[prompts] quick select badge at %08X: put back%c", bd.ea, 10); }
+            continue;
+        }
+        if (is_keys) continue;
+        static uint8_t a[kBadgeW * kBadgeH * 4], b[kBadgeW * kBadgeH * 4];
+        dxt5_to_rgba(tex, kBadgePitch, kBadgeW / 4, kBadgeH / 4, a);
+        auto ink = [&](int x, int y) { const uint8_t* q = a + 4 * (y * kBadgeW + x); return q[3] > 128 && q[0] + q[1] + q[2] > 3 * 170; };
+        int col[kBadgeW] = {};
+        for (int x = 0; x < kBadgeW; x++) for (int y = 0; y < kBadgeH; y++) col[x] += ink(x, y);
+        /* the letter: the first run of inked columns */
+        int x0 = 0; while (x0 < kBadgeW && !col[x0]) x0++;
+        int x1 = x0; while (x1 < kBadgeW && col[x1]) x1++;
+        int y0 = kBadgeH, y1 = -1;
+        for (int y = 0; y < kBadgeH; y++) for (int x = x0; x < x1; x++) if (ink(x, y)) { y0 = std::min(y0, y); y1 = std::max(y1, y); }
+        if (x1 - x0 < 3 || y1 - y0 < 5) { fprintf(stderr, "[prompts] quick select badge at %08X: no letter found, left alone%c", bd.ea, 10); continue; }
+        int ur = 0;   /* ink in the right half of the letter's top third, away from its stem */
+        for (int y = y0; y < y0 + (y1 - y0) / 3; y++) for (int x = x0 + (x1 - x0) * 2 / 3; x < x1; x++) ur += ink(x, y);
+        const unsigned key = ur > 0 ? 10 : 6;   /* E00B R1 / E007 L1 */
+        char label[8]; desktop_label(key, label);
+        keycap_rgba(kBadgeW, kBadgeH, label, b);
+        memcpy(k.before, tex, kBadgeBytes);
+        rgba_to_dxt5(b, kBadgeW / 4, kBadgeH / 4, kBadgePitch, 0, kBadgeW / 4, k.before, k.keys);
+        if (!k.have) {
+            dxt5_to_rgba(k.keys, kBadgePitch, kBadgeW / 4, kBadgeH / 4, b);
+            hudkey_dump(bd.ea, a, b, kBadgeW, kBadgeH);
+            fprintf(stderr, "[prompts] quick select badge at %08X: %s, key %s%c", bd.ea, key == 10 ? "R1" : "L1", label, 10);
+        }
+        k.have = 1;
+        memcpy(tex, k.keys, kBadgeBytes);
+    }
+}

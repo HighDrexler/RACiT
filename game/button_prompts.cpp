@@ -661,7 +661,7 @@ DWORD WINAPI prompts_thread(LPVOID)
         if (keyboard) desktop_prompts(true);
         if (!ms) {
             /* HUD pictures: keys, or the controller's own (with the R1/L2 swaps) */
-            hud_faces_sync(keyboard);
+            hud_faces_sync(keyboard); hud_keys_sync(keyboard); badge_keys_sync(keyboard);
             if (!keyboard) { hud_sync(want_r); badge_sync(want_r); }
         }
         if ((changed && !want_l) || (unsigned)layout != last_layout)
