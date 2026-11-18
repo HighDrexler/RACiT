@@ -5,6 +5,9 @@
 #   as its only rpath and BINARY only RPATH (e.g. @executable_path/lib): nothing points at
 #   Homebrew afterwards. An EXTRA written SRC=NAME is copied as NAME (sdl2-compat dlopens
 #   @loader_path/libSDL3.dylib).
+# MACOS_LIB_PREFIX (optional): a prefix whose lib/ is searched first for every library, by file
+#   name, even one BINARY names by an absolute Homebrew path -- e.g. libraries built for an older
+#   macOS than Homebrew's bottles (mac/package_macos.sh, mac/build_launcher.sh).
 
 _is_system() { case "$1" in /usr/lib/*|/System/*) return 0;; *) return 1;; esac; }
 _rpaths() { otool -l "$1" | awk '/cmd LC_RPATH/{getline; getline; print $2}'; }
@@ -20,6 +23,7 @@ _origin() {
 _resolve() {
     local dep="$1" from="$2" base dir r
     base="$(basename "$dep")"; dir="$(dirname "$from")"
+    if [ -n "$MACOS_LIB_PREFIX" ] && [ -f "$MACOS_LIB_PREFIX/lib/$base" ]; then realpath "$MACOS_LIB_PREFIX/lib/$base"; return 0; fi
     case "$dep" in
         @rpath/*|@loader_path/*|@executable_path/*)
             for r in "$dir" $(_rpaths "$from" | sed "s|@loader_path|$dir|") /opt/homebrew/lib /usr/local/lib; do

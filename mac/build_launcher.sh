@@ -1,14 +1,18 @@
 #!/bin/bash
-# mac/build_launcher.sh: "RaCACiT Launcher.app" -> launcher/build/ (macOS 11+, Apple Silicon).
+# mac/build_launcher.sh: "RaCACiT Launcher.app" -> launcher/build/ (macOS $MACOS_MIN+, default 14.0, Apple Silicon).
 # The launcher's shared source is launcher/src; its macOS parts are in mac/launcher.
 # clang/clang++ from the Xcode command line tools, SDL2 from Homebrew (sdl2-compat and the
 # SDL3 it loads go inside the .app), libcurl and the frameworks from macOS itself.
-# Ad-hoc signed. mac/package_macos.sh puts it in a release folder beside the game build.
+# MACOS_LIB_PREFIX: take SDL2/SDL3 from that prefix instead (libraries built for MACOS_MIN,
+# mac/build_macos_libs.sh). Ad-hoc signed. mac/package_macos.sh puts it in a release folder
+# beside the game build.
 set -e
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 LAUNCHER="$ROOT/launcher"
 BREW="${HOMEBREW_PREFIX:-$(brew --prefix 2>/dev/null || echo /opt/homebrew)}"
+LIBS="${MACOS_LIB_PREFIX:-$BREW}"
+MACOS_MIN="${MACOS_MIN:-14.0}"
 OUT="$LAUNCHER/build"
 APP="$OUT/RaCACiT Launcher.app"
 VERSION="$(sed -n 's/^static const char\* kLauncherVersion = "\(.*\)";/\1/p' "$LAUNCHER/src/app.cpp")"
@@ -16,7 +20,7 @@ OBJ="$OUT/obj-macos"
 mkdir -p "$OBJ"
 . "$HERE/macos_dylibs.sh"
 
-FLAGS=(-arch arm64 -mmacosx-version-min=11.0 -O2 -Wall -I"$BREW/include" -DNDEBUG -I"$LAUNCHER/src" -I"$HERE/launcher")
+FLAGS=(-arch arm64 -mmacosx-version-min=$MACOS_MIN -O2 -Wall -I"$LIBS/include" -DNDEBUG -I"$LAUNCHER/src" -I"$HERE/launcher")
 cd "$LAUNCHER/src"
 for f in app.cpp iso.cpp store.cpp util.cpp; do
     clang++ -std=c++17 "${FLAGS[@]}" -c "$f" -o "$OBJ/${f%.*}.o" &
@@ -30,11 +34,11 @@ wait_all
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks"
 BIN="$APP/Contents/MacOS/RaCACiT Launcher"
-clang++ -arch arm64 -mmacosx-version-min=11.0 "$OBJ"/*.o -o "$BIN" \
-    -L"$BREW/lib" -lSDL2 -lcurl \
+clang++ -arch arm64 -mmacosx-version-min=$MACOS_MIN "$OBJ"/*.o -o "$BIN" \
+    -L"$LIBS/lib" -lSDL2 -lcurl \
     -framework AppKit -framework CoreText -framework CoreGraphics -framework ImageIO -framework CoreFoundation \
     -Wl,-dead_strip
-bundle_dylibs "$BIN" "$APP/Contents/Frameworks" "@executable_path/../Frameworks" "$BREW/lib/libSDL3.0.dylib=libSDL3.dylib"
+bundle_dylibs "$BIN" "$APP/Contents/Frameworks" "@executable_path/../Frameworks" "$LIBS/lib/libSDL3.0.dylib=libSDL3.dylib"
 
 # The icon: the RACiT emblem (assets/emblem.png, 1024 px) at every size macOS asks for.
 ICONSET="$OBJ/icon.iconset"
@@ -59,7 +63,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleVersion</key><string>$VERSION</string>
     <key>CFBundleIconFile</key><string>icon</string>
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
-    <key>LSMinimumSystemVersion</key><string>11.0</string>
+    <key>LSMinimumSystemVersion</key><string>$MACOS_MIN</string>
     <key>LSApplicationCategoryType</key><string>public.app-category.games</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
