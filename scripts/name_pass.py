@@ -16,6 +16,8 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
+OUT_ROOT = os.environ.get('RACACIT_OUT', os.path.join(ROOT, 'out'))
+ELF_STEM = os.environ.get('RACACIT_ELF_STEM', 'EBOOT')
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(ROOT, "tools", "ps3recomp", "tools"))
 from ppc_scan import Image, scan  # noqa: E402
@@ -93,7 +95,7 @@ def import_names(out):
     db = get_default_db()
     extra = {compute_nid(n): n for n in EXTRA_NIDS}
     n = 0
-    for imp in json.load(open(os.path.join(ROOT, "out", "EBOOT.imports.json"))):
+    for imp in json.load(open(os.path.join(OUT_ROOT, ELF_STEM + ".imports.json"))):
         nid = int(imp["nid"], 16)
         hit = db.lookup_nid(nid)
         name = hit[1] if hit else extra.get(nid)
@@ -150,7 +152,7 @@ def main():
     funcs = json.load(open(os.path.join(ROOT, "analysis", "ghidra", "functions.json")))
     sizes = {int(f["addr"], 16): f["size"] for f in funcs}
 
-    base = os.path.join(ROOT, "out", "ghidra_names.json")
+    base = os.path.join(OUT_ROOT, "ghidra_names.json")
     out = json.load(open(base)) if os.path.exists(base) else {}
     for k in out:
         out[k].setdefault("src", "string")
@@ -170,7 +172,7 @@ def main():
             out[k]["cident"] = "%s_%s" % (c, k[2:])
         seen[c] = k
 
-    dst = os.path.join(ROOT, "out", "names.json")
+    dst = os.path.join(OUT_ROOT, "names.json")
     json.dump(out, open(dst, "w"), indent=1, sort_keys=True)
     from collections import Counter
     print("imports %d, tolua %d, total %d of %d functions -> %s"

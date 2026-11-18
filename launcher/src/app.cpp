@@ -1,10 +1,15 @@
 // RaCACiT Launcher (Windows): imports the player's own copy of A Crack in Time,
 // manages settings, saves, mods and builds, and starts the game. The Windows
-// counterpart of the Android launcher (android/), in the same look.
+// counterpart of the Android launcher (android/), in the same look. The same screens on
+// macOS: an SDL window feeding this file's window procedure (mac/launcher/app_mac.h, main at the end).
+#ifdef _WIN32
 #include <windows.h>
 #include <windowsx.h>
 #include <shellapi.h>
 #include <shlobj.h>
+#else
+#include "app_mac.h"
+#endif
 #include <SDL2/SDL.h>
 
 #include <algorithm>
@@ -17,7 +22,8 @@
 #include "gfx.h"
 #include "store.h"
 
-static const char* kLauncherVersion = "0.9.8";
+static const char* kLauncherVersion = "1.0.0";
+const char* g_launcher_version = kLauncherVersion;
 enum { WM_APP_TASK = WM_APP + 1, WM_APP_GAME_EXIT, WM_APP_UPDATE, TIMER_TICK = 1 };
 
 // ---- screen model ------------------------------------------------------------------------
@@ -51,7 +57,9 @@ struct Overlay {
 
 static HWND g_hwnd;
 static Gfx g;
-static Store* S;
+static Store* S;                 // the game on screen
+static Store* R;                 // A Crack in Time's: the launcher's own (updates, launcher.ini)
+static Store* g_games[2];        // A Crack in Time, Into the Nexus
 static Screen scr;
 static int focus = 0;
 static float scroll = 0, scroll_to = 0;
@@ -135,6 +143,11 @@ static void capture_done(const std::string& name)
 // itself reads the keyboard on Windows: by position, so the game sees the same key.
 static std::string key_name_from_scan(LPARAM l)
 {
+#ifdef __APPLE__
+    // The Mac loop sends SDL's own scan code (a USB HID position, as above) in bits 16-25.
+    const SDL_Scancode mac_sc = (SDL_Scancode)((l >> 16) & 0x3FF);
+    return mac_sc == SDL_SCANCODE_UNKNOWN ? std::string() : std::string(SDL_GetScancodeName(mac_sc));
+#endif
     const unsigned sc = (unsigned)(l >> 16) & 0xFF; const bool ext = (l >> 24) & 1;
     static const SDL_Scancode base[0x59] = {
         SDL_SCANCODE_UNKNOWN, SDL_SCANCODE_ESCAPE, SDL_SCANCODE_1, SDL_SCANCODE_2, SDL_SCANCODE_3, SDL_SCANCODE_4, SDL_SCANCODE_5,
@@ -209,7 +222,13 @@ static const std::vector<Opt>& opts()
         { "Image", "RACACIT_TRILINEAR", "Trilinear filtering", "0", { { "0", "Off" }, { "1", "On" } } },
         { "Image", "RACACIT_TEX_QUALITY", "Texture quality", "high", { { "high", "High (original)" }, { "medium", "Medium" }, { "low", "Low" } } },
         { "Performance", "RACACIT_PRESENT_PACE", "Frame pacing", "1", { { "1", "On (even 60 Hz)" }, { "0", "Off" } } },
+        // Into the Nexus only (add_options): the game's own 30 fps mode, as on the PS3. The game
+        // reads NEXUS_FPS=30 at start (rac-nexus patch_lift_nexus.py fps60); unset = 60 fps.
+        { "Performance", "NEXUS_FPS", "Frame rate", "", { { "", "60 fps" }, { "30", "30 fps (as the PS3)" } } },
         { "Performance", "RACACIT_CPU_MODE", "CPU usage", "efficient", { { "efficient", "Efficient" }, { "max", "Maximum (spin on all cores)" } } },
+        // Which exe Play starts (Store::launch): RaCACiT.exe (AVX2, FMA, BMI2) or RaCACiT_compat.exe
+        // (SSE4.2, for older processors). Automatic: by what this PC's processor has.
+        { "Performance", "RACACIT_GAME_BUILD", "Game build", "", { { "", "Automatic" }, { "standard", "Standard (AVX2 processors)" }, { "compat", "Older processors (no AVX2)" } } },
         { "Controller", "RACACIT_DS_SWAP", "Fire button", "1", { { "1", "R2 / RT (R1 and R2 swapped)" }, { "0", "R1 / RB (PS3 layout)" } } },
         { "Controller", "RACACIT_DS_RUMBLE", "Rumble", "100", {} },
         { "Controller", "RACACIT_DS_TRIGGERS", "Adaptive triggers", "1", { { "1", "On" }, { "0", "Off" } } },
@@ -228,9 +247,25 @@ static const std::vector<Opt>& opts()
         // language, which the build answers from this (game/stubs.cpp). Unset = English.
         { "Game", "RACACIT_LANGUAGE", "Language", "", { { "", "English" }, { "fr", "Français (French)" }, { "es", "Español (Spanish)" }, { "de", "Deutsch (German)" }, { "it", "Italiano (Italian)" }, { "nl", "Nederlands (Dutch)" } } },
         { "Game", "RACACIT_SKIP_INTRO", "Logos and notices at boot", "0", { { "0", "Show (as the game)" }, { "1", "Skip" } } },
+        { "Game", "RACACIT_SKIP_PRESS_START", "PRESS START screen", "0", { { "0", "Show (as the game)" }, { "1", "Skip (with logos skipped)" } } },
         { "Game", "RACACIT_START_SKIPS_MOVIES", "START skips movies", "1", { { "1", "Yes" }, { "0", "No" } } },
         { "Game", "RACACIT_ALL_CUTSCENES_SKIPPABLE", "Every cutscene skippable", "1", { { "1", "Yes" }, { "0", "No (as the game)" } } },
         { "Game", "RACACIT_SPACE_FREE_LANDING", "Land anywhere in space", "1", { { "1", "Yes" }, { "0", "No (as the game)" } } },
+        // The game's discount for Tools of Destruction owners: five weapons cheaper at the
+        // vendor (game/stubs.cpp racacit_bonus_grant; set or cleared in each save as it loads).
+        { "Game", "RACACIT_TOD_DISCOUNT", "Tools of Destruction discount", "1", { { "1", "On" }, { "0", "Off" } } },
+        // The Power pack pre-order bonus: more health, the CryoMine Glove and an outfit variant.
+        // Off takes the health and outfit back from a save as it loads (the glove stays).
+        { "Game", "RACACIT_POWER_PACK", "Power pack (pre-order bonus)", "1", { { "1", "On" }, { "0", "Off" } } },
+        // The cheat menu: a Cheats page in the game's Settings menu (F1), in the Trophies page's
+        // place. No skill points or trophies while it is on, and none ever in a save a cheat was
+        // used in (game/stubs.cpp). Turning it on shows a notice (add_options).
+        { "Game", "RACACIT_CHEATS", "Cheat menu", "0", { { "0", "Off" }, { "1", "On" } } },
+        // Into the Nexus only: the game keeps one save and shows New Game only with none, so the
+        // port gives it save slots (rac-nexus cellSaveData.c NEXUS_SAVE_SLOT: slot 2-8 = a save
+        // folder of its own under home 00001\save_slots\<n>). An empty slot = New Game.
+        { "Game", "NEXUS_SAVE_SLOT", "Save slot", "", { { "", "Slot 1" }, { "2", "Slot 2" }, { "3", "Slot 3" }, { "4", "Slot 4" },
+                                                       { "5", "Slot 5" }, { "6", "Slot 6" }, { "7", "Slot 7" }, { "8", "Slot 8" } } },
         { "Game", "RACACIT_SAVE_UI", "Save list screen", "1", { { "1", "On" }, { "0", "Off" } } },
         { "Game", "RACACIT_FPS", "FPS counter", "0", { { "0", "Off" }, { "1", "On" } } },
         { "Game", "RACACIT_DISCORD", "Discord status", "1", { { "1", "On" }, { "0", "Off" } } },
@@ -258,6 +293,16 @@ static void option_value(const Opt& o, std::string* value, std::string* label, i
             *index = (int)i;
     }
     *label = *index >= 0 ? (*choices)[*index].second : o.ch.empty() ? *value + "%" : *value + " (custom)";
+    /* Save slots: say which hold a save (an empty one starts a New Game). */
+    if (!strcmp(o.key, "NEXUS_SAVE_SLOT")) {
+        auto has_save = [](const std::string& v) {
+            std::error_code ec;
+            const fs::path d = v.empty() ? S->saves() : S->hdd() / L"home" / L"00000001" / L"save_slots" / std::wstring(v.begin(), v.end()) / L"savedata";
+            return fs::exists(d / L"NPUA80908_SAVE_0" / L"GAME.SAV", ec);
+        };
+        for (auto& c : *choices) c.second += has_save(c.first) ? "  (saved game)" : "  (empty: New Game)";
+        if (*index >= 0) *label = (*choices)[*index].second;
+    }
 }
 
 // The next choice from `value` in direction d: from a value between two choices
@@ -277,6 +322,7 @@ static int step_choice(const std::vector<std::pair<std::string, std::string>>& c
 // ---- screens ------------------------------------------------------------------------------
 static void home();
 static void play();
+static void switch_game(int k);   // the game bar
 
 static Item button(const std::string& label, const std::string& sub, std::function<void()> act, bool enabled = true)
 {
@@ -300,8 +346,8 @@ static void add_elf_picked(const fs::path& p)
         else set_screen(import_screen);
     };
     if (known) put();
-    else confirm("A different EBOOT.elf", "This is a PS3 program, but not the EBOOT.elf of the USA disc this build is made "
-                 "from (BCUS98124, version 1.00 -- not an update's). The game may not start with it.", "Use it anyway", put);
+    else confirm("A different EBOOT.elf", "This is a PS3 program, but not the EBOOT.elf of a disc this build is made "
+                 "from (" + S->prof->disc_list() + ", version 1.00 -- not an update's). The game may not start with it.", "Use it anyway", put);
 }
 
 // An earlier launcher's folder (Store::migrate_from_launcher).
@@ -335,24 +381,27 @@ static void import_screen()
     const bool wrong = gi.status.rfind("This is", 0) == 0 || gi.status.rfind("PS3_GAME not found", 0) == 0;
     const bool have_game = fs::is_directory(gi.root / L"PS3_GAME", ec) && !wrong;
     const bool have_elf = gi.ok || fs::exists(S->pending_elf(), ec);
+    const GameProfile& P = *S->prof;
+    std::string discs;
+    for (size_t k = 0; k < P.discs.size(); k++) discs += (k ? ", or " : "") + std::string(P.discs[k].region) + " " + P.discs[k].id;
     scr = Screen(); scr.title = gi.ok ? "Your game" : "Set up"; scr.subtitle = "";
     scr.back = [] { set_screen(home); };
     if (gi.ok) scr.info.push_back({ "Ready", u8(gi.root), col::TEXT_GOOD });
     else if (wrong) scr.info.push_back({ "Problem", gi.status, col::TEXT_BAD });
     else if (have_game) scr.info.push_back({ "Game found", (gi.title.empty() ? std::string() : gi.title + " " + gi.app_ver + "\n") + u8(gi.root), col::TEXT_GOOD });
-    scr.info.push_back({ "What you need", "Your own copy of A Crack in Time (USA, BCUS98124):\n"
+    scr.info.push_back({ "What you need", "Your own copy of " + std::string(P.name) + " (" + discs + "):\n"
                                           "1. The game: its disc image (.iso), or the dumped game's folder -- pick "
                                           "its USRDIR. A Redump .iso is encrypted: keep its .dkey file beside it, "
                                           "with the same name, and the launcher unlocks it.\n"
                                           "2. EBOOT.elf, the game's main program unlocked with RPCS3. Already in "
                                           "USRDIR? Then it is found by itself." });
-    scr.info.push_back({ "Making EBOOT.elf", "You must provide your own legally dumped copy of Ratchet & Clank Future: "
-                                             "A Crack in Time, and the EBOOT.elf file from your dump. If your EBOOT.elf "
+    scr.info.push_back({ "Making EBOOT.elf", "You must provide your own legally dumped copy of " + std::string(P.full_name) +
+                                             ", and the EBOOT.elf file from your dump. If your EBOOT.elf "
                                              "reads as encrypted, RPCS3 has a decryption tool available. RACiT does "
                                              "not and will not assist with acquiring the .iso dump of the game." });
     Item iso = button(have_game ? "1. Game found: import another .iso" : "1. Import the game: a .iso",
-                      "Unpacks it into the launcher (about 25 GB)", [] {
-        const fs::path p = pick_open_file(g_hwnd, L"Pick your A Crack in Time disc image", L"Disc image (*.iso)", L"*.iso");
+                      S->prof == &kRacitProfile ? "Unpacks it into the launcher (about 25 GB)" : "Unpacks it into the launcher", [] {
+        const fs::path p = pick_open_file(g_hwnd, (L"Pick your " + widen(S->prof->name) + L" disc image").c_str(), L"Disc image (*.iso)", L"*.iso");
         if (p.empty()) return;
         std::string* sum = new std::string();
         run_task("Importing the game", [p, sum](Progress* pr) { return S->import_iso(p, pr, sum); },
@@ -394,6 +443,8 @@ static void import_screen()
     }
     if (gi.ok) { Item pl = button("Play", "", [] { set_screen(home); play(); }); pl.accent = true; scr.items.push_back(pl); }
     // The way most players arrive: from their 0.8 launcher, its saves, settings and game in one step.
+    // (A Crack in Time only: no earlier launcher ever held another game.)
+    if (S->prof == &kRacitProfile) {
     scr.items.push_back(header("Other ways"));
     // The label stays "0.8" whatever the folder is called; another copy of this version is no source.
     fs::path old;
@@ -404,6 +455,7 @@ static void import_screen()
                                    [old] { bring_over_launcher(old); }));
     } else {
         scr.items.push_back(button("Bring over a 0.8 launcher", "Your saves, settings, game and shader caches: pick its folder", [] { pick_old_launcher(); }));
+    }
     }
     scr.items.push_back(button("Back", "", [] { set_screen(home); }));
 }
@@ -445,6 +497,7 @@ static void add_options(const std::vector<std::string>& sections)
     for (const Opt& o : opts()) {
         if (!sections.empty() && std::find(sections.begin(), sections.end(), std::string(o.section)) == sections.end()) continue;
         if (!plus && ds_plus_only(o.key)) continue;
+        if (!strncmp(o.key, "NEXUS_", 6) && g_prof != &kNexusProfile) continue;   /* Into the Nexus's own */
         if (section != o.section) {
             section = o.section; scr.items.push_back(header(section));
             if (section == "Controller") scr.items.push_back(ds_plus_item());
@@ -460,6 +513,20 @@ static void add_options(const std::vector<std::string>& sections)
             if (ch[idx].first.empty()) S->settings.remove(op->key); else S->settings.put(op->key, ch[idx].first);
             S->settings.save();
             refresh();
+            if (!strcmp(op->key, "RACACIT_GAME_BUILD") && ch[idx].first == "standard" && !cpu_has_avx2())
+                message("Standard build",
+                        "This PC's processor has no AVX2, which the standard build needs: it will not start. "
+                        "Automatic or Older processors picks the build made for it.");
+            if (!strcmp(op->key, "RACACIT_GAME_BUILD") && ch[idx].first == "compat" && cpu_has_avx2())
+                message("Older-processor build",
+                        "This PC's processor has AVX2, so the standard build runs here and is faster. The older-"
+                        "processor build works too; it is meant for processors without AVX2.");
+            if (!strcmp(op->key, "RACACIT_CHEATS") && ch[idx].first == "1")
+                message("Cheat menu on",
+                        "The game's Settings menu (F1) now has a Cheats page where the Trophies page was: bolts, "
+                        "weapon levels, god mode and teleporting to any planet or boss fight.\n\n"
+                        "Skill points and trophies are disabled while the cheat menu is on. A save you use a cheat in "
+                        "never earns them again, even with the cheat menu off; a copy of that save from before still can.");
         };
         it.change = step;
         it.act = [step] { step(+1); };
@@ -473,15 +540,17 @@ static void add_options(const std::vector<std::string>& sections)
 // The game's keyboard and mouse bindings (cellPad.c k_kb, the same names and defaults):
 // RACACIT_BIND_<BUTTON>=<keys> in settings.txt, up to 4 keys a button, "none" for none.
 // A key on several buttons presses them all.
+// The quick select keys act only while the ring is open (TRIANGLE held), and a key on one of
+// them presses nothing else then: 1-4 stay the d-pad the rest of the time.
 struct Bind { const char* name; const char* group; const char* label; const char* def; };
 static const Bind k_binds[] = {
     { "CROSS", "Buttons", "Cross (A): jump", "Space,Return" },
     { "CIRCLE", "Buttons", "Circle (B)", "E,Backspace" },
     { "SQUARE", "Buttons", "Square (X): melee", "F" },
     { "TRIANGLE", "Buttons", "Triangle (Y): quick select", "Q" },
-    { "L1", "Buttons", "L1 (LB): strafe", "Mouse3" },
+    { "L1", "Buttons", "L1 (LB)", "Left Ctrl" },
     { "R1", "Buttons", "R1 (RB): fire", "Mouse1" },
-    { "L2", "Buttons", "L2 (LT)", "Left Ctrl" },
+    { "L2", "Buttons", "L2 (LT): strafe", "Mouse3" },
     { "R2", "Buttons", "R2 (RT)", "Left Shift" },
     { "L3", "Buttons", "L3 (left stick click)", "V" },
     { "R3", "Buttons", "R3 (right stick click)", "Mouse2,B" },
@@ -500,6 +569,18 @@ static const Bind k_binds[] = {
     { "RS_DOWN", "Camera keys (right stick; the mouse turns it too)", "Camera down", "K" },
     { "RS_LEFT", "Camera keys (right stick; the mouse turns it too)", "Camera left", "J" },
     { "RS_RIGHT", "Camera keys (right stick; the mouse turns it too)", "Camera right", "L" },
+    { "QS_1", "Quick select keys (only while the ring is open)", "Slot 1 (top)", "1" },
+    { "QS_2", "Quick select keys (only while the ring is open)", "Slot 2 (then clockwise)", "2" },
+    { "QS_3", "Quick select keys (only while the ring is open)", "Slot 3", "3" },
+    { "QS_4", "Quick select keys (only while the ring is open)", "Slot 4", "4" },
+    { "QS_5", "Quick select keys (only while the ring is open)", "Slot 5", "5" },
+    { "QS_6", "Quick select keys (only while the ring is open)", "Slot 6", "6" },
+    { "QS_7", "Quick select keys (only while the ring is open)", "Slot 7", "7" },
+    { "QS_8", "Quick select keys (only while the ring is open)", "Slot 8", "8" },
+    { "QS_PREV", "Quick select keys (only while the ring is open)", "Previous slot", "Z" },
+    { "QS_NEXT", "Quick select keys (only while the ring is open)", "Next slot", "X" },
+    { "QS_PREV_RING", "Quick select keys (only while the ring is open)", "Previous ring (L1)", "R" },
+    { "QS_NEXT_RING", "Quick select keys (only while the ring is open)", "Next ring (R1)", "T" },
 };
 static const int k_max_keys = 4;
 
@@ -656,6 +737,16 @@ static void settings_screen()
 }
 
 static void mods_screen();
+// Turning on a mod that runs code asks first: it is a program like any other, with the game's rights.
+static void mod_turn(const ModInfo& m, bool on)
+{
+    if (!on || m.code.empty()) { S->set_mod_enabled(m.id, on); refresh(); return; }
+    const std::string id = m.id;
+    confirm("Turn on " + m.name, "This mod runs its own code (" + u8(m.code.filename()) + ") inside the game, with the same access to "
+            "your PC as any program you run. Only turn it on if you trust " + (m.author.empty() ? std::string("whoever made it") : m.author) +
+            ".\n\nIf the game stops starting, \"Safe mode\" on the Mods page plays without code mods.", "Turn on",
+            [id] { S->set_mod_enabled(id, true); refresh(); });
+}
 static void mod_detail(const std::string& id)
 {
     ModInfo m; bool found = false;
@@ -670,9 +761,11 @@ static void mod_detail(const std::string& id)
     if (!m.version.empty()) scr.info.push_back({ "Version", m.version });
     if (!m.author.empty()) scr.info.push_back({ "Author", m.author });
     if (!m.description.empty()) scr.info.push_back({ "About", m.description });
+    if (!m.code.empty()) scr.info.push_back({ "Code", "Runs its own program inside the game (" + u8(m.code.filename()) +
+                                              "). Only turn it on if you trust where it came from.", col::ORANGE });
     if (!m.problem.empty()) scr.info.push_back({ "Problem", m.problem, col::TEXT_BAD });
     scr.info.push_back({ "Folder", u8(m.dir), col::TEXT_DIM });
-    scr.items.push_back(button(on ? "Turn off" : "Turn on", on ? "" : "It goes first: it wins over mods already on", [id, on] { S->set_mod_enabled(id, !on); refresh(); }, m.problem.empty() || on));
+    scr.items.push_back(button(on ? "Turn off" : "Turn on", on ? "" : "It goes first: it wins over mods already on", [id, on, m] { mod_turn(m, !on); }, m.problem.empty() || on));
     scr.items.push_back(button("Higher priority", "Wins over the mod above it", [id] { S->move_mod(id, -1); refresh(); }, on && pos != en.begin()));
     scr.items.push_back(button("Lower priority", "", [id] { S->move_mod(id, +1); refresh(); }, on && pos + 1 != en.end()));
     scr.items.push_back(button("Open its folder", "", [m] { shell_open(m.dir); }));
@@ -695,8 +788,11 @@ static void mods_screen()
                                 "{\"id\", \"name\", \"version\", \"author\", \"description\"} and files\\, laid out like the game folder "
                                 "(files\\PS3_GAME\\USRDIR\\packed\\...). Whole files are replaced, e.g. a patched .psarc." });
     scr.info.push_back({ "Priority", "When two mods replace the same file, the one higher in the list wins. Turning a mod on puts it first." });
+    scr.info.push_back({ "Code mods", "A mod.json with \"code\": \"name.dll\" also runs a program inside the game (docs\\MODDING.md). "
+                                     "Those are marked \"runs code\"." });
     scr.info.push_back({ "Folder", u8(S->mods_dir()), col::TEXT_DIM });
     scr.items.push_back(header(all.empty() ? "No mods yet" : "Installed"));
+    const bool safe = S->settings.get("RACACIT_CODE_MODS_OFF") == "1";
     std::vector<ModInfo> ordered;
     for (auto& id : en) for (auto& m : all) if (m.id == id) ordered.push_back(m);
     for (auto& m : all) if (std::find(en.begin(), en.end(), m.id) == en.end()) ordered.push_back(m);
@@ -706,9 +802,10 @@ static void mods_screen()
         Item it; it.kind = K_OPTION;
         it.label = m.name + (m.version.empty() ? "" : "  v" + m.version);
         it.sub = !m.problem.empty() && !on ? "Problem" : on ? "On (" + std::to_string(pos - en.begin() + 1) + ")" : "Off";
+        if (!m.code.empty()) it.sub += safe ? " - runs code (safe mode: not loaded)" : " - runs code";
         const std::string id = m.id;
         const bool ok = m.problem.empty();
-        it.change = [id, on, ok](int) { if (ok || on) { S->set_mod_enabled(id, !on); refresh(); } };
+        it.change = [m, on, ok](int) { if (ok || on) mod_turn(m, !on); };
         it.act = [id] { set_screen([id] { mod_detail(id); }); };
         scr.items.push_back(it);
     }
@@ -728,6 +825,16 @@ static void mods_screen()
                  [id](const std::string& r) { done_or_error("Mods", "Installed \"" + *id + "\". Turn it on in the list.", r); delete id; });
     }));
     scr.items.push_back(button("Open the mods folder", "", [] { shell_open(S->mods_dir()); }));
+    scr.items.push_back(header("Code mods"));
+    {
+        Item it; it.kind = K_OPTION; it.label = "Safe mode";
+        it.sub = safe ? "On: no mod's code runs (their files and settings still apply)" : "Off: code mods that are on run";
+        auto flip = [safe](int) { if (safe) S->settings.remove("RACACIT_CODE_MODS_OFF"); else S->settings.put("RACACIT_CODE_MODS_OFF", "1");
+                                  S->settings.save(); refresh(); };
+        it.change = flip;
+        it.act = [flip] { flip(+1); };
+        scr.items.push_back(it);
+    }
     scr.items.push_back(button("Back", "", [] { set_screen(home); }));
 }
 
@@ -784,9 +891,10 @@ static void saves_screen()
     }, !slots.empty()));
     scr.items.push_back(button("Restore a backup", bk.empty() ? "None yet" : std::to_string(bk.size()) + " to choose from",
                                [] { set_screen(backups_screen); }, !bk.empty()));
-    scr.items.push_back(button("Bring over a 0.8 launcher", "Its saves, settings, game and shader caches", [] { pick_old_launcher(); }));
-    scr.items.push_back(button("Bring over an older release", "Its settings and saves", [] {
-        const fs::path p = pick_folder(g_hwnd, L"Pick a release folder (it holds RaCACiT.exe and settings.txt)");
+    if (S->prof == &kRacitProfile)
+        scr.items.push_back(button("Bring over a 0.8 launcher", "Its saves, settings, game and shader caches", [] { pick_old_launcher(); }));
+    scr.items.push_back(button(S->prof == &kRacitProfile ? "Bring over an older release" : "Bring over a test build", "Its settings and saves", [] {
+        const fs::path p = pick_folder(g_hwnd, (L"Pick a release folder (it holds " + std::wstring(S->prof->discs.front().exe) + L" and settings.txt)").c_str());
         if (p.empty()) return;
         std::string* sum = new std::string();
         run_task("Bringing over " + u8(p.filename()), [p, sum](Progress* pr) { return S->migrate_from(p, pr, sum); },
@@ -808,7 +916,7 @@ static bool g_update_bad = false;
 static bool g_restart = false;                  // a new launcher is in place: start it on the way out
 static void updates_screen();
 
-static bool release_newer(const std::string& tag) { return Store::compare_versions(tag, S->installed_release(kLauncherVersion)) > 0; }
+static bool release_newer(const std::string& tag) { return Store::compare_versions(tag, R->installed_release(kLauncherVersion)) > 0; }
 
 static void remember_release(const ReleaseInfo& rel)
 {
@@ -818,9 +926,9 @@ static void remember_release(const ReleaseInfo& rel)
     g_update_status = g_update_ready ? rel.name + " is available." :
                       Store::compare_versions(rel.tag, "0") < 0 ? "The newest release (" + rel.tag + ") has no version number in its tag, so it cannot be compared." :
                       "You have the newest release.";
-    S->ini.put("update_last_check", std::to_string((long long)time(nullptr)));
-    S->ini.put("update_seen", rel.tag);
-    S->ini.save();
+    R->ini.put("update_last_check", std::to_string((long long)time(nullptr)));
+    R->ini.put("update_seen", rel.tag);
+    R->ini.save();
 }
 
 static void check_for_updates()
@@ -839,7 +947,7 @@ static void restart_launcher() { g_restart = true; PostMessageW(g_hwnd, WM_CLOSE
 static void install_update(const ReleaseInfo rel)
 {
     std::string* sum = new std::string(); bool* again = new bool(false);
-    run_task("Installing " + rel.tag, [rel, sum, again](Progress* p) { return S->install_release(rel, p, sum, again); }, [sum, again](const std::string& r) {
+    run_task("Installing " + rel.tag, [rel, sum, again](Progress* p) { return R->install_release(rel, p, sum, again); }, [sum, again](const std::string& r) {
         if (r == "cancelled") { refresh(); }
         else if (!r.empty()) message("Could not finish", r);
         else {
@@ -855,7 +963,7 @@ static void install_update(const ReleaseInfo rel)
 static void download_update(const ReleaseInfo rel)
 {
     if (game_proc) { message("Updates", "Close the game first."); return; }
-    run_task("Downloading " + rel.tag, [rel](Progress* p) { return S->download_release(rel, p); }, [rel](const std::string& r) {
+    run_task("Downloading " + rel.tag, [rel](Progress* p) { return R->download_release(rel, p); }, [rel](const std::string& r) {
         if (r == "cancelled") { refresh(); return; }
         if (!r.empty()) { message("Could not finish", r); refresh(); return; }
         confirm("Install " + rel.tag + "?", "The download is complete and checked. Installing backs up your saves, then puts in the new game build"
@@ -865,9 +973,9 @@ static void download_update(const ReleaseInfo rel)
 
 static void updates_screen()
 {
-    const BuildInfo b = S->current_build();
+    const BuildInfo b = R->current_build();
     scr = Screen(); scr.title = "Updates"; scr.subtitle = "New releases on GitHub"; scr.back = [] { set_screen(home); };
-    std::string inst = S->installed_release(kLauncherVersion);
+    std::string inst = R->installed_release(kLauncherVersion);
     if (!inst.empty() && (inst[0] == 'v' || inst[0] == 'V')) inst.erase(0, 1);
     scr.info.push_back({ "Installed", "RACiT " + inst + (b.version ? ", game build v" + std::to_string(b.version) : std::string()) });
     if (!g_update_status.empty()) scr.info.push_back({ "Last check", g_update_status, g_update_bad ? col::TEXT_BAD : col::TEXT });
@@ -886,9 +994,9 @@ static void updates_screen()
     }
     scr.items.push_back(button(g_rel_known ? "Check again" : "Check for updates", "", check_for_updates));
     if (g_rel_known && !g_rel.page.empty()) scr.items.push_back(button("Open the release's page", "The full notes, on GitHub", [] { shell_open(upath(g_rel.page)); }));
-    const bool on = S->ini.get("check_updates", "1") != "0";
+    const bool on = R->ini.get("check_updates", "1") != "0";
     Item it; it.kind = K_OPTION; it.label = "Look when the launcher opens"; it.sub = on ? "On" : "Off";
-    auto flip = [on](int) { S->ini.put("check_updates", on ? "0" : "1"); S->ini.save(); refresh(); };
+    auto flip = [on](int) { R->ini.put("check_updates", on ? "0" : "1"); R->ini.save(); refresh(); };
     it.change = flip; it.act = [flip] { flip(+1); };
     scr.items.push_back(it);
     scr.items.push_back(button("Back", "", [] { set_screen(home); }));
@@ -900,15 +1008,14 @@ static void open_updates()
     if (!g_rel_known) check_for_updates();
 }
 
-// When the launcher opens: at most one question to GitHub every 6 hours (a newer release it
-// already heard of shows at once). Off line or refused: nothing happens, nothing is shown.
+// When the launcher opens: one question to GitHub (60 an hour are allowed), and a newer release
+// is offered at once (WM_APP_UPDATE asks). Off line or refused: nothing happens, nothing is shown.
+static bool g_update_asked;   /* asked once per launcher session */
 static void quiet_update_check()
 {
-    if (S->ini.get("check_updates", "1") == "0") return;
-    const std::string seen = trim(S->ini.get("update_seen"));
+    if (R->ini.get("check_updates", "1") == "0") return;
+    const std::string seen = trim(R->ini.get("update_seen"));
     if (!seen.empty() && release_newer(seen)) g_update_ready = true;
-    const long long last = atoll(S->ini.get("update_last_check", "0").c_str()), now = (long long)time(nullptr);
-    if (now >= last && now - last < 6 * 3600) return;
     std::thread([] {
         ReleaseInfo* rel = new ReleaseInfo();
         if (!Store::fetch_latest_release(rel).empty() || !PostMessageW(g_hwnd, WM_APP_UPDATE, 0, (LPARAM)rel)) delete rel;
@@ -926,6 +1033,14 @@ static void logs_screen()
     scr.info.push_back({ "Sending", "After a session with a problem, send log.txt (Copy to the Desktop makes a copy named with the date)." });
     scr.items.push_back(button("Open the last log", "", [] { shell_open(S->log()); }, has));
     scr.items.push_back(button("Copy the last log to the Desktop", "", [] {
+#ifdef __APPLE__
+        if (const char* home_dir = getenv("HOME")) {
+            std::error_code ec;
+            const fs::path to = fs::path(home_dir) / L"Desktop" / widen("acit-log-" + stamp_now() + ".txt");
+            fs::copy_file(S->log(), to, fs::copy_options::overwrite_existing, ec);
+            message("Logs", ec ? "Copy failed: " + ec.message() : "Copied to " + u8(to));
+        }
+#else
         wchar_t* desk = nullptr;
         if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Desktop, 0, nullptr, &desk))) {
             std::error_code ec;
@@ -934,6 +1049,7 @@ static void logs_screen()
             message("Logs", ec ? "Copy failed: " + ec.message() : "Copied to " + u8(to));
             CoTaskMemFree(desk);
         }
+#endif
     }, has));
     scr.items.push_back(button("Open the logs folder", "", [] { shell_open(S->logs()); }));
     scr.items.push_back(button("Back", "", [] { set_screen(home); }));
@@ -943,7 +1059,7 @@ static void help_screen()
 {
     scr = Screen(); scr.title = "Help"; scr.subtitle = "Folders and controls"; scr.back = [] { set_screen(home); };
     scr.info.push_back({ "Launcher folder", u8(S->root) });
-    scr.info.push_back({ "builds\\", "Installed builds (RaCACiT.exe per version); Play starts the newest." });
+    scr.info.push_back({ "builds\\", "Installed builds (RaCACiT.exe per version, RaCACiT_compat.exe beside it for older processors); Play starts the newest." });
     scr.info.push_back({ "data\\", "settings.txt, dev_hdd0 (the PS3 hard drive with your saves), cache (shaders), log.txt and logs." });
     scr.info.push_back({ "game\\  mods\\  backups\\", "Your game (imported from the .iso); mods; save backups (one per Play, the newest kept)." });
     scr.info.push_back({ "launcher.ini", "The launcher's options: looking for updates, what the window does while you play, backups and logs kept." });
@@ -966,7 +1082,7 @@ static void home()
     const BuildInfo b = S->current_build();
     const auto slots = S->save_slots();
     const auto en = S->enabled_mods();
-    scr = Screen(); scr.title = "A Crack in Time"; scr.subtitle = "";
+    scr = Screen(); scr.title = S->prof->name; scr.subtitle = "";
     if (!gi.ok) scr.info.push_back({ "Status", "Set up the game to play", col::TEXT_BAD });
     else if (!b.version) scr.info.push_back({ "Status", "Game files missing: reinstall the launcher", col::TEXT_BAD });
     else scr.info.push_back({ "Status", "Ready to play", col::TEXT_GOOD });
@@ -1046,7 +1162,7 @@ static void game_exited(DWORD code)
     ShowWindow(g_hwnd, SW_RESTORE);
     SetForegroundWindow(g_hwnd);
     pad_open();
-    if (scr.title == "A Crack in Time") set_screen(home);   // back on Play
+    if (scr.title == S->prof->name) set_screen(home);   // back on Play
     else refresh();
 }
 
@@ -1148,6 +1264,7 @@ static void key(int vk)
     case VK_NEXT: for (int i = 0; i < 6; i++) move_focus(+1); break;
     case VK_HOME: focus = 0; move_focus(+1); move_focus(-1); break;
     case VK_END: focus = (int)scr.items.size() - 1; move_focus(-1); move_focus(+1); break;
+    case VK_TAB: switch_game(S == g_games[0] ? 1 : 0); break;   // the game bar
     }
 }
 
@@ -1170,6 +1287,8 @@ static void pad_event(const SDL_Event& e)
     case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: key(VK_RIGHT); break;
     case SDL_CONTROLLER_BUTTON_A: key(VK_RETURN); break;
     case SDL_CONTROLLER_BUTTON_B: key(VK_ESCAPE); break;
+    case SDL_CONTROLLER_BUTTON_LEFTSHOULDER: if (ov.type == Overlay::NONE) switch_game(0); break;
+    case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: if (ov.type == Overlay::NONE) switch_game(1); break;
     case SDL_CONTROLLER_BUTTON_START:
         if (ov.type == Overlay::NONE && scr.build && !game_proc && S->game().ok && S->current_build().version) play();
         break;
@@ -1179,8 +1298,10 @@ static void pad_event(const SDL_Event& e)
 static void pad_poll()
 {
     if (!sdl_ok) return;
+#ifdef _WIN32
     SDL_Event e;
     while (SDL_PollEvent(&e)) pad_event(e);
+#endif   // macOS: the main loop reads SDL's events (the window's too) and hands these to pad_event
     if (!pad || GetForegroundWindow() != g_hwnd) return;
     const int y = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY), x = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTX);
     const int d = y < -20000 ? VK_UP : y > 20000 ? VK_DOWN : x < -20000 ? VK_LEFT : x > 20000 ? VK_RIGHT : 0;
@@ -1190,7 +1311,8 @@ static void pad_poll()
 }
 
 // ---- layout and drawing ---------------------------------------------------------------------------
-static const float M = 40, HEADER_H = 150, FOOTER_H = 52;
+static const float SIDE_W = 92;   // the game bar down the left edge
+static const float M = SIDE_W + 40, HEADER_H = 150, FOOTER_H = 52;
 
 static Rect right_col() { const float lw = std::max(380.0f, g.width() * 0.42f); return { M + lw + 32, HEADER_H, g.width() - M, g.height() - FOOTER_H }; }
 static Rect left_col() { const float lw = std::max(380.0f, g.width() * 0.42f); return { M, HEADER_H, M + lw, g.height() - FOOTER_H }; }
@@ -1278,14 +1400,14 @@ static void draw_header()
     /* The main screen, once the game is in: the game's own logo (its
      * ICON0.PNG, copied to assets\ by refresh_art) in place of the title text.
      * The disc's PIC0.PNG is blank, so not that one. */
-    if (scr.title == "A Crack in Time") {
+    if (scr.title == S->prof->name) {
         float iw = 0, ih = 0;
         if (g.image_size(S->icon(), &iw, &ih) && ih > 0) {
             const float h = 112, w = h * iw / ih;
             if (g.image(S->icon(), { M - 8, 12, M - 8 + w, 12 + h }, 1.0f, false)) { draw_clock(g.width() - 92, 70, 46); return; }
         }
     }
-    g.text("RATCHET & CLANK FUTURE", { M, 30, g.width() - 260, 52 }, F_BRAND, col::ORANGE);
+    g.text(S->prof->brand, { M, 30, g.width() - 260, 52 }, F_BRAND, col::ORANGE);
     std::string t = scr.title; for (auto& c : t) c = (char)toupper((unsigned char)c);
     g.text(t, { M, 48, g.width() - 260, 100 }, F_TITLE, col::TEXT);
     if (!scr.subtitle.empty()) g.text(scr.subtitle, { M, 98, g.width() - 260, 124 }, F_SUB, col::TEXT_DIM);
@@ -1368,8 +1490,9 @@ static void draw_footer()
     float x = M;
     draw_glyph_hint(x, y, 2, "Choose / change"); x += 170;
     draw_glyph_hint(x, y, 0, pad_ps ? "Select  (Enter)" : "Select  (Enter)"); x += 150;
-    draw_glyph_hint(x, y, 1, "Back  (Esc)");
-    g.text(std::string("v") + kLauncherVersion, { g.width() - 200, y - 12, g.width() - M, y + 12 }, F_HINT, col::TEXT_OFF, A_RIGHT);
+    draw_glyph_hint(x, y, 1, "Back  (Esc)"); x += 140;
+    g.text("Switch game  (Tab, L1 / R1)", { x, y - 12, x + 260, y + 12 }, F_HINT, col::TEXT_DIM);
+    g.text(std::string(S->prof->name) + "  v" + S->prof->version, { g.width() - 320, y - 12, g.width() - M, y + 12 }, F_HINT, col::TEXT_OFF, A_RIGHT);
 }
 
 static void draw_overlay()
@@ -1430,10 +1553,69 @@ static void draw_overlay()
     }
 }
 
+// ---- the game bar --------------------------------------------------------------------------------
+// Down the left edge: one tile per game, the one on screen lit. Click a tile, or Tab /
+// L1 R1 (LB RB), to switch. Each game keeps its own folder, set up, saves and settings.
+static Rect side_tile(int k) { const float t = HEADER_H - 20 + k * 112.0f; return { 12, t, SIDE_W - 12, t + 100 }; }
+static void draw_sidebar()
+{
+    const float H = g.height();
+    g.fill({ 0, 0, SIDE_W, H }, 0xD0050C12);
+    g.line(SIDE_W, 0, SIDE_W, H, 0x606FE6F0, 1.2f);
+    g.text("GAMES", { 0, HEADER_H - 52, SIDE_W, HEADER_H - 30 }, F_LABEL, col::EDGE, A_CENTER);
+    for (int k = 0; k < 2; k++) {
+        Store* st = g_games[k];
+        const Rect r = side_tile(k);
+        const bool on = st == S;
+        if (on) g.chamfer_glow(r, 12, col::ORANGE_GLOW & 0x80FFFFFF, 2);
+        g.chamfer_fill(r, 12, on ? col::PANEL_HOT : col::PANEL);
+        g.chamfer_stroke(r, 12, on ? col::ORANGE : col::EDGE_DIM, on ? 2.0f : 1.2f);
+        // The game's own icon once it is set up; else its initials.
+        float iw = 0, ih = 0;
+        const Rect ir = { r.l + 8, r.t + 8, r.r - 8, r.t + 56 };
+        bool drew = false;
+        if (g.image_size(st->icon(), &iw, &ih) && ih > 0) {
+            const float h = ir.h(), w = std::min(ir.w(), h * iw / ih), cx = (ir.l + ir.r) / 2;
+            drew = g.image(st->icon(), { cx - w / 2, ir.t, cx + w / 2, ir.t + w * ih / iw }, on ? 1.0f : 0.55f, false);
+        }
+        if (!drew) g.text(k == 0 ? "ACiT" : "ItN", ir, F_BIG, on ? col::TEXT : col::TEXT_DIM, A_CENTER);
+        g.text(k == 0 ? "Crack in Time" : "Into the Nexus", { r.l + 2, r.t + 60, r.r - 2, r.b - 4 }, F_HINT,
+               on ? col::ORANGE : col::TEXT_DIM, A_CENTER, true, false);
+    }
+}
+
+static void switch_game(int k)
+{
+    if (k < 0 || k > 1 || g_games[k] == S) return;
+    if (game_proc || prog) { message("One at a time", game_proc ? "Stop the game first, or wait for it to end." : "Wait for the job on screen to finish."); return; }
+    S = g_games[k];
+    g_prof = S->prof;
+    S->reload();
+    R->ini.put("last_game", S->prof->key); R->ini.save();
+    S->reload();
+    std::error_code ec;
+    if (S->game().ok && !fs::exists(S->logo(), ec)) S->refresh_art();
+    focus = 0; scroll = scroll_to = 0; hover = -1; editing = false;
+#ifdef __APPLE__
+    SDL_SetWindowTitle((SDL_Window*)g_hwnd, S->prof->full_name);
+#else
+    SetWindowTextW(g_hwnd, widen(S->prof->full_name).c_str());
+#endif
+    set_screen(home);
+    if (!S->game().ok) set_screen(import_screen);   // not set up yet: straight to where the game comes from
+}
+static int hit_side(float x, float y)
+{
+    if (x >= SIDE_W) return -1;
+    for (int k = 0; k < 2; k++) if (side_tile(k).in(x, y)) return k;
+    return -1;
+}
+
 static void draw_frame()
 {
     layout();
     draw_background();
+    draw_sidebar();
     draw_header();
     draw_info();
     draw_items();
@@ -1478,7 +1660,7 @@ static void script_poll()
     const std::string cmd = line.substr(0, sp), arg = sp == std::string::npos ? "" : trim(line.substr(sp + 1));
     if (cmd == "key") {
         static const std::pair<const char*, int> keys[] = { { "UP", VK_UP }, { "DOWN", VK_DOWN }, { "LEFT", VK_LEFT }, { "RIGHT", VK_RIGHT },
-                                                            { "ENTER", VK_RETURN }, { "ESC", VK_ESCAPE }, { "HOME", VK_HOME }, { "END", VK_END } };
+                                                            { "ENTER", VK_RETURN }, { "ESC", VK_ESCAPE }, { "HOME", VK_HOME }, { "END", VK_END }, { "TAB", VK_TAB } };
         for (auto& k : keys) if (arg == k.first) key(k.second);
     } else if (cmd == "pick") queue_pick(upath(arg));
     else if (cmd == "shot") save_shot(widen(arg));
@@ -1486,7 +1668,11 @@ static void script_poll()
     else if (cmd == "type") { edit_text += arg; redraw(); }
     else if (cmd == "scan") {   // scan <hex scan code> [ext]: a real WM_KEYDOWN, as the keyboard sends it
         const unsigned sc = (unsigned)strtoul(arg.c_str(), nullptr, 16);
+#ifdef __APPLE__
+        PostMessageW(g_hwnd, WM_KEYDOWN, 0, (LPARAM)(1 | sc << 16));   // macOS: an SDL scan code
+#else
         PostMessageW(g_hwnd, WM_KEYDOWN, MapVirtualKeyW(sc, MAPVK_VSC_TO_VK), (LPARAM)(1 | sc << 16 | (arg.find("ext") != std::string::npos ? 1 << 24 : 0)));
+#endif
     } else if (cmd == "mouse") {   // mouse 1-5 | wheelup | wheeldown
         const int b = atoi(arg.c_str());
         if (arg == "wheelup" || arg == "wheeldown") PostMessageW(g_hwnd, WM_MOUSEWHEEL, MAKEWPARAM(0, arg == "wheelup" ? 120 : -120), 0);
@@ -1584,6 +1770,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
             for (int k = 0; k < 2; k++) if (ov.btn[k].in(x, y)) { ov.focus = k; overlay_key(VK_RETURN); }
             return 0;
         }
+        if (const int k = hit_side(x, y); k >= 0) { switch_game(k); return 0; }
         const int i = hit_item(x, y);
         if (i < 0) return 0;
         focus = i;
@@ -1612,7 +1799,16 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
         ReleaseInfo* rel = (ReleaseInfo*)l;
         remember_release(*rel);
         delete rel;
-        if (!prog && (scr.title == "A Crack in Time" || scr.title == "Updates" || scr.title == "More")) refresh();
+        if (!prog && (scr.title == S->prof->name || scr.title == "Updates" || scr.title == "More")) refresh();
+        /* A newer release: ask straight away whether to download it (once a session, not over a job or the game). */
+        if (g_update_ready && !g_update_asked && !prog && !game_proc && !g_rel.url.empty()) {
+            g_update_asked = true;
+            const ReleaseInfo r = g_rel;
+            confirm("Update available: " + r.name,
+                    (r.notes.empty() ? std::string() : r.notes + "\n\n") + "Download it now" + (r.size ? " (" + format_size(r.size) + ")" : std::string()) +
+                    "? You confirm again before anything is installed; your saves are backed up first.",
+                    "Download", [r] { download_update(r); });
+        }
         return 0; }
     case WM_CLOSE:
         if (prog) { prog->cancel = true; return 0; }   // let the job stop first
@@ -1623,6 +1819,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
     return DefWindowProcW(h, m, w, l);
 }
 
+#ifdef _WIN32
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show)
 {
     // An update tries a new launcher this way before it replaces the running one.
@@ -1638,8 +1835,13 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show)
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
     Store store(exe_dir());
+    Store nexus(exe_dir() / kNexusProfile.folder, &kNexusProfile);
+    R = &store;
+    g_games[0] = &store; g_games[1] = &nexus;
     S = &store;
     store.clean_update_leftovers();
+    // The game last on screen.
+    if (store.ini.get("last_game") == kNexusProfile.key) { S = &nexus; g_prof = &kNexusProfile; }
 
     WNDCLASSEXW wc{}; wc.cbSize = sizeof wc; wc.lpfnWndProc = wndproc; wc.hInstance = inst;
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW); wc.lpszClassName = L"RaCACiTLauncher";
@@ -1648,7 +1850,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show)
     const UINT dpi = GetDpiForSystem();
     const int ww = MulDiv(1280, dpi, 96), wh = MulDiv(800, dpi, 96);
     RECT wa; SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
-    g_hwnd = CreateWindowExW(0, wc.lpszClassName, L"Ratchet & Clank Future: A Crack in Time", WS_OVERLAPPEDWINDOW,
+    g_hwnd = CreateWindowExW(0, wc.lpszClassName, widen(S->prof->full_name).c_str(), WS_OVERLAPPEDWINDOW,
                              wa.left + std::max(0, (int)(wa.right - wa.left - ww) / 2), wa.top + std::max(0, (int)(wa.bottom - wa.top - wh) / 2),
                              std::min(ww, (int)(wa.right - wa.left)), std::min(wh, (int)(wa.bottom - wa.top)), nullptr, nullptr, inst, nullptr);
     if (!g_hwnd || !g.init(g_hwnd)) { MessageBoxW(nullptr, L"Direct2D is not available.", L"RACiT Launcher", MB_ICONERROR); return 1; }
@@ -1683,3 +1885,6 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show)
     }
     return 0;
 }
+#else
+#include "app_mac.inc"   // macOS: main(), the SDL event loop, --snapshot
+#endif

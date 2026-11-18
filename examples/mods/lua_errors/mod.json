@@ -1,0 +1,7 @@
+{
+  "name": "Lua error log (example code mod)",
+  "version": "1.0",
+  "author": "RACiT",
+  "description": "Writes each Lua error and each level change to log.txt. A small code mod to start from: see docs/MODDING.md.",
+  "code": "lua_errors.dll"
+}

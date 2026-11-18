@@ -99,6 +99,9 @@ void json_str(std::string& out, const char* s)
 
 }  // namespace
 
+/* For code mods (mods.cpp): the same level id. */
+uint32_t racit_current_level() { return current_level(); }
+
 #ifdef _WIN32
 #include <windows.h>
 

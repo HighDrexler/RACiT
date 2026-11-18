@@ -89,6 +89,12 @@ void     ppu_fs_register(void);               /* cellFs over the real game direc
 void     lv2_init_syscalls(void);             /* the lv2 syscall table */
 int      ppu_run(uint32_t entry_opd, uint32_t stack_top);
 
+/* Code mods (mods.cpp): load before the first instruction, per-frame events,
+ * and a line in the crash report. */
+void     racit_mods_load(void);
+void     racit_mods_frame(void);
+int      racit_mods_crash_note(char* buf, int cap);
+
 /* This project's own: load whatever real system PRX modules the title needs
  * into guest RAM and register their exports. stubs.cpp has the empty version
  * a game with no lifted PRX wants. */
@@ -195,7 +201,7 @@ extern "C" int  rsx_d3d12_backend_pump_messages(void);
 #  define rsx_backend_present rsx_d3d12_backend_present
 #  define rsx_backend_pump    rsx_d3d12_backend_pump_messages
 #  define RSX_BACKEND_NAME    "D3D12"
-#elif defined(__APPLE__)
+#elif defined(__APPLE__) && !defined(RACACIT_HAVE_VULKAN)
 extern "C" int  rsx_metal_backend_init(uint32_t w, uint32_t h, const char* title);
 extern "C" void rsx_metal_backend_present(void);
 extern "C" int  rsx_metal_backend_pump_messages(void);
@@ -311,6 +317,7 @@ static void present_guest_frame(void)
     /* This thread increments and guest threads read, so interlocked rather
      * than a volatile ++, which on arm64 is neither atomic nor a fence. */
     InterlockedIncrement(&g_frames_presented);
+    racit_mods_frame();   /* code mods' frame/level events (mods.cpp) */
 }
 
 /* The FIFO walker runs on frame_clock. A guest thread that has just moved
@@ -319,7 +326,7 @@ static void present_guest_frame(void)
  * (win32_compat's events): without it the walker slept a fixed 4 ms a pass,
  * and every RSX label the guest waited on cost up to 4 ms -- 52 fps in an
  * idle menu, ~40 in play, with every thread mostly waiting. */
-#if defined(_WIN32) || defined(__ANDROID__)
+#if defined(_WIN32) || defined(__ANDROID__) || defined(__APPLE__)
 extern "C" int racacit_few_cpus(void);   /* sys_timer.c */
 static HANDLE s_walker_wake;
 static void walker_wake(void) { if (s_walker_wake) SetEvent(s_walker_wake); }
@@ -570,6 +577,16 @@ static DWORD WINAPI frame_clock(LPVOID)
 #if defined(_WIN32) || defined(__ANDROID__)
     s_walker_wake = CreateEventA(NULL, FALSE, FALSE, NULL);
     g_gcm_wake_walker = walker_wake;
+#elif defined(__APPLE__)
+    /* The same walker as Windows and Android: spin briefly, then the wake
+     * event with a 1 ms poll. The fixed 4 ms sleep a pass it replaces held the
+     * frame-end RSX wait (005CB084, its usleep(100) polls at lr 005CB170) at
+     * ~2.7 ms of every ~16 ms frame once the game ran unlocked: 62 -> 79 FPS
+     * in gameplay, game time still 1.000x wall. RACACIT_WALKER_WAKE=0 keeps
+     * the old fixed sleep. (Tried on 2026-11-14 at ~20 FPS, GPU-bound, where
+     * it could not show.) */
+    { const char* e = getenv("RACACIT_WALKER_WAKE");
+      if (!(e && *e == '0')) { s_walker_wake = CreateEventA(NULL, FALSE, FALSE, NULL); g_gcm_wake_walker = walker_wake; } }
 #endif
 #ifdef _WIN32
     /* PS3_SAMPLE_RSX=1: the sampler profiles this thread only. */
@@ -603,10 +620,13 @@ static DWORD WINAPI frame_clock(LPVOID)
 #if defined(_WIN32) && !defined(__ANDROID__)
         racacit_memlog(rt_now_us());
 #endif
-#if defined(_WIN32) || defined(__ANDROID__)
+#if defined(_WIN32) || defined(__ANDROID__) || defined(__APPLE__)
         /* Spin (yielding) up to ~1 ms for new FIFO work before sleeping: the
          * guest waits on RSX labels every frame, so every ms between its kick
          * and the walker starting is a ms of its frame time. */
+#ifdef __APPLE__
+        if (!s_walker_wake) Sleep(4); else
+#endif
         if (!cellGcm_fifo_pending()) {
             /* RACACIT_WALKER_SPIN_US: how long (us) to spin before sleeping. */
             static LONGLONG s_spin_us = -1;
@@ -614,6 +634,12 @@ static DWORD WINAPI frame_clock(LPVOID)
 #if defined(_WIN32) && !defined(__ANDROID__)
                 /* Few CPU threads: the wake event is quick, and every ms spun here is a ms the SPU lanes wait. */
                 s_spin_us = e ? atoll(e) : (racacit_few_cpus() ? 50 : 1000);
+#elif defined(__APPLE__)
+                /* The game keeps ~8 cores busy here; 100 us of spin is enough
+                 * for the wake event to take over and leaves the rest to the
+                 * main thread and the SPU lanes (unlocked A/B: frames >= 20 ms
+                 * 1.07-1.28% -> 0.58-0.66%, 1% low 31-35 -> 42-46). */
+                s_spin_us = e ? atoll(e) : 100;
 #else
                 s_spin_us = e ? atoll(e) : 1000;
 #endif
@@ -793,6 +819,7 @@ static DWORD WINAPI frame_clock(LPVOID)
 /* Derive the directory holding PS3_GAME from the EBOOT path
  * <root>/PS3_GAME/USRDIR/EBOOT.elf -> <root>. $PS3_VFS_ROOT overrides. */
 static char s_vfs_root[1024];
+extern bool racit_menu_archive_init();
 
 static void derive_vfs_root(const char* eboot)
 {
@@ -830,6 +857,11 @@ static void map_cellfs_devices(void)
     if (_fullpath(abs, ppu_vfs_root, sizeof abs)) {
         snprintf(m, sizeof m, "%s/", abs);
         cellfs_add_path_mapping("/dev_bdvd/", m);
+        cellfs_add_path_mapping("/dev_hdd1/", m);
+    }
+    const char* hdd1 = getenv("PS3_HDD1_ROOT");
+    if (hdd1 && *hdd1 && _fullpath(abs, hdd1, sizeof abs)) {
+        snprintf(m, sizeof m, "%s/", abs);
         cellfs_add_path_mapping("/dev_hdd1/", m);
     }
     const char* hdd0 = getenv("PS3_HDD0_ROOT");
@@ -1296,6 +1328,8 @@ static void crash_describe(const char* tag, EXCEPTION_POINTERS* ep)
                       (unsigned long long)ep->ContextRecord->Rsp, (unsigned long long)ep->ContextRecord->Rbp,
                       (unsigned long long)ep->ContextRecord->Rcx, (unsigned long long)ep->ContextRecord->Rdx);
     }
+    /* mods.cpp: which code mods were in */
+    if (n < (int)sizeof s_crash_buf - 2) n += racit_mods_crash_note(s_crash_buf + n, (int)sizeof s_crash_buf - n - 1);
     snprintf(s_crash_buf + n, sizeof s_crash_buf - n, "\n");
     crash_write(s_crash_buf);
 }
@@ -1482,11 +1516,20 @@ int main(int argc, char** argv)        /* SDL.h renames this to SDL_main */
 #if defined(_WIN32) && (defined(__x86_64__) || defined(_M_X64))
 /* The lifted PPU and SPU code is built for AVX2 + FMA + BMI2 (game/CMakeLists.txt:
  * hardware fused multiply-add for PPC fmadd, wider SPU vector ops), and so is
- * the runtime. Say so plainly on an older CPU rather than dying on an illegal
+ * the runtime; RaCACiT_compat.exe for SSE4.2 (RACACIT_CPU_COMPAT). Say so plainly on an older CPU rather than dying on an illegal
  * instruction. This file is built for plain x86-64. */
 static int racacit_cpu_ok(void)
 {
     unsigned c_a, c_b, c_c, c_d;
+#if defined(RACACIT_CPU_COMPAT)
+    /* RaCACiT_compat.exe (game/CMakeLists.txt RACACIT_CPU_COMPAT): x86-64-v2,
+     * SSE3, SSSE3, SSE4.1, SSE4.2 and POPCNT. */
+    int c_ok = __get_cpuid(1, &c_a, &c_b, &c_c, &c_d) && (c_c & (1u << 0)) && (c_c & (1u << 9)) &&
+               (c_c & (1u << 19)) && (c_c & (1u << 20)) && (c_c & (1u << 23));
+    /* RACACIT_TEST_NO_SSE42 (environment): the refusal on any CPU, to test it. */
+    if (GetEnvironmentVariableA("RACACIT_TEST_NO_SSE42", NULL, 0)) c_ok = 0;
+    return c_ok;
+#else
     int c_ok = __get_cpuid(1, &c_a, &c_b, &c_c, &c_d) && (c_c & (1u << 12)) && (c_c & (1u << 27)) &&
                (c_c & (1u << 28));                                   /* FMA, OSXSAVE, AVX */
     if (c_ok) {
@@ -1500,12 +1543,19 @@ static int racacit_cpu_ok(void)
      * refusal path on any CPU, to test it. */
     if (GetEnvironmentVariableA("RACACIT_TEST_NO_AVX2", NULL, 0)) c_ok = 0;
     return c_ok;
+#endif
 }
 static void racacit_cpu_refuse(void)
 {
+#if defined(RACACIT_CPU_COMPAT)
+    MessageBoxA(NULL, "This build needs a CPU with SSE4.2 (Intel Core i from 2008 or newer, AMD FX or "
+                      "newer). This computer's processor does not have it, so the game cannot run on it.",
+#else
     MessageBoxA(NULL, "This build needs a CPU with AVX2, FMA and BMI2 (Intel Haswell from 2013 or newer, "
-                      "AMD Ryzen or newer). This computer's processor does not have them, so the game "
-                      "cannot run on it.",
+                      "AMD Ryzen or newer). This computer's processor does not have them.\n\n"
+                      "For an older processor, start the game from the launcher with Settings > "
+                      "Performance > Game build set to Automatic or Older CPUs.",
+#endif
                 "Ratchet & Clank: A Crack in Time", MB_OK | MB_ICONERROR);
 }
 #if !defined(_MSC_VER)
@@ -1525,6 +1575,15 @@ extern "C" int racacit_entry(void)
 
 int main(int argc, char** argv)
 {
+#if defined(__APPLE__) && defined(RACACIT_HAVE_VULKAN)
+    /* Preserve IEEE shader guards before SDL or the Vulkan loader starts.
+     * Pending asynchronous pipelines currently skip draws in this backend. */
+    setenv("MVK_CONFIG_FAST_MATH_ENABLED", "0", 0);
+    setenv("RACACIT_ASYNC_PIPELINES", "0", 0);
+    setenv("RACACIT_HLE_SPURS", "1", 0);
+    setenv("RACACIT_KBM", "1", 0);
+    setenv("PS3RECOMP_VK_WINDOW", "1", 0);
+#endif
 #ifdef __ANDROID__
     android_setup(&argc, &argv);
 #endif
@@ -1558,6 +1617,24 @@ int main(int argc, char** argv)
 #endif
 
     printf("=== ps3recomp game runner ===\n");
+#if defined(_WIN32) && (defined(__x86_64__) || defined(_M_X64))
+    /* Which exe and which processor: a player's log said neither, and the
+     * older-CPU build's slow paths were found only by matching its stall
+     * stacks against each build's symbols. */
+    {   unsigned r[12] = { 0 }; char brand[49] = { 0 };
+        for (unsigned i = 0; i < 3; i++) __get_cpuid(0x80000002u + i, &r[i * 4], &r[i * 4 + 1], &r[i * 4 + 2], &r[i * 4 + 3]);
+        memcpy(brand, r, 48);
+        const char* b = brand; while (*b == ' ') b++;
+        for (size_t n = strlen(brand); n && brand[n - 1] == ' '; n--) brand[n - 1] = 0;
+        SYSTEM_INFO si; GetSystemInfo(&si);
+#if defined(RACACIT_CPU_COMPAT)
+        const char* build = "older-CPU build (RaCACiT_compat.exe, no AVX2)";
+#else
+        const char* build = "standard build (RaCACiT.exe, AVX2)";
+#endif
+        printf("[racacit] %s; CPU: %s, %lu logical processors\n", build, *b ? b : "unknown",
+               (unsigned long)si.dwNumberOfProcessors); }
+#endif
 
     if (!alloc_guest_vm()) {
         fprintf(stderr, "ERROR: could not allocate the guest address space\n");
@@ -1577,6 +1654,7 @@ int main(int argc, char** argv)
         ppu_inl_clip_hole = 1;
     }
 
+    if (!racit_menu_archive_init()) return 1;
     uint32_t entry = ppu_load_elf(argv[1]);
     if (!entry) {
         fprintf(stderr, "ERROR: could not load %s\n", argv[1]);
@@ -1616,7 +1694,29 @@ int main(int argc, char** argv)
 
     /* Install the guest-callback hook, then start the frame clock. It no-ops
      * until the title registers its vblank and flip handlers during init. */
+    /* Code mods (mods.cpp): the image is in memory and nothing has run yet. */
+    racit_mods_load();
+
     g_ps3_guest_caller = harness_guest_caller;
+#if defined(__APPLE__) && defined(RACACIT_HAVE_VULKAN)
+    /* Cocoa creates and pumps windows on the process main thread. */
+    const char* window = getenv("PS3RECOMP_VK_WINDOW");
+    if (window && strcmp(window, "1") == 0) {
+        static uint32_t window_entry;
+        window_entry = entry;
+        HANDLE guest = CreateThread(NULL, 16u * 1024 * 1024,
+            [](LPVOID argument) -> DWORD {
+                int result = ppu_run(*(uint32_t*)argument, STACK_TOP);
+                fprintf(stderr, "[boot] windowed guest returned %d\n", result);
+                fflush(stdout); fflush(stderr);
+                _exit(g_sys_process_exit_called ? (int)g_sys_process_exit_code : result);
+                return 0;
+            }, &window_entry, 0, NULL);
+        if (!guest) return 1;
+        frame_clock(NULL);
+        return 0;
+    }
+#endif
     CreateThread(NULL, 4u * 1024 * 1024, frame_clock, NULL, 0, NULL);
     if (getenv("PS3_PEEK")) CreateThread(NULL, 0, peek_thread, NULL, 0, NULL);
 

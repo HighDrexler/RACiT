@@ -86,9 +86,21 @@ set(RACACIT_LIFTED_FLAGS "")
 if(WIN32 AND NOT MSVC)
     set(RACACIT_LIFTED_FLAGS "-fno-auto-import")
 endif()
+# RACACIT_CPU_COMPAT=ON: the older-CPU build, RaCACiT_compat.exe, for CPUs without
+# AVX2/FMA/BMI2 (Sandy/Ivy Bridge, AMD FX and older). x86-64-v2 (SSE4.2 + POPCNT,
+# Intel Nehalem / AMD Bulldozer, 2008-2011 on). PPC fmadd then goes through
+# libm's exact software fma(): the same results, slower. The launcher picks
+# this exe on such CPUs (Settings > Performance > Game build). A build tree of
+# its own: game/build-win-compat.
+option(RACACIT_CPU_COMPAT "Build for x86-64 CPUs without AVX2 (RaCACiT_compat.exe)" OFF)
 if(NOT ANDROID AND (WIN32 OR CMAKE_SYSTEM_PROCESSOR MATCHES "AMD64|x86_64|X86_64"))
-    set(RACACIT_SIMD_FLAGS "-mavx2;-mfma;-mbmi2")
-    set(PS3RECOMP_AVX2 ON CACHE BOOL "" FORCE)
+    if(RACACIT_CPU_COMPAT)
+        set(RACACIT_SIMD_FLAGS "-msse4.2;-mpopcnt")
+        set(PS3RECOMP_AVX2 OFF CACHE BOOL "" FORCE)
+    else()
+        set(RACACIT_SIMD_FLAGS "-mavx2;-mfma;-mbmi2")
+        set(PS3RECOMP_AVX2 ON CACHE BOOL "" FORCE)
+    endif()
 endif()
 add_subdirectory("${PS3RECOMP_DIR}" "${CMAKE_BINARY_DIR}/ps3recomp_sdk"
                  EXCLUDE_FROM_ALL)
@@ -175,9 +187,11 @@ if(PORT_ENABLE_SPU)
 endif()
 
 # Real libsre (cellSpurs) LLE -- present only after scripts/lift_libsre.py.
+set(PRX_DIR "${CMAKE_CURRENT_SOURCE_DIR}/prx" CACHE PATH
+    "Directory holding firmware-derived PPU sources for this game build")
 file(GLOB LIBSRE_SOURCES CONFIGURE_DEPENDS
-    "${CMAKE_CURRENT_SOURCE_DIR}/prx/libsre/*.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/prx/libsre_module.c")
+    "${PRX_DIR}/libsre/*.cpp"
+    "${PRX_DIR}/libsre_module.c")
 if(LIBSRE_SOURCES)
     message(STATUS "libsre LLE:      enabled")
 endif()
@@ -203,11 +217,16 @@ if(RACACIT_DISCORD_APP_ID)
     set_source_files_properties(discord_rpc.cpp PROPERTIES
         COMPILE_DEFINITIONS "RACACIT_DISCORD_APP_ID=${RACACIT_DISCORD_APP_ID}")
 endif()
+set(HOST_DIR "${CMAKE_CURRENT_SOURCE_DIR}" CACHE PATH
+    "Directory holding version-selected main.cpp and stubs.cpp")
 target_sources(${PROJECT_NAME} PRIVATE
-    main.cpp
+    "${HOST_DIR}/main.cpp"
     ${ZLIB_SOURCES}
-    stubs.cpp
+    "${HOST_DIR}/stubs.cpp"
+    mods.cpp
     button_prompts.cpp
+    menu_archive.cpp
+    desktop_mouse.cpp
     discord_rpc.cpp
     ${LIBSRE_SOURCES}
     ${PS3RECOMP_SCAFFOLD}
@@ -228,6 +247,9 @@ endif()
 #   SPU_LS_DIAG=0       -- local-store accesses without the runtime's watch and
 #                          probe hooks (diagnostics; each was a possible call on
 #                          every access, which spills the register file).
+#   SPU_LS_IN_CONTEXT=1 -- (Apple arm64) local-store accesses at ctx->ls_store, so
+#                          an SPU store is visibly not a register-file store
+#                          (spu_context.h); this title creates no raw SPUs.
 #   -O3                 -- the SPU job code is the main thread's critical path
 #                          (it waits on the job chain every frame).
 if(SPU_SOURCES)
@@ -252,6 +274,10 @@ if(SPU_SOURCES)
             endif()
         else()
             set_source_files_properties(${SPU_SOURCES} PROPERTIES COMPILE_OPTIONS "-O2")
+            if(APPLE)
+                set_source_files_properties(${SPU_SOURCES} PROPERTIES
+                    COMPILE_DEFINITIONS "SPU_USE_DISPATCH_MT;SPU_LS_DIAG=0;SPU_LS_IN_CONTEXT=1")
+            endif()
         endif()
     endif()
 endif()
@@ -284,6 +310,11 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 target_link_libraries(${PROJECT_NAME} PRIVATE
     ps3recomp_runtime
 )
+if(APPLE)
+    find_package(ZLIB REQUIRED)
+    target_link_libraries(${PROJECT_NAME} PRIVATE ZLIB::ZLIB)
+    target_link_libraries(ps3recomp_runtime PRIVATE ZLIB::ZLIB)
+endif()
 if(ANDROID)
     # SDL_main / SDL_AndroidGetExternalStoragePath, and logcat.
     target_link_libraries(${PROJECT_NAME} PRIVATE SDL2::SDL2 log android)
@@ -322,7 +353,15 @@ if(WIN32)
         # zig writes RaCACiT.pdb beside the exe: crash offsets in log.txt
         # resolve with llvm-symbolizer --obj=RaCACiT.exe 0x140000000+off.
     endif()
-    set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME RaCACiT)
+    if(RACACIT_CPU_COMPAT)
+        set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME RaCACiT_compat)
+    else()
+        set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME RaCACiT)
+    endif()
+endif()
+# main.cpp's CPU check asks for what this build was compiled for.
+if(RACACIT_CPU_COMPAT)
+    set_property(SOURCE main.cpp APPEND PROPERTY COMPILE_DEFINITIONS RACACIT_CPU_COMPAT=1)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -354,7 +393,7 @@ endif()
 if(PS3RECOMP_RSX_VULKAN)
     # On main.cpp alone: a target-wide define would change the command line of
     # every lifted translation unit and rebuild hours of generated code.
-    set_property(SOURCE main.cpp APPEND PROPERTY COMPILE_DEFINITIONS RACACIT_HAVE_VULKAN=1)
+    set_property(SOURCE "${HOST_DIR}/main.cpp" APPEND PROPERTY COMPILE_DEFINITIONS RACACIT_HAVE_VULKAN=1)
 endif()
 
 # The lifted translation units are machine-generated and can run to hundreds of
@@ -371,12 +410,27 @@ set(RACACIT_HOT_PPU "")
 if(WIN32 AND NOT MSVC AND EXISTS "${CMAKE_CURRENT_LIST_DIR}/hot_ppu.h")
     set(RACACIT_HOT_PPU "-include;${CMAKE_CURRENT_LIST_DIR}/hot_ppu.h")
 endif()
+# Code mods (mods.cpp, docs/MODDING.md): every lifted function gets a 16-byte hook
+# pad -- 14 bytes of nop before its entry, a 2-byte nop at it -- so a mod's hook is
+# two aligned stores, no instruction decoding. The entry nop costs one cycle a call.
+# mod_hookable.h keeps the functions mods hook from being folded into their callers.
+set(RACACIT_HOOK_FLAGS "")
+if(WIN32 AND NOT MSVC AND NOT ANDROID)
+    set(RACACIT_HOOK_FLAGS "-fpatchable-function-entry=16,14;-include;${CMAKE_CURRENT_LIST_DIR}/mod_hookable.h")
+endif()
+# macOS: the same idea through the linker. mac/macos.order lists the functions a
+# profile of the gameplay route sampled (lifted PPU and SPU code and the runtime
+# they call), hottest first; ld64 places them together. Names missing from a
+# build are skipped. Only where code sits changes.
+if(APPLE AND EXISTS "${CMAKE_CURRENT_LIST_DIR}/../mac/macos.order")
+    target_link_options(${PROJECT_NAME} PRIVATE "LINKER:-order_file,${CMAKE_CURRENT_LIST_DIR}/../mac/macos.order")
+endif()
 if(MSVC)
     set_source_files_properties(${RECOMP_SOURCES} PROPERTIES
         COMPILE_OPTIONS "/w;/bigobj")
 else()
     set_source_files_properties(${RECOMP_SOURCES} PROPERTIES
-        COMPILE_OPTIONS "-w;${RACACIT_HOT_PPU};-ffp-contract=off;${RACACIT_SIMD_FLAGS};${RACACIT_LIFTED_FLAGS}")
+        COMPILE_OPTIONS "-w;${RACACIT_HOT_PPU};${RACACIT_HOOK_FLAGS};-ffp-contract=off;${RACACIT_SIMD_FLAGS};${RACACIT_LIFTED_FLAGS}")
 endif()
 # Guest loads and stores of ordinary memory inlined into the lifted code
 # (ppu_recomp.h); the runtime keeps calling the out-of-line accessors.

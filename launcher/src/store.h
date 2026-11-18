@@ -2,7 +2,7 @@
 // builds and updates, mods, saves, logs, and starting the game.
 //
 // <launcher folder>
-//   RaCACiT Launcher.exe
+//   RaCACiT Launcher.exe     (macOS: RaCACiT Launcher.app; builds/vNN/RaCACiT, see platform.h)
 //   launcher.ini            the launcher's own options
 //   builds\v65\             RaCACiT.exe (+ README.txt, version.txt) per installed build
 //   builds\current.txt      which one Play starts
@@ -41,10 +41,41 @@ struct GameInfo {
     std::string title, title_id, app_ver;
 };
 
+// One game the launcher plays. RACiT (A Crack in Time) lives in the launcher folder itself,
+// as it always has; another game lives in a folder of its own beside it (nexus\) with the
+// same layout (data\, builds\, game\, backups\, assets\, mods\).
+struct GameDisc {
+    const char* id;              // BCUS98124
+    const char* region;          // "USA"
+    const wchar_t* exe;          // its program in builds\vNN
+    const wchar_t* compat_exe;   // the older-processor one, or nullptr
+    const char* elf_sha256;      // the 1.00 EBOOT.elf the build is made from
+};
+struct GameProfile {
+    const char* key;             // "racit", "nexus"
+    const char* name;            // "A Crack in Time" (screen titles)
+    const char* full_name;       // "Ratchet & Clank Future: A Crack in Time"
+    const char* brand;           // the header's small line: "RATCHET & CLANK FUTURE"
+    const wchar_t* folder;       // under the launcher folder: L"" = the launcher folder itself
+    std::vector<GameDisc> discs;
+    bool updates;                // releases on GitHub (Updates screen, the check at start)
+    std::vector<const char*> save_ids;   // save folder name prefixes (Into the Nexus saves as NPUA80908)
+    const char* version;         // the game's version on screen: RACiT "1.0.0", Into the Nexus "0.1.0"
+    std::string disc_list() const;   // "BCUS98124 or BCES00511"
+};
+extern const GameProfile kRacitProfile, kNexusProfile;
+extern const GameProfile* g_prof;   // the game on screen: what the Store helpers check against
+
+extern const char* g_launcher_version;   // app.cpp
+// AVX2 + FMA + BMI2 with the OS saving YMM state: what RaCACiT.exe needs (game/main.cpp racacit_cpu_ok).
+// Without them Play starts RaCACiT_compat.exe, unless RACACIT_GAME_BUILD says otherwise.
+bool cpu_has_avx2();
+
 struct ModInfo {
     std::string id, name, version, author, description, problem;
     fs::path dir;
     bool has_files = false;                                       // a files\ folder to overlay
+    fs::path code;                                                // mod.json "code": its DLL (runs inside the game), or empty
     std::vector<std::pair<std::string, std::string>> settings;   // mod.json "settings"
 };
 
@@ -63,8 +94,9 @@ struct ReleaseInfo {
 
 class Store {
 public:
-    explicit Store(fs::path root);
+    explicit Store(fs::path root, const GameProfile* prof = &kRacitProfile);
     fs::path root;
+    const GameProfile* prof;
     SettingsFile settings, ini;
 
     fs::path data() const { return root / L"data"; }
@@ -90,7 +122,7 @@ public:
     std::string import_iso(const fs::path& iso, Progress* p, std::string* summary);
     // EBOOT.elf, the game's main program unlocked with RPCS3: checked, then put in
     // PS3_GAME\USRDIR -- or kept in data\ until the game is imported.
-    // check_elf: "" = a PS3 program; *known = the USA disc's own (the one the build is made from).
+    // check_elf: "" = a PS3 program; *known = the program of a disc the build is made from.
     static std::string check_elf(const fs::path& elf, bool* known);
     std::string add_elf(const fs::path& elf);
     fs::path pending_elf() const { return data() / L"EBOOT.elf"; }
@@ -153,7 +185,7 @@ public:
     // Every settings.txt value also goes in the environment and the game's
     // EBOOT on the command line, so builds that only read the settings.txt
     // beside their exe (v65 and older) get them too.
-    std::string launch(void** process);
+    std::string launch(void** process);   // Windows: a process HANDLE; macOS: a ChildProcess*
     // The build's shader and pipeline caches into data\cache: copied when there are none,
     // else merged in once per build (launch does this).
     void seed_caches(const BuildInfo& b);
@@ -161,4 +193,8 @@ public:
     // older) -- moved to data\log.txt.
     void collect_log();
     fs::path launched_dir;
+#ifdef __APPLE__
+private:
+    std::string launch_mac(const GameInfo& g, const BuildInfo& b, std::map<std::wstring, std::wstring>& set, void** process);
+#endif
 };

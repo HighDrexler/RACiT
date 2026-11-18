@@ -1,5 +1,6 @@
-# Game data -- never commit
-input/
+# Game data — never commit
+input/*
+!input/.keep
 *.ELF
 *.elf
 *.BIN
@@ -7,14 +8,25 @@ input/
 *.self
 *.sprx
 *.prx
-*.iso
-*.dkey
-# Generated and local
-out/
-analysis/
-game/src/recomp/
-game/spu/
-game/build*/
-launcher/build/
+# Generated
+out/*
+!out/.keep
+analysis/ghidra/*.json
+game/src/recomp/*
+game/spu/*
+game/build/
+build*/
+# Toolchains (rebuild from README)
 tools/
+vfs/
+game/prx/
+data/
+/user-data/
 __pycache__/
+run/
+analysis/ghidra_project/
+analysis/ghidra_analyze.log
+analysis/decomp_*
+team/
+/build/
+/user-data/

@@ -1,11 +1,21 @@
-RACiT Launcher 0.9.8 -- Ratchet & Clank Future: A Crack in Time (PC), Windows
+RACiT Launcher 1.0.0 -- Ratchet & Clank Future: A Crack in Time (PC), Windows
 ================================================================================
 
 Everything the game needs comes in this folder: the launcher, the game build
 (builds\vNN) and its shader caches. The only thing you add is your own copy of
-A Crack in Time (USA, BCUS98124):
+A Crack in Time (USA BCUS98124, or Europe BCES00511):
   1. the game: its disc image (.iso), or the dumped game's folder (USRDIR)
   2. EBOOT.elf, the game's main program, unlocked with RPCS3
+
+TWO GAMES: A CRACK IN TIME AND INTO THE NEXUS (TEST)
+The bar down the left edge switches games: click a tile, press Tab, or L1 / R1
+(LB / RB) on a controller. A Crack in Time is unchanged. Into the Nexus (USA
+BCUS99245) is set up the same way, with its own .iso or USRDIR and its own
+EBOOT.elf, and keeps everything in the nexus\ folder (its own builds, saves,
+settings, logs and backups). Into the Nexus is a test build.
+Very deep folders still hit Windows' own 260-character path limit (the game's
+files sit about 75 characters below the launcher folder), so avoid nesting it
+more than about 180 characters deep.
 
 SET UP
 1. Extract the zip anywhere (with about 27 GB free on that drive for the
@@ -38,6 +48,19 @@ SET UP
 4. Play. Settings (display, graphics, controller) can be changed any time
    from the main menu, or in the game: F1, the touchpad on a DualSense, or
    hold Select (View) for a moment on any other controller.
+ON A MAC (Apple Silicon, macOS)
+The same launcher and the same steps, in the Mac release (RACiT-<version>-macos):
+  1. Unzip it anywhere (about 27 GB free on that drive) and open "RaCACiT Launcher.app".
+     macOS stops an app from the internet that is not notarized: open it, close the
+     warning, then System Settings > Privacy & Security > "Open Anyway" (once).
+  2. and 3. as above: the .iso (with its .dkey beside it) or the dumped game's USRDIR,
+     then EBOOT.elf. RPCS3 has a Mac version (rpcs3.net, Apple Silicon); its Utilities >
+     Decrypt PS3 Binaries makes EBOOT.elf the same way.
+  4. Play. The launcher starts builds/vNN/RaCACiT, which brings its own Vulkan (MoltenVK)
+     and SDL; nothing else to install. Needs macOS on an M1 or later.
+The folders below sit beside the .app as they sit beside the .exe on Windows (paths
+use / there: data/settings.txt). The launcher goes to the Dock while the game runs.
+
 Coming from RACiT Launcher 0.8? Set up offers to bring it over (or lets you pick
 its folder): its saves, settings, save backups and shader caches are copied, and
 its game is played from where it is, so keep that folder or import the .iso again.
@@ -81,10 +104,14 @@ KEYBOARD AND MOUSE
   Jump Space / Enter                            window first), or I J K L
   Fire left click                       Strafe  right click
   Melee F                               Quick select  Q
-  Circle E / Backspace                  L2 Left Ctrl     R2 Left Shift
+  Circle E / Backspace                  L1 Left Ctrl     R2 Left Shift
   L3 V                                  R3 middle click / B
   Pause Esc / P                         Map Tab / M
   D-pad arrow keys, or 1 2 3 4 (up, right, down, left)
+  In quick select (Q held): 1 to 8 pick a slot (1 at the top, then
+  clockwise), Z / X the previous / next slot, R / T the previous / next ring;
+  the mouse points at a slot, left / right click or the wheel change rings.
+  Let go of Q to equip.
   In the game, F1 opens the settings (on a controller: the touchpad, or hold
   Select).
   Settings > Key bindings changes any of them: pick a button, then press the

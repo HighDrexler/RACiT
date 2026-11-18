@@ -15,15 +15,15 @@
       "app_version": "1.00",
       "elf_sha256": "6debdca0f181f35d98ebe23faabe2531b697c558b4e3384b06630173400674c1",
       "buildable": false,
-      "status": "PAL port is proposed separately in https://github.com/HighDrexler/RACiT/pull/26"
+      "status": "European disc: build it with scripts/build_version.sh BCES00511 (a converted copy of the sources, checked against both executables)"
     },
     {
       "id": "BCUS98124-1.20",
       "title_id": "BCUS98124",
       "app_version": "1.20",
       "elf_sha256": "dd304912f85cb9afc344f4a0d4e071d05a08b2af8de216d458b26060417549ad",
-      "buildable": false,
-      "status": "Update hook and SPU port is not included in this branch"
+      "buildable": true,
+      "status": "NA update 1.20 address layout"
     }
   ]
 }
