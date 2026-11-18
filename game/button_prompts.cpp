@@ -524,6 +524,7 @@ void badge_sync(int want)
 /* Every committed page of guest memory, 16-byte steps: the records sit at
  * 16-byte offsets in a font.dat that the game loads 16-byte aligned. */
 #include "desktop_prompts.h"
+#include "hud_keycaps.h"
 
 /* RACACIT_PROMPT_DIAG=1: every button-glyph record table (E001..E004 in a
  * row, any atlas layout) and the HUD texture table round the "R2 + square"
@@ -603,6 +604,7 @@ void scan(void)
         const uint32_t ea = cellGcmResolveLocated(0, be32(vm_base + hud));
         if (ea) { s_hud.entry = hud; s_hud.ea = ea;
                   fprintf(stderr, "[prompts] HUD picture \"R2 + square\" found at %08X (table %08X)%c", ea, hud, 10); } }
+    if (s_hud.entry) hud_faces_find(s_hud.entry);
 }
 
 /* Keyboard prompts or controller glyphs. RACACIT_PROMPT_INPUT_FILE=<file>
@@ -657,7 +659,11 @@ DWORD WINAPI prompts_thread(LPVOID)
             if (has_r != want_r) { swap_records(s_font[i] + 64, s_font[i] + 80); changed = 1; }   /* R1 <-> R2 */
         }
         if (keyboard) desktop_prompts(true);
-        if (!ms) { hud_sync(want_r); badge_sync(want_r); }
+        if (!ms) {
+            /* HUD pictures: keys, or the controller's own (with the R1/L2 swaps) */
+            hud_faces_sync(keyboard);
+            if (!keyboard) { hud_sync(want_r); badge_sync(want_r); }
+        }
         if ((changed && !want_l) || (unsigned)layout != last_layout)
             if (s_nfont) fprintf(stderr, "[prompts] controller layout %d: shoulder buttons in the text %s%c", layout,
                                  want_r ? "R1<->R2 (L1<->L2 while quick select is open)" : "as the PS3 layout", 10);

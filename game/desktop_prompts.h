@@ -70,7 +70,8 @@ static void desktop_make(DesktopGlyph& g, const char* label)
         dxt5_encode(pixels, block);
     }
 }
-static void desktop_prompts(bool keyboard)
+/* The key bound to button glyph E001 + `key` (0..13), as a short label. */
+static void desktop_label(unsigned key, char label[8])
 {
     static const char* const labels[20] = {
         "E", "F", "SPC", "Q", "TAB", "ESC", "CTRL", "RMB", "V", "WASD",
@@ -80,6 +81,31 @@ static void desktop_prompts(bool keyboard)
         "CIRCLE", "SQUARE", "CROSS", "TRIANGLE", "SELECT", "START", "L1", "L2", "L3", "LS_UP",
         "R1", "R2", "R3", "RS_UP", "UP", "DOWN", "LEFT", "RIGHT"
     };
+    char environment[48];
+    snprintf(environment, sizeof environment, "RACACIT_BIND_%s", bindings[key]);
+    const char* custom = getenv(environment);
+    snprintf(label, 8, "%s", labels[key]);
+    if (custom && *custom) {
+        if (!strncmp(custom,"Mouse1",6)) snprintf(label,8,"LMB");
+        else if (!strncmp(custom,"Mouse2",6)) snprintf(label,8,"MMB");
+        else if (!strncmp(custom,"Mouse3",6)) snprintf(label,8,"RMB");
+        else if (!strncmp(custom,"Mouse4",6)) snprintf(label,8,"M4");
+        else if (!strncmp(custom,"Mouse5",6)) snprintf(label,8,"M5");
+        else if (!strncmp(custom,"Space",5)) snprintf(label,8,"SPC");
+        else if (!strncmp(custom,"Return",6)) snprintf(label,8,"ENT");
+        else if (!strncmp(custom,"Left Ctrl",9)) snprintf(label,8,"CTRL");
+        else if (!strncmp(custom,"Left Shift",10)) snprintf(label,8,"SHIFT");
+        else {
+            unsigned i = 0;
+            while (i < 5 && custom[i] && custom[i] != ',') {
+                const char c = custom[i]; label[i++] = c >= 'a' && c <= 'z' ? c - 'a' + 'A' : c;
+            }
+            label[i] = 0;
+        }
+    }
+}
+static void desktop_prompts(bool keyboard)
+{
     /* Directional picture variants need a separate atlas mapping; do not guess. */
     for (int font = 0; font < s_nfont; ++font) for (unsigned key = 0; key < 14; ++key) {
         const uint32_t rec = s_font[font] - 6 * 16 + key * 16;
@@ -108,28 +134,8 @@ static void desktop_prompts(bool keyboard)
                 !readable(ea + glyph->by * pitch + glyph->bx * 16,
                           (glyph->rows - 1) * pitch + glyph->cols * 16)) { --desktop_count; continue; }
             desktop_blocks(*glyph, glyph->original, false);
-            char environment[48], label[8];
-            snprintf(environment, sizeof environment, "RACACIT_BIND_%s", bindings[key]);
-            const char* custom = getenv(environment);
-            snprintf(label, sizeof label, "%s", labels[key]);
-            if (custom && *custom) {
-                if (!strncmp(custom,"Mouse1",6)) snprintf(label,sizeof label,"LMB");
-                else if (!strncmp(custom,"Mouse2",6)) snprintf(label,sizeof label,"MMB");
-                else if (!strncmp(custom,"Mouse3",6)) snprintf(label,sizeof label,"RMB");
-                else if (!strncmp(custom,"Mouse4",6)) snprintf(label,sizeof label,"M4");
-                else if (!strncmp(custom,"Mouse5",6)) snprintf(label,sizeof label,"M5");
-                else if (!strncmp(custom,"Space",5)) snprintf(label,sizeof label,"SPC");
-                else if (!strncmp(custom,"Return",6)) snprintf(label,sizeof label,"ENT");
-                else if (!strncmp(custom,"Left Ctrl",9)) snprintf(label,sizeof label,"CTRL");
-                else if (!strncmp(custom,"Left Shift",10)) snprintf(label,sizeof label,"SHIFT");
-                else {
-                    unsigned i = 0;
-                    while (i < 5 && custom[i] && custom[i] != ',') {
-                        const char c = custom[i]; label[i++] = c >= 'a' && c <= 'z' ? c - 'a' + 'A' : c;
-                    }
-                    label[i] = 0;
-                }
-            }
+            char label[8];
+            desktop_label(key, label);
             desktop_make(*glyph, label);
             fprintf(stderr, "[prompts] desktop glyph E%03X: %s\n", key + 1, label);
         }
@@ -138,4 +144,45 @@ static void desktop_prompts(bool keyboard)
         if (!memcmp(present, keyboard ? glyph->original : glyph->keys, bytes))
             desktop_blocks(*glyph, keyboard ? glyph->keys : glyph->original, true);
     }
+}
+
+/* ---- keycap pictures for the HUD's own button pictures ------------------
+ * A key drawn into an RGBA picture of any size: a rounded dark key with a
+ * light rim, the label in the bitmap alphabet above, centred and as large as
+ * fits. 4x4 samples per pixel for smooth edges. Alpha 0 outside the key. */
+static void keycap_rgba(int w, int h, const char* label, uint8_t* rgba)
+{
+    const int len = (int)strlen(label), letters_w = len > 0 ? len * 6 - 1 : 1;
+    const float m = std::max(1.0f, std::min(w, h) * 0.04f);       /* margin round the key */
+    const float x0 = m, y0 = m, x1 = w - m, y1 = h - m;
+    const float r = std::min(x1 - x0, y1 - y0) * 0.22f;             /* corner radius */
+    const float rim = std::max(1.0f, std::min(w, h) * 0.06f);
+    const float tw = (x1 - x0) - 2 * rim - 2 * std::max(1.0f, w * 0.06f), th = (y1 - y0) - 2 * rim - 2 * std::max(1.0f, h * 0.12f);
+    const float scale = std::max(0.5f, std::min(tw / letters_w, th / 7.0f));
+    const float lx = (w - letters_w * scale) / 2, ly = (h - 7 * scale) / 2;
+    auto inside = [&](float x, float y, float inset) {
+        const float ax = x0 + inset, ay = y0 + inset, bx = x1 - inset, by = y1 - inset, rr = std::max(0.0f, r - inset);
+        if (x < ax || y < ay || x > bx || y > by) return false;
+        const float cx = x < ax + rr ? ax + rr : x > bx - rr ? bx - rr : x;
+        const float cy = y < ay + rr ? ay + rr : y > by - rr ? by - rr : y;
+        return (x - cx) * (x - cx) + (y - cy) * (y - cy) <= rr * rr;
+    };
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) {
+            float a = 0, lum = 0;
+            for (int s = 0; s < 16; s++) {
+                const float sx = x + (s % 4 + 0.5f) / 4, sy = y + (s / 4 + 0.5f) / 4;
+                if (!inside(sx, sy, 0)) continue;
+                a += 1;
+                bool ink = !inside(sx, sy, rim);
+                if (!ink && sx >= lx && sy >= ly) {
+                    const int tx = (int)((sx - lx) / scale), ty = (int)((sy - ly) / scale);
+                    if (ty < 7 && tx / 6 < len && tx % 6 < 5) ink = desktop_letter(label[tx / 6], ty) & (16 >> (tx % 6));
+                }
+                lum += ink ? 245 : 28;
+            }
+            uint8_t* p = rgba + 4 * (y * w + x);
+            const uint8_t v = a ? (uint8_t)(lum / a) : 0;
+            p[0] = p[1] = p[2] = v; p[3] = (uint8_t)(a * 255 / 16);
+        }
 }
