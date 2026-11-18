@@ -7415,10 +7415,10 @@ index 8f1b491..033916e 100644
  
      if (bytesRead) vm_write64((u32)(uintptr_t)bytesRead, (u64)n);
 diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
-index ac7909c..612bb98 100644
+index ac7909c..4ad3df3 100644
 --- a/libs/input/cellPad.c
 +++ b/libs/input/cellPad.c
-@@ -1,1108 +1,2323 @@
+@@ -1,1108 +1,2326 @@
 -/*
 - * ps3recomp - cellPad HLE implementation
 - *
@@ -9724,7 +9724,9 @@ index ac7909c..612bb98 100644
 +        }
 +        PadHostState* hs = &s_host_state[0];
 +        u16 b = 0; u8 lx = 128, ly = 128, rx = 128, ry = 128;
-+        touch_controls_poll(s_aspect, &b, &lx, &ly, &rx, &ry);
++        /* Playing by touch is playing with a pad: the game's prompts show its buttons, not keycaps
++         * (0.1.0: they stayed on keycaps, the start-up choice without a controller). */
++        if (touch_controls_poll(s_aspect, &b, &lx, &ly, &rx, &ry)) SDL_AtomicSet(&s_racit_keyboard_prompts, 0);
 +        hs->buttons = b;
 +        hs->analog_lx = lx; hs->analog_ly = ly; hs->analog_rx = rx; hs->analog_ry = ry;
 +        hs->trigger_l2 = (b & CELL_PAD_CTRL_L2) ? 255 : 0;
@@ -9789,7 +9791,8 @@ index ac7909c..612bb98 100644
 +    }
 +    memset(s_sdl_controllers, 0, sizeof(s_sdl_controllers));
 +    pad_sdl_attach();
-+    SDL_AtomicSet(&s_racit_keyboard_prompts, s_sdl_controllers[0] == NULL);
++    /* Keycaps at start only with neither a controller nor the touch controls (they are a pad). */
++    SDL_AtomicSet(&s_racit_keyboard_prompts, s_sdl_controllers[0] == NULL && !touch_controls_active());
 +}
 +
 +static void pad_shutdown_backend(void)
