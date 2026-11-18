@@ -149,15 +149,15 @@ static void desktop_label(unsigned key, char label[8])
 {
     static const char* const labels[20] = {
         "E", "F", "SPC", "Q", "TAB", "ESC", "CTRL", "RMB", "V", "WASD",
-        "LMB", "SHIFT", "B", "IJKL", "UP", "DOWN", "LEFT", "RIGHT", "", ""
+        "LMB", "SHIFT", "B", "IJKL", "UP", "DOWN", "LEFT", "RIGHT", "", "ARROW"
     };
-    static const char* const bindings[18] = {
+    static const char* const bindings[20] = {
         "CIRCLE", "SQUARE", "CROSS", "TRIANGLE", "SELECT", "START", "L1", "L2", "L3", "LS_UP",
-        "R1", "R2", "R3", "RS_UP", "UP", "DOWN", "LEFT", "RIGHT"
+        "R1", "R2", "R3", "RS_UP", "UP", "DOWN", "LEFT", "RIGHT", "", ""
     };
     char environment[48];
     snprintf(environment, sizeof environment, "RACACIT_BIND_%s", bindings[key]);
-    const char* custom = getenv(environment);
+    const char* custom = *bindings[key] ? getenv(environment) : nullptr;
     snprintf(label, 8, "%s", labels[key]);
     if (custom && *custom) {
         if (!strncmp(custom,"Mouse1",6)) snprintf(label,8,"LMB");
@@ -180,13 +180,15 @@ static void desktop_label(unsigned key, char label[8])
 }
 static void desktop_prompts(bool keyboard)
 {
-    /* Directional picture variants need a separate atlas mapping; do not guess. */
+    /* E00F-E012: the d-pad with up, down, left or right lit; E014: the whole
+     * d-pad (E013 is the grenade picture, not a button). */
     /* Smaller levels share blocks between neighbouring glyphs, and each
      * glyph's blocks were saved with its predecessors' keys in them: keys go
      * in front to back, the originals back to front. */
-    for (int ff = 0; ff < s_nfont; ++ff) for (unsigned kk = 0; kk < 14; ++kk) {
+    for (int ff = 0; ff < s_nfont; ++ff) for (unsigned kk = 0; kk < 20; ++kk) {
         const int font = keyboard ? ff : s_nfont - 1 - ff;
-        const unsigned key = keyboard ? kk : 13 - kk;
+        const unsigned key = keyboard ? kk : 19 - kk;
+        if (key == 18) continue;
         const uint32_t rec = s_font[font] - 6 * 16 + key * 16;
         if (!readable(rec, 16) || be16(vm_base + rec) != 0xE001 + key) continue;
         uint32_t pitch = 0; int width=0,height=0,levels=1;

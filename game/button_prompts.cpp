@@ -552,6 +552,18 @@ void prompt_diag(uint32_t hud)
             }
         a = end;
     }
+    /* With RACACIT_PROMPT_DUMP too: the font's other button glyphs (E00F
+     * on: the d-pad and radar pictures) as hudkey_E0xx.ppm. */
+    for (unsigned key = 14; key < 26 && s_nfont; key++) {
+        const uint32_t rec = s_font[0] - 6 * 16 + key * 16;
+        if (!readable(rec, 16) || be16(vm_base + rec) != 0xE001 + key) continue;
+        const int w = vm_base[rec + 10], h = vm_base[rec + 11];
+        static uint8_t img[255 * 255 * 4];
+        bool ok = w > 0 && h > 0;
+        for (int y = 0; ok && y < h; y++)
+            for (int x = 0; ok && x < w; x++) ok = glyph_pixel(key, x, y, img + 4 * (y * w + x));
+        if (ok) hudkey_dump(0xE001 + key, img, img, w, h);
+    }
     if (hud && readable(hud - 64 * 32, 129 * 32))
         for (int k = -64; k <= 64; k++) {
             const uint8_t* t = vm_base + hud + 32 * k;
