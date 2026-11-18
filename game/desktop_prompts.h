@@ -2,9 +2,16 @@
  * button_prompts.cpp's namespace, after its existing DXT5/page helpers.
  * No game textures are distributed; original blocks are retained for restore.
  */
+/* The glyph in the page's smaller mip levels: text drawn small (the hint
+ * and prompt boxes: "Use [L] to select", a vendor's "[triangle] Shop for
+ * weapons") samples those, not level 0. Up to 7 levels, their blocks one
+ * after another in morig/mkeys. */
+struct DesktopMip { uint32_t ea, pitch; int bx, by, cols, rows; };
 struct DesktopGlyph {
     uint32_t rec, page, pitch; int x, y, w, h, bx, by, cols, rows;
     uint8_t original[8192], keys[8192];
+    int nmips; DesktopMip mip[7];
+    uint8_t morig[4096], mkeys[4096];
 };
 static DesktopGlyph desktop_glyphs[16 * 20];
 static unsigned desktop_count;
@@ -42,6 +49,73 @@ static void desktop_blocks(const DesktopGlyph& g, uint8_t* blocks, bool write)
         uint8_t* texture = vm_base + g.page + (g.by + row) * g.pitch + g.bx * 16;
         if (write) memcpy(texture, blocks + row * g.cols * 16, g.cols * 16);
         else memcpy(blocks + row * g.cols * 16, texture, g.cols * 16);
+    }
+}
+static void desktop_mip_blocks(DesktopGlyph& g, const uint8_t* src, uint8_t* dst, bool write)
+{
+    size_t o = 0;
+    for (int m = 0; m < g.nmips; m++) {
+        const DesktopMip& d = g.mip[m];
+        for (int r = 0; r < d.rows; r++) {
+            uint8_t* t = vm_base + d.ea + (uint32_t)(d.by + r) * d.pitch + (uint32_t)d.bx * 16;
+            if (write) memcpy(t, src + o, (size_t)d.cols * 16); else memcpy(dst + o, t, (size_t)d.cols * 16);
+            o += (size_t)d.cols * 16;
+        }
+    }
+}
+/* The keycap (level 0, g.keys) filtered down into each smaller level of a
+ * `levels`-level DXT5 page `width` x `height` at `page_ea`: each texel
+ * takes the key's average over the texels it covers, blended with the
+ * page's own by how much of it the glyph covers. */
+static void desktop_make_mips(DesktopGlyph& g, uint32_t page_ea, int width, int height, int levels)
+{
+    g.nmips = 0;
+    uint32_t off = 0; size_t used = 0;
+    static uint8_t key0[256 * 256][4];
+    if (g.w > 256 || g.h > 256) return;
+    for (int y = 0; y < g.h; y++)
+        for (int x = 0; x < g.w; x++) {
+            const int px_ = g.x + x, py_ = g.y + y;
+            uint8_t px[16][4];
+            dxt5_decode(g.keys + ((py_ / 4 - g.by) * g.cols + (px_ / 4 - g.bx)) * 16, px);
+            memcpy(key0[y * g.w + x], px[(py_ & 3) * 4 + (px_ & 3)], 4);
+        }
+    for (int n = 0; n < levels && g.nmips < 7; n++) {
+        const int lw = std::max(1, width >> n), lh = std::max(1, height >> n);
+        const uint32_t bw = (uint32_t)(lw + 3) / 4, bh = (uint32_t)(lh + 3) / 4, lp = bw * 16;
+        const uint32_t lea = page_ea + off;
+        off += bw * bh * 16;
+        if (n == 0) continue;
+        const int s = 1 << n, x0 = g.x >> n, y0 = g.y >> n, x1 = (g.x + g.w + s - 1) >> n, y1 = (g.y + g.h + s - 1) >> n;
+        if (x1 - x0 < 2 || y1 - y0 < 2) break;
+        DesktopMip d = { lea, lp, x0 / 4, y0 / 4, (x1 + 3) / 4 - x0 / 4, (y1 + 3) / 4 - y0 / 4 };
+        const size_t bytes = (size_t)d.cols * d.rows * 16;
+        if (used + bytes > sizeof g.morig || !readable(lea + (uint32_t)d.by * lp, (uint32_t)d.rows * lp)) break;
+        uint8_t* ko = g.mkeys + used;
+        for (int r = 0; r < d.rows; r++)
+            for (int c = 0; c < d.cols; c++) {
+                const uint8_t* blk = vm_base + lea + (uint32_t)(d.by + r) * lp + (uint32_t)(d.bx + c) * 16;
+                memcpy(g.morig + used + (r * d.cols + c) * 16, blk, 16);
+                uint8_t px[16][4];
+                dxt5_decode(blk, px);
+                for (int i = 0; i < 16; i++) {
+                    const int tx = (d.bx + c) * 4 + (i & 3), ty = (d.by + r) * 4 + (i >> 2);
+                    long acc[4] = {}; int cnt = 0;
+                    for (int sy = ty * s; sy < (ty + 1) * s; sy++)
+                        for (int sx = tx * s; sx < (tx + 1) * s; sx++) {
+                            if (sx < g.x || sy < g.y || sx >= g.x + g.w || sy >= g.y + g.h) continue;
+                            const uint8_t* q = key0[(sy - g.y) * g.w + (sx - g.x)];
+                            for (int k = 0; k < 4; k++) acc[k] += q[k];
+                            cnt++;
+                        }
+                    if (!cnt) continue;
+                    const float cov = (float)cnt / (float)(s * s);
+                    for (int k = 0; k < 4; k++) px[i][k] = (uint8_t)(px[i][k] + ((float)acc[k] / cnt - px[i][k]) * cov + 0.5f);
+                }
+                dxt5_encode(px, ko + (r * d.cols + c) * 16);
+            }
+        g.mip[g.nmips++] = d;
+        used += bytes;
     }
 }
 static void desktop_make(DesktopGlyph& g, const char* label)
@@ -107,11 +181,16 @@ static void desktop_label(unsigned key, char label[8])
 static void desktop_prompts(bool keyboard)
 {
     /* Directional picture variants need a separate atlas mapping; do not guess. */
-    for (int font = 0; font < s_nfont; ++font) for (unsigned key = 0; key < 14; ++key) {
+    /* Smaller levels share blocks between neighbouring glyphs, and each
+     * glyph's blocks were saved with its predecessors' keys in them: keys go
+     * in front to back, the originals back to front. */
+    for (int ff = 0; ff < s_nfont; ++ff) for (unsigned kk = 0; kk < 14; ++kk) {
+        const int font = keyboard ? ff : s_nfont - 1 - ff;
+        const unsigned key = keyboard ? kk : 13 - kk;
         const uint32_t rec = s_font[font] - 6 * 16 + key * 16;
         if (!readable(rec, 16) || be16(vm_base + rec) != 0xE001 + key) continue;
-        uint32_t pitch = 0; int width=0,height=0;
-        const uint8_t* page = font_page_at(s_font[font], be16(vm_base + rec + 6), &pitch,&width,&height);
+        uint32_t pitch = 0; int width=0,height=0,levels=1;
+        const uint8_t* page = font_page_at(s_font[font], be16(vm_base + rec + 6), &pitch,&width,&height,&levels);
         if (!page) continue;
         const int x=be16(vm_base+rec+2),y=be16(vm_base+rec+4),w=vm_base[rec+10],h=vm_base[rec+11];
         if (w<12 || h<12 || x+w>width || y+h>height) continue;
@@ -137,12 +216,15 @@ static void desktop_prompts(bool keyboard)
             char label[8];
             desktop_label(key, label);
             desktop_make(*glyph, label);
-            fprintf(stderr, "[prompts] desktop glyph E%03X: %s\n", key + 1, label);
+            desktop_make_mips(*glyph, ea, width, height, levels);
+            fprintf(stderr, "[prompts] desktop glyph E%03X: %s (%d smaller levels of %d)\n", key + 1, label, glyph->nmips, levels);
         }
         uint8_t present[8192]; desktop_blocks(*glyph, present, false);
         const size_t bytes = (size_t)glyph->cols * glyph->rows * 16;
-        if (!memcmp(present, keyboard ? glyph->original : glyph->keys, bytes))
+        if (!memcmp(present, keyboard ? glyph->original : glyph->keys, bytes)) {
             desktop_blocks(*glyph, keyboard ? glyph->keys : glyph->original, true);
+            desktop_mip_blocks(*glyph, keyboard ? glyph->mkeys : glyph->morig, nullptr, true);
+        }
     }
 }
 
