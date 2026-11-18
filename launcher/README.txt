@@ -63,7 +63,18 @@ The same launcher and the same steps, in the Mac release (RACiT-<version>-macos)
      then EBOOT.elf. RPCS3 has a Mac version (rpcs3.net, Apple Silicon); its Utilities >
      Decrypt PS3 Binaries makes EBOOT.elf the same way.
   4. Play. The launcher starts builds/vNN/RaCACiT, which brings its own Vulkan (MoltenVK)
-     and SDL; nothing else to install. Needs macOS on an M1 or later.
+     and SDL; nothing else to install. Needs macOS 14 or later on an M1 or later.
+  Update 1.20 (optional; the Mac release has a build of it, builds/vNN-u120):
+     a. Install the update's .pkg in RPCS3 (File > Install Packages). The launcher
+        ships no PlayStation keys, so it does not open .pkg files itself.
+     b. "3. Optional: add update 1.20": pick the folder RPCS3 made,
+        dev_hdd0/game/BCUS98124 (it holds PARAM.SFO and USRDIR).
+     c. Decrypt that folder's USRDIR/EBOOT.BIN with RPCS3 and add the EBOOT.elf it makes
+        in step 2 ("Show the update's EBOOT.BIN" opens the folder). The launcher tells the
+        1.00 and 1.20 EBOOT.elf apart by their SHA-256 and keeps both.
+     Play then runs 1.20 ("Play version" on the Your game screen switches back to 1.00).
+     It still reads the disc's data; saves are shared by both versions, and 1.20 keeps
+     its own copy of the installed game data in data/dev_hdd0_u120.
 The folders below sit beside the .app as they sit beside the .exe on Windows (paths
 use / there: data/settings.txt). The launcher goes to the Dock while the game runs.
 

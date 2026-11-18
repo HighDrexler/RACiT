@@ -348,17 +348,19 @@ static void import_screen();
 static void add_elf_picked(const fs::path& p)
 {
     bool known = false;
-    const std::string bad = Store::check_elf(p, &known);
+    int version = 0;
+    const std::string bad = Store::check_elf(p, &known, &version);
     if (!bad.empty()) { message("EBOOT.elf", bad); return; }
-    auto put = [p] {
+    auto put = [p, version] {
         const std::string r = S->add_elf(p);
         if (!r.empty()) { message("EBOOT.elf", r); return; }
-        if (S->game().ok) { message("Ready to play", "Your game is set up. Press Play."); set_screen(home); }
+        if (version == 120 && !S->update_added()) { message("Update 1.20's EBOOT.elf", "Added. Now add the update itself (step 3)."); set_screen(import_screen); }
+        else if (S->game().ok) { message("Ready to play", std::string(S->plays_update() ? "Version 1.20 is set up." : "Your game is set up.") + " Press Play."); set_screen(home); }
         else set_screen(import_screen);
     };
     if (known) put();
     else confirm("A different EBOOT.elf", "This is a PS3 program, but not the EBOOT.elf of a disc this build is made "
-                 "from (" + S->prof->disc_list() + ", version 1.00 -- not an update's). The game may not start with it.", "Use it anyway", put);
+                 "from (" + S->prof->disc_list() + ", version 1.00) or of the USA disc's update 1.20. The game may not start with it.", "Use it anyway", put);
 }
 
 // An earlier launcher's folder (Store::migrate_from_launcher).
@@ -405,7 +407,10 @@ static void import_screen()
                                           "its USRDIR. A Redump .iso is encrypted: keep its .dkey file beside it, "
                                           "with the same name, and the launcher unlocks it.\n"
                                           "2. EBOOT.elf, the game's main program unlocked with RPCS3. Already in "
-                                          "USRDIR? Then it is found by itself." });
+                                          "USRDIR? Then it is found by itself.\n"
+                                          "3. Optional, update 1.20 (USA disc): install its .pkg in RPCS3, pick the folder it "
+                                          "makes (dev_hdd0/game/BCUS98124), and add its EBOOT.elf (its USRDIR/EBOOT.BIN "
+                                          "unlocked with RPCS3) in step 2. Then Play runs 1.20." });
     scr.info.push_back({ "Making EBOOT.elf", "You must provide your own legally dumped copy of " + std::string(P.full_name) +
                                              ", and the EBOOT.elf file from your dump. If your EBOOT.elf "
                                              "reads as encrypted, RPCS3 has a decryption tool available. RACiT does "
@@ -451,6 +456,27 @@ static void import_screen()
     if (have_game && !gi.ok) {
         const fs::path usrdir = gi.root / L"PS3_GAME" / L"USRDIR";
         scr.items.push_back(button("Show EBOOT.BIN", "Its folder, to decrypt it in RPCS3", [usrdir] { shell_open(usrdir); }));
+    }
+    // Update 1.20 (Store::import_update): the installed update's folder and its EBOOT.elf.
+    const bool upd = S->update_added(), upd_elf = fs::exists(S->update_elf(), ec);
+    Item u = button(upd ? (S->update_ready() ? "3. Update 1.20 added" : "3. Update 1.20 added (add its EBOOT.elf in step 2)")
+                        : upd_elf ? "3. Add update 1.20 (its EBOOT.elf is in)" : "3. Optional: add update 1.20",
+                    "The installed update's folder (RPCS3: dev_hdd0/game/BCUS98124)", [] {
+        const fs::path p = pick_folder(g_hwnd, L"Pick the installed update's folder (it holds PARAM.SFO and USRDIR)");
+        if (p.empty()) return;
+        std::string* sum = new std::string();
+        run_task("Adding update 1.20", [p, sum](Progress* pr) { return S->import_update(p, pr, sum); },
+                 [sum](const std::string& r) { done_or_error("Update 1.20", *sum, r); delete sum; set_screen(import_screen); refresh(); });
+    });
+    scr.items.push_back(u);
+    if (upd && !S->update_ready()) {
+        const fs::path usrdir = S->update_dir() / L"USRDIR";
+        scr.items.push_back(button("Show the update's EBOOT.BIN", "Its folder, to decrypt it in RPCS3", [usrdir] { shell_open(usrdir); }));
+    }
+    if (S->update_ready()) {
+        const bool on = S->ini.get("play_version", "1.20") != "1.00";
+        scr.items.push_back(button(on ? "Play version: 1.20 (update)" : "Play version: 1.00 (disc)", "Switch",
+                                   [on] { S->ini.put("play_version", on ? "1.00" : "1.20"); S->ini.save(); set_screen(import_screen); }));
     }
     if (gi.ok) { Item pl = button("Play", "", [] { set_screen(home); play(); }); pl.accent = true; scr.items.push_back(pl); }
     // The way most players arrive: from their 0.8 launcher, its saves, settings and game in one step.
@@ -1221,7 +1247,7 @@ static void home()
     scr = Screen(); scr.title = S->prof->name; scr.subtitle = "";
     if (!gi.ok) scr.info.push_back({ "Status", "Set up the game to play", col::TEXT_BAD });
     else if (!b.version) scr.info.push_back({ "Status", "Game files missing: reinstall the launcher", col::TEXT_BAD });
-    else scr.info.push_back({ "Status", "Ready to play", col::TEXT_GOOD });
+    else scr.info.push_back({ "Status", S->plays_update() ? "Ready to play (version 1.20)" : "Ready to play", col::TEXT_GOOD });
     if (!slots.empty()) {
         fs::path newest; for (auto& sl : slots) { std::error_code ec; if (newest.empty() || fs::last_write_time(sl / L"GAME.SAV", ec) > fs::last_write_time(newest / L"GAME.SAV", ec)) newest = sl; }
         scr.info.push_back({ "Last saved", file_date(newest / L"GAME.SAV") });

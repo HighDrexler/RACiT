@@ -130,8 +130,8 @@ static int mac_snapshots(const fs::path& dir)
     set_screen(home);
     message("Ready to play", "Your game is set up. Press Play.");
     shot("overlay-message");
-    confirm("A different EBOOT.elf", "This is a PS3 program, but not the EBOOT.elf of the USA disc this build is made "
-            "from (BCUS98124, version 1.00 -- not an update's). The game may not start with it.", "Use it anyway", [] {});
+    confirm("A different EBOOT.elf", "This is a PS3 program, but not the EBOOT.elf of the USA disc (BCUS98124, "
+            "version 1.00) or of its update 1.20, which the builds are made from. The game may not start with it.", "Use it anyway", [] {});
     shot("overlay-confirm");
     ov = Overlay(); ov.type = Overlay::PROGRESS; ov.title = "Importing the game"; ov.no = "Cancel";
     Progress fake; fake.set_line("PS3_GAME/USRDIR/packed/level00.psarc"); fake.total = 25ull << 30; fake.done = 9ull << 30;
