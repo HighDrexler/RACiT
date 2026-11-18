@@ -8,6 +8,9 @@
 #     builds/v<N>/lib/              its libraries: the Vulkan loader, MoltenVK (+ MoltenVK_icd.json),
 #                                   SDL2 (sdl2-compat) with the SDL3 it loads, glslang, SPIRV-Tools
 #     mods/                         the built-in mods (launcher/mods)
+# MACOS_LIB_PREFIX: take the libraries from that prefix (built with MACOSX_DEPLOYMENT_TARGET=
+# MACOS_MIN) rather than Homebrew, whose bottles may need a newer macOS. MACOS_MIN (default 14.0):
+# the oldest macOS the release runs on; packaging fails if any bundled Mach-O needs a newer one.
 # Nothing in it loads from Homebrew: every library is copied in and linked by @rpath. All of
 # it is signed ad hoc (codesign -s -), so Gatekeeper asks once ("Open Anyway").
 #
@@ -18,6 +21,8 @@
 set -e
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BREW="${HOMEBREW_PREFIX:-$(brew --prefix 2>/dev/null || echo /opt/homebrew)}"
+LIBS="${MACOS_LIB_PREFIX:-$BREW}"
+export MACOS_MIN="${MACOS_MIN:-14.0}"
 GAME="$ROOT/game/build/RaCACiTRecomp"
 OUT="$ROOT/out/macos"
 VER=""
@@ -54,13 +59,13 @@ for c in shadercache.bin pipelinelist.bin; do [ -f "$(dirname "$GAME")/$c" ] && 
 # Libraries: what the game links, plus what it dlopen()s -- the Vulkan loader
 # (PS3RECOMP_VULKAN_LIBRARY), MoltenVK (through its ICD file) and SDL3 (through sdl2-compat).
 bundle_dylibs "$B/RaCACiT" "$B/lib" "@executable_path/lib" \
-    "$BREW/lib/libvulkan.1.dylib" "$BREW/lib/libMoltenVK.dylib" "$BREW/lib/libSDL3.0.dylib=libSDL3.dylib"
+    "$LIBS/lib/libvulkan.1.dylib" "$LIBS/lib/libMoltenVK.dylib" "$LIBS/lib/libSDL3.0.dylib=libSDL3.dylib"
 cat > "$B/lib/MoltenVK_icd.json" <<JSON
 {
     "file_format_version": "1.0.0",
     "ICD": {
         "library_path": "./libMoltenVK.dylib",
-        "api_version": "$(sed -n 's/.*"api_version" *: *"\([^"]*\)".*/\1/p' "$BREW/etc/vulkan/icd.d/MoltenVK_icd.json")",
+        "api_version": "$(sed -n 's/.*"api_version" *: *"\([^"]*\)".*/\1/p' "$LIBS/etc/vulkan/icd.d/MoltenVK_icd.json")",
         "is_portability_driver": true
     }
 }
@@ -84,10 +89,15 @@ done
 codesign --verify --strict "$REL/RaCACiT Launcher.app" || bad=1
 codesign --verify --strict "$B/RaCACiT" || bad=1
 [ $bad = 0 ] || exit 1
-echo "lowest macOS the bundled libraries need:"
-for f in "$B/RaCACiT" "$B/lib/"*.dylib "$REL/RaCACiT Launcher.app/Contents/Frameworks/"*.dylib; do
-    printf '  %-28s %s\n' "$(basename "$f")" "$(vtool -show-build "$f" 2>/dev/null | awk '/minos/{print $2; exit}')"
+echo "lowest macOS each Mach-O needs (must be <= $MACOS_MIN):"
+_vnum() { echo "$1" | awk -F. '{printf "%d%03d%03d", $1, $2, $3}'; }
+for f in "$B/RaCACiT" "$B/lib/"*.dylib "$REL/RaCACiT Launcher.app/Contents/MacOS/RaCACiT Launcher" "$REL/RaCACiT Launcher.app/Contents/Frameworks/"*.dylib; do
+    m="$(vtool -show-build "$f" 2>/dev/null | awk '/minos/{print $2; exit}')"
+    printf '  %-28s %s\n' "$(basename "$f")" "$m"
+    { [ -n "$m" ] && [ "$(_vnum "$m")" -le "$(_vnum "$MACOS_MIN")" ]; } || { echo "$f needs macOS $m, newer than $MACOS_MIN" >&2; bad=1; }
+    ! strings "$f" | grep -q '/opt/homebrew' || echo "  (note: $(basename "$f") still mentions /opt/homebrew in a string)"
 done
+[ $bad = 0 ] || exit 1
 
 if [ $ZIP = 1 ]; then
     # "launcher" and "macos" in the name: the Mac launcher's updater takes this asset.
