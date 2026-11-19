@@ -310,6 +310,25 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 target_link_libraries(${PROJECT_NAME} PRIVATE
     ps3recomp_runtime
 )
+# menu_archive.cpp builds the keyboard menu archive itself (RACACIT_MENU_KEYCAPS=1)
+# from the compiled menu actions, so they go into the game as bytes.
+set(RACACIT_MENU_ACTIONS "${CMAKE_CURRENT_SOURCE_DIR}/menu_keycaps.actions.bin")
+file(READ "${RACACIT_MENU_ACTIONS}" RACACIT_MENU_ACTIONS_HEX HEX)
+string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," RACACIT_MENU_ACTIONS_BYTES "${RACACIT_MENU_ACTIONS_HEX}")
+set(RACACIT_MENU_ACTIONS_INC "${CMAKE_CURRENT_BINARY_DIR}/menu_keycaps_actions.inc")
+set(RACACIT_MENU_ACTIONS_OLD "")
+if(EXISTS "${RACACIT_MENU_ACTIONS_INC}")
+    file(READ "${RACACIT_MENU_ACTIONS_INC}" RACACIT_MENU_ACTIONS_OLD)
+endif()
+if(NOT RACACIT_MENU_ACTIONS_OLD STREQUAL "${RACACIT_MENU_ACTIONS_BYTES}")
+    file(WRITE "${RACACIT_MENU_ACTIONS_INC}" "${RACACIT_MENU_ACTIONS_BYTES}")
+endif()
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${RACACIT_MENU_ACTIONS}")
+target_include_directories(${PROJECT_NAME} PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
+if(ZLIB_SOURCES)
+    target_include_directories(${PROJECT_NAME} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../tools/zlib")
+endif()
+
 if(APPLE)
     find_package(ZLIB REQUIRED)
     target_link_libraries(${PROJECT_NAME} PRIVATE ZLIB::ZLIB)
