@@ -354,7 +354,7 @@ index 00000000..68a27955
 +
 +#endif /* AUDIO_STRETCH_H */
 diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
-index f231ea26..4ecc651b 100644
+index f231ea26..0c27c615 100644
 --- a/libs/audio/cellAudio.c
 +++ b/libs/audio/cellAudio.c
 @@ -13,12 +13,17 @@
@@ -375,7 +375,17 @@ index f231ea26..4ecc651b 100644
  #include <math.h>
  #include "ps3emu/log_first.h"
  #include "ps3emu/thread_name.h"
-@@ -124,6 +129,9 @@ typedef struct {
+@@ -98,6 +103,9 @@ extern uint32_t sys_event_queue_create_direct(uint64_t key, int32_t size);
+   #define mutex_unlock(m)  LeaveCriticalSection(m)
+ #else
+   #include <pthread.h>
++  #ifdef __APPLE__
++  #include <pthread/qos.h>
++  #endif
+   #include <unistd.h>
+   #include <time.h>
+   typedef pthread_t thread_t;
+@@ -124,6 +132,9 @@ typedef struct {
      float*               buffer;        /* host audio buffer (float samples) */
      u32                  buf_size;       /* buffer size in bytes */
      u64                  read_index;     /* current read position (block index) */
@@ -385,7 +395,7 @@ index f231ea26..4ecc651b 100644
      u64                  write_index;    /* where the game is writing */
      /* For address reporting to guest */
      u64                  port_addr;      /* guest-visible buffer address */
-@@ -142,12 +150,11 @@ static AudioNotifySlot s_notify_queues[CELL_AUDIO_MAX_NOTIFY_EVENT_QUEUES];
+@@ -142,12 +153,11 @@ static AudioNotifySlot s_notify_queues[CELL_AUDIO_MAX_NOTIFY_EVENT_QUEUES];
  
  /* Timestamp anchor for cellAudioGetPortTimestamp (microseconds, set at init) */
  static u64            s_audio_start_us = 0;
@@ -399,7 +409,7 @@ index f231ea26..4ecc651b 100644
  static volatile int  s_mix_thread_running = 0;
  static thread_t      s_mix_thread;
  #ifndef _WIN32
-@@ -159,8 +166,42 @@ static int           s_mix_thread_live = 0;
+@@ -159,8 +169,42 @@ static int           s_mix_thread_live = 0;
  static mutex_t       s_audio_mutex;
  
  /* Output mix buffer (stereo, one block worth) */
@@ -442,7 +452,7 @@ index f231ea26..4ecc651b 100644
  /* ---------------------------------------------------------------------------
   * Host audio output backend
   * -----------------------------------------------------------------------*/
-@@ -169,6 +210,248 @@ static float s_mix_buffer[CELL_AUDIO_BLOCK_SAMPLES * 2];
+@@ -169,6 +213,248 @@ static float s_mix_buffer[CELL_AUDIO_BLOCK_SAMPLES * 2];
  
  static SDL_AudioDeviceID s_sdl_audio_dev = 0;
  
@@ -691,7 +701,7 @@ index f231ea26..4ecc651b 100644
  static int audio_backend_init(void)
  {
      if (SDL_WasInit(SDL_INIT_AUDIO) == 0) {
-@@ -193,6 +476,8 @@ static int audio_backend_init(void)
+@@ -193,6 +479,8 @@ static int audio_backend_init(void)
      }
  
      SDL_PauseAudioDevice(s_sdl_audio_dev, 0); /* Start playback */
@@ -700,7 +710,7 @@ index f231ea26..4ecc651b 100644
      return 0;
  }
  
-@@ -206,18 +491,19 @@ static void audio_backend_shutdown(void)
+@@ -206,18 +494,19 @@ static void audio_backend_shutdown(void)
  
  static void audio_backend_submit(const float* stereo_samples, u32 num_samples)
  {
@@ -722,7 +732,7 @@ index f231ea26..4ecc651b 100644
  }
  
  static void audio_backend_wait(void) { SDL_Delay(1); }
-@@ -230,6 +516,15 @@ static u32 audio_backend_queued_samples(void)
+@@ -230,6 +519,15 @@ static u32 audio_backend_queued_samples(void)
      return 0;
  }
  
@@ -738,7 +748,7 @@ index f231ea26..4ecc651b 100644
  #endif /* AUDIO_BACKEND_SDL2 */
  
  #if AUDIO_BACKEND_WASAPI
-@@ -436,10 +731,37 @@ static inline float ld_be_f32(const float* p)
+@@ -436,10 +734,37 @@ static inline float ld_be_f32(const float* p)
      return f;
  }
  
@@ -776,7 +786,7 @@ index f231ea26..4ecc651b 100644
  
      mutex_lock(&s_audio_mutex);
  
-@@ -473,15 +795,21 @@ static void audio_mix_one_block(void)
+@@ -473,15 +798,21 @@ static void audio_mix_one_block(void)
  
          /* Read one block at the current read_index */
          u32 block_idx = (u32)(port->read_index % nblock);
@@ -801,7 +811,7 @@ index f231ea26..4ecc651b 100644
                  char map[36]; u32 b;
                  for (b = 0; b < nblock && b < 32; b++) {
                      const float* bp = port->buffer + b * CELL_AUDIO_BLOCK_SAMPLES * nch;
-@@ -491,11 +819,10 @@ static void audio_mix_one_block(void)
+@@ -491,11 +822,10 @@ static void audio_mix_one_block(void)
                      map[b] = nz ? '#' : '.';
                  }
                  map[b] = 0;
@@ -815,7 +825,7 @@ index f231ea26..4ecc651b 100644
          /* AUDIO_RATE: a block with nothing in it right after one with sound is a hole, the guest's audio engine late
           * with it (what the mix then plays is a click or a gap, whatever the device does). */
          { static int hole_on = -1; static u32 prev_nz[CELL_AUDIO_PORT_MAX];
-@@ -504,7 +831,6 @@ static void audio_mix_one_block(void)
+@@ -504,7 +834,6 @@ static void audio_mix_one_block(void)
              for (u32 s2 = 0; s2 < CELL_AUDIO_BLOCK_SAMPLES * nch; s2 += 2) if (src[s2] != 0.0f) { nz = 1; break; }
              if (!nz && prev_nz[p]) g_audio_holes[p]++;
              prev_nz[p] = nz; } }
@@ -823,7 +833,7 @@ index f231ea26..4ecc651b 100644
  
          for (u32 s = 0; s < CELL_AUDIO_BLOCK_SAMPLES; s++) {
              float left, right;
-@@ -532,17 +858,37 @@ static void audio_mix_one_block(void)
+@@ -532,17 +861,37 @@ static void audio_mix_one_block(void)
              s_mix_buffer[s * 2 + 1] += right;
          }
  
@@ -863,7 +873,7 @@ index f231ea26..4ecc651b 100644
      }
  
      mutex_unlock(&s_audio_mutex);
-@@ -552,6 +898,137 @@ static void audio_mix_one_block(void)
+@@ -552,6 +901,145 @@ static void audio_mix_one_block(void)
          if (s_mix_buffer[i] > 1.0f) s_mix_buffer[i] = 1.0f;
          if (s_mix_buffer[i] < -1.0f) s_mix_buffer[i] = -1.0f;
      }
@@ -910,6 +920,14 @@ index f231ea26..4ecc651b 100644
 +            { static int s_b; if (!s_b) { s_b = 1; const char* e = getenv("RACACIT_AUDIO_BOOST"); const int lv = e ? atoi(e) : 1;
 +                if (lv) SetThreadPriority(GetCurrentThread(), lv >= 2 ? THREAD_PRIORITY_HIGHEST : THREAD_PRIORITY_ABOVE_NORMAL);
 +                fprintf(stderr, "[cellAudio] audio writer thread %lu, boost %d%c", (unsigned long)GetCurrentThreadId(), lv, 10); } }
++#elif defined(__APPLE__)
++            /* The same on Apple Silicon, where QoS decides P- or E-core: at the
++             * default class the job lost enough time under a 120 fps frame to
++             * finish 184-186 blocks a second, and the output stretched to make up
++             * the rest. Each thread that writes a block, once (SPURS moves jobs
++             * between lanes). RACACIT_AUDIO_BOOST=0 leaves the class alone. */
++            { static _Thread_local int s_b; if (!s_b) { s_b = 1; const char* e = getenv("RACACIT_AUDIO_BOOST");
++                if (!e || atoi(e)) pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0); } }
 +#endif
 +            s_blk_done[p][blk] = 1; s_port_done_seen[p] = 1;
 +        }
@@ -1001,7 +1019,7 @@ index f231ea26..4ecc651b 100644
  }
  
  /* ---------------------------------------------------------------------------
-@@ -560,6 +1037,15 @@ static void audio_mix_one_block(void)
+@@ -560,6 +1048,15 @@ static void audio_mix_one_block(void)
  
  static void audio_notify_event_queues(void)
  {
@@ -1017,7 +1035,7 @@ index f231ea26..4ecc651b 100644
      /* Push the audio-period event (data1 = CELL_AUDIO_EVENT_MIX = 0) to each
       * registered notify queue, so the game's audio loop (blocked on
       * sys_event_queue_receive) wakes once per block and writes the next one.
-@@ -567,12 +1053,67 @@ static void audio_notify_event_queues(void)
+@@ -567,12 +1064,67 @@ static void audio_notify_event_queues(void)
      for (int i = 0; i < CELL_AUDIO_MAX_NOTIFY_EVENT_QUEUES; i++) {
          if (!s_notify_queues[i].in_use) continue;
          uint32_t qid = sys_event_find_queue_by_key(s_notify_queues[i].key);
@@ -1087,7 +1105,7 @@ index f231ea26..4ecc651b 100644
  /* The loudest sample of the block just mixed (AUDIO_PEAK). */
  static float audio_mix_peak(void)
  {
-@@ -584,23 +1125,60 @@ static float audio_mix_peak(void)
+@@ -584,23 +1136,63 @@ static float audio_mix_peak(void)
      return pk;
  }
  
@@ -1147,6 +1165,9 @@ index f231ea26..4ecc651b 100644
 +     * little else: a late wake here is a late read index for the whole game. */
 +#ifdef _WIN32
 +    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
++#elif defined(__APPLE__)
++    { const char* e = getenv("RACACIT_AUDIO_BOOST");
++      if (!e || atoi(e)) pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0); }
 +#endif
 +#if AUDIO_BACKEND_SDL2
 +    ast_init(&s_st);
@@ -1156,7 +1177,7 @@ index f231ea26..4ecc651b 100644
      /* The device deadline is every few ms and the guest threads keep every
       * core busy: run this one ahead of them (MMCSS "Pro Audio" when the
       * service is there, the highest normal priority anyway). avrt.dll is
-@@ -612,6 +1190,7 @@ static unsigned __stdcall audio_mix_thread_func(void* arg)
+@@ -612,6 +1204,7 @@ static unsigned __stdcall audio_mix_thread_func(void* arg)
        DWORD task = 0;
        if (set_mm && !set_mm(L"Pro Audio", &task))
            fprintf(stderr, "[cellAudio] MMCSS Pro Audio unavailable (%lu)%c", (unsigned long)GetLastError(), 10); }
@@ -1164,7 +1185,7 @@ index f231ea26..4ecc651b 100644
  
      /* Pace to the device clock. The PS3 consumes one block every 5.33 ms;
       * the old Sleep(2)/Sleep(5) loop keyed on a queue depth the 1056-frame
-@@ -623,6 +1202,22 @@ static unsigned __stdcall audio_mix_thread_func(void* arg)
+@@ -623,6 +1216,22 @@ static unsigned __stdcall audio_mix_thread_func(void* arg)
      unsigned long long blocks = 0;
      while (s_mix_thread_running) {
          const int room = audio_backend_room();
@@ -1187,7 +1208,7 @@ index f231ea26..4ecc651b 100644
          if (room >= 0 && room < CELL_AUDIO_BLOCK_SAMPLES) { audio_backend_wait(); continue; }
  #if AUDIO_BACKEND_WASAPI
          /* Device queue under half a block: it is about to play silence (an
-@@ -650,7 +1245,7 @@ static unsigned __stdcall audio_mix_thread_func(void* arg)
+@@ -650,7 +1259,7 @@ static unsigned __stdcall audio_mix_thread_func(void* arg)
            if (_ap) { static unsigned _n = 0; const float pk = audio_mix_peak();
              if ((++_n % 200) == 0 || (pk > 0.001f && _n < 40))
                  fprintf(stderr, "[audio-peak] block#%u peak=%.4f\n", _n, pk); } }
@@ -1196,7 +1217,7 @@ index f231ea26..4ecc651b 100644
          audio_backend_submit(s_mix_buffer, CELL_AUDIO_BLOCK_SAMPLES);
          /* AUDIO_RATE=1: blocks mixed vs real time, and frames dropped. */
          { static int on = -1; if (on < 0) on = getenv("AUDIO_RATE") ? 1 : 0;
-@@ -675,43 +1270,28 @@ static unsigned __stdcall audio_mix_thread_func(void* arg)
+@@ -675,43 +1284,28 @@ static unsigned __stdcall audio_mix_thread_func(void* arg)
      }
  
      printf("[cellAudio] Mixing thread stopped\n");
@@ -1251,7 +1272,7 @@ index f231ea26..4ecc651b 100644
  
  #ifdef _WIN32
      s_mix_thread = (HANDLE)_beginthreadex(NULL, 0, audio_mix_thread_func,
-@@ -782,15 +1362,9 @@ s32 cellAudioInit(void)
+@@ -782,15 +1376,9 @@ s32 cellAudioInit(void)
      }
  
  
@@ -1270,7 +1291,7 @@ index f231ea26..4ecc651b 100644
      if (audio_start_mix_thread() < 0) {
          printf("[cellAudio] WARNING: Could not start mixing thread\n");
      }
-@@ -868,7 +1442,13 @@ s32 cellAudioPortOpen(const CellAudioPortParam* param, u32* portNum)
+@@ -868,7 +1456,13 @@ s32 cellAudioPortOpen(const CellAudioPortParam* param, u32* portNum)
      port->param.nChannel = nch;
      port->param.nBlock   = nblk;
      port->read_index  = 0;
@@ -1284,7 +1305,7 @@ index f231ea26..4ecc651b 100644
  
      /* Allocate the audio buffer in GUEST memory so portAddr/readIndexAddr are
       * real guest addresses (the game's mixer -- FMOD here -- writes PCM there
-@@ -973,6 +1553,10 @@ s32 cellAudioPortStop(u32 portNum)
+@@ -973,6 +1567,10 @@ s32 cellAudioPortStop(u32 portNum)
  
  s32 cellAudioGetPortBlockTag(u32 portNum, u64 blockNo, u64* tag)
  {
@@ -1295,7 +1316,7 @@ index f231ea26..4ecc651b 100644
      uint32_t tag_ea = (uint32_t)(uintptr_t)tag;
      if (!s_audio_initialized)
          return CELL_AUDIO_ERROR_NOT_INIT;
-@@ -990,8 +1574,8 @@ s32 cellAudioGetPortBlockTag(u32 portNum, u64 blockNo, u64* tag)
+@@ -990,8 +1588,8 @@ s32 cellAudioGetPortBlockTag(u32 portNum, u64 blockNo, u64* tag)
          mutex_unlock(&s_audio_mutex);
          return CELL_AUDIO_ERROR_PARAM;
      }
@@ -1306,7 +1327,7 @@ index f231ea26..4ecc651b 100644
      mutex_unlock(&s_audio_mutex);
  
      vm_write64(tag_ea, t);
-@@ -1000,6 +1584,10 @@ s32 cellAudioGetPortBlockTag(u32 portNum, u64 blockNo, u64* tag)
+@@ -1000,6 +1598,10 @@ s32 cellAudioGetPortBlockTag(u32 portNum, u64 blockNo, u64* tag)
  
  s32 cellAudioGetPortTimestamp(u32 portNum, u64 tag, u64* stamp)
  {
@@ -1317,7 +1338,7 @@ index f231ea26..4ecc651b 100644
      uint32_t stamp_ea = (uint32_t)(uintptr_t)stamp;
      if (!s_audio_initialized)
          return CELL_AUDIO_ERROR_NOT_INIT;
-@@ -1011,7 +1599,7 @@ s32 cellAudioGetPortTimestamp(u32 portNum, u64 tag, u64* stamp)
+@@ -1011,7 +1613,7 @@ s32 cellAudioGetPortTimestamp(u32 portNum, u64 tag, u64* stamp)
          return CELL_AUDIO_ERROR_PARAM;
  
      mutex_lock(&s_audio_mutex);
