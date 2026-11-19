@@ -139,5 +139,23 @@ static void racit_publish_menu_keyboard(ppu_context* ctx, uint32_t movie_offset 
     const bool mode_accepted = racit_menu_set_string(ctx, movie, procedure, toc, "_root.__rccit_mode",
                                                     accepted && keyboard ? "keyboard" : "controller");
     if (report) fprintf(stderr, "[menu-keycaps] frame movie=%08X table=%08X descriptor=%08X procedure=%08X toc=%08X keyboard=%d fields=%04X mode-accepted=%d\n", movie, table, descriptor, procedure, toc, keyboard, accepted_mask, mode_accepted);
+    /* RACACIT_PROMPT_CHECK=1 (tests): a line for each menu movie and each change of
+     * mode, so a headless run can tell every menu it opened got the keys. */
+    static int check = -1;
+    if (check < 0) { const char* e = getenv("RACACIT_PROMPT_CHECK"); check = e && *e == '1'; }
+    static std::atomic<uint64_t> seen[64];
+    const uint64_t now = (uint64_t)movie << 32 | (uint64_t)accepted_mask << 2 | (mode_accepted ? 2u : 0u) | (accepted && keyboard ? 1u : 0u);
+    bool fresh = false;
+    if (check) {
+        std::atomic<uint64_t>* slot = nullptr;
+        for (auto& s : seen) {   /* this movie's last state, or a free slot */
+            const uint64_t v = s.load(std::memory_order_relaxed);
+            if ((v >> 32) == movie || !v) { slot = &s; break; }
+        }
+        fresh = !slot || slot->exchange(now, std::memory_order_relaxed) != now;
+    }
+    if (fresh)
+        fprintf(stderr, "[menu-check] movie=%08X mode=%s fields=%04X/%04X mode-accepted=%d\n", movie,
+                accepted && keyboard ? "keyboard" : "controller", accepted_mask, (1u << index) - 1u, mode_accepted);
 }
 #endif
