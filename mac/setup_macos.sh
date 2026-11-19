@@ -4,7 +4,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RUNTIME="$ROOT/tools/ps3recomp"
-COMMIT=5244db92669b54831c6d3ebb7a96d58c4dbfa6df
+COMMIT=de4f090328ea08bef6b2f15caec0b85e343a7ece
 PATCH="$ROOT/patches/ps3recomp-0001-racacit-runtime-fixes.patch"
 
 [ "$(uname -s)" = Darwin ] || { echo "Run this setup on macOS."; exit 1; }

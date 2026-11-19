@@ -2341,6 +2341,7 @@ extern "C" void racacit_snd_play_hook(ppu_context* ctx, int tag)
     __sync_lock_release(&mu);
 }
 
+// Disc-only 1.20 fixes begin. (scripts/prepare_game_host.py drops them from the update 1.20 build: 1.20 has them natively.)
 /* ---------------------------------------------------------------------------
  * Update 1.20's hero part masks in the disc build
  *
@@ -2501,6 +2502,7 @@ extern "C" void racacit_u120_space_bits(ppu_context* ctx)
     memcpy(ctx->gpr, gpr, sizeof gpr); memcpy(ctx->fpr, fpr, sizeof fpr); memcpy(ctx->vr, vr, sizeof vr);
     ctx->cr = cr; ctx->lr = lr; ctx->ctr = ctr; ctx->xer = xer; ctx->fpscr = fpscr; ctx->vscr = vscr;
 }
+// Disc-only 1.20 fixes end.
 
 /* ---------------------------------------------------------------------------
  * Frame-rate unlock, step 1: the game clock (patch_lift step 27).
