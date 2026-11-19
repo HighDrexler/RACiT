@@ -1,6 +1,6 @@
 /* Include after ppu_recomp.h. Publish to the current screen's movie before
  * its normal frame update, outside Scaleform's ActionScript callbacks.
- * Only while a prepared menu archive is in use (RACACIT_MENU_ARCHIVE): the
+ * Only while a prepared menu archive is in use (game/menu_archive.cpp): the
  * original movies have no ActionScript that reads these fields.
  * The keyboard/controller decision is cellPad.c's racit_keyboard_prompts_active.
  */

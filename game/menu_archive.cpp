@@ -1,10 +1,12 @@
 /* Select the separately prepared menu archive for read-only game opens.
  *
  * RACACIT_MENU_ARCHIVE=<file> names an archive made by scripts/prepare_menu_keycaps.py.
- * RACACIT_MENU_KEYCAPS=1 (when RACACIT_MENU_ARCHIVE is unset) makes the same archive
- * here instead, the first time the game opens global_cached.psarc: the same steps as the
- * script, with the compiled actions built into the game. It's kept in a menu-keycaps
- * folder next to the settings file and reused while the original's size and time match. */
+ * Otherwise the game makes the same archive itself, the first time it opens
+ * global_cached.psarc: the same steps as the script, with the compiled actions built
+ * into the game. It's kept in a menu-keycaps folder next to the settings file and reused
+ * while the original's size and time match. On by default on desktops (issue #22: the
+ * menus showed controller buttons with a keyboard); RACACIT_MENU_KEYCAPS=0 turns it off.
+ * Android needs RACACIT_MENU_KEYCAPS=1. */
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -531,7 +533,12 @@ bool racit_menu_archive_init()
     const char* configured = std::getenv("RACACIT_MENU_ARCHIVE");
     if (!configured || !*configured) {
         const char* keycaps = std::getenv("RACACIT_MENU_KEYCAPS");
-        if (!keycaps || std::strcmp(keycaps, "1")) return true;
+#ifdef __ANDROID__
+        const bool wanted = keycaps && !std::strcmp(keycaps, "1");
+#else
+        const bool wanted = !keycaps || std::strcmp(keycaps, "0");
+#endif
+        if (!wanted) return true;
         const char* settings = std::getenv("RACACIT_SETTINGS_FILE");
         const char* hdd = std::getenv("PS3_HDD0_ROOT");
         std::filesystem::path base;
