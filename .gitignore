@@ -4,6 +4,8 @@ input/*
 *.ELF
 *.elf
 *.BIN
+# Not game data: the compiled menu actions (scripts/prepare_menu_keycaps.py)
+!game/menu_keycaps.actions.bin
 *.SELF
 *.self
 *.sprx
