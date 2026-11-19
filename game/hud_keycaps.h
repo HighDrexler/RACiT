@@ -131,7 +131,10 @@ static int face_key(const uint8_t* rgba, int w, int h)
         else hue = sb * 100 > sr * 55 ? 1 : 0;
     }
     fprintf(stderr, "[prompts] HUD face picture: font match %d (difference %ld), colour %ld,%ld,%ld -> %d%c", key, per, sr, sg, sb, hue, 10);
-    return hue;
+    /* The colour alone also "matched" freed memory the game had reused (a
+     * difference of 500+ from every glyph): only a picture that is near a
+     * glyph is a face button. */
+    return per >= 0 && per <= 150 ? hue : -1;
 }
 
 const int kFaceW = 52, kFaceCols = 13, kFacePitch = 208, kFaceBytes = 13 * kFacePitch;
@@ -172,9 +175,18 @@ static void hud_faces_sync(bool keyboard)
         if (!readable(f.entry, 32) || !readable(f.ea, kFaceBytes)) { f.ea = 0; continue; }
         const uint8_t* t = vm_base + f.entry;
         if (be16(t + 0x18) != kFaceW || be16(t + 0x1A) != kFaceW || t[6] != 0xA8) { f.ea = 0; continue; }   /* memory reused */
+        if (cellGcmResolveLocated(0, be32(t)) != f.ea) { f.ea = 0; f.have = 0; continue; }   /* the picture moved */
         uint8_t* tex = vm_base + f.ea;
         const bool is_mine = f.have && !memcmp(tex, f.mine, kFaceBytes);
         bool is_orig = f.have && !memcmp(tex, f.orig, kFaceBytes);
+        if (f.have && !is_mine && !is_orig) {
+            /* Something else is here now: the game freed the picture (a level's
+             * textures are staged in main memory, then moved) and reused the
+             * memory. Writing a key would corrupt that data: leave it until the
+             * next scan finds the picture again. */
+            fprintf(stderr, "[prompts] HUD face picture at %08X: changed, left alone until the next scan%c", f.ea, 10);
+            f.ea = 0; f.have = 0; continue;
+        }
         if (!is_mine && !is_orig) {
             if (!keyboard) continue;    /* made on first need, from the game's own picture */
             static uint8_t a[kFaceW * kFaceW * 4], b[kFaceW * kFaceW * 4];
@@ -197,6 +209,28 @@ static void hud_faces_sync(bool keyboard)
     }
 }
 
+/* Whether the "R2 + square" picture's left key is the font's R2 or R1 (the
+ * R1 swap), as hud_sync checks it: the picture is still there. */
+static bool tether_is_picture(const uint8_t* tex)
+{
+    if (!s_nfont) return false;
+    uint32_t pitch = 0;
+    const uint8_t* pg = font_page(s_font[0], &pitch);
+    if (!pg) return false;
+    for (const int fx : { (int)kR2x, (int)kR1x }) {
+        long err = 0;
+        for (int y = 0; y < kKeyH; y++)
+            for (int x = 0; x < kKeyW - 3; x++) {
+                uint8_t a[4], b[4];
+                dxt5_pixel(pg, pitch, fx + x, kRowY + y, a);
+                dxt5_pixel(tex, kHudPitch, x, y, b);
+                for (int k = 0; k < 4; k++) err += abs(a[k] - b[k]);
+            }
+        if (err <= 40L * kKeyH * (kKeyW - 3)) return true;
+    }
+    return false;
+}
+
 /* "R2 + [square]" (the Kinetic Tether prompt) with keys: the R2 picture's 87
  * columns and the square's 52 at its right edge become the R2 and SQUARE
  * keys; the "+" between them stays. `before` is the picture as the game
@@ -214,6 +248,7 @@ static void hud_keys_sync(bool keyboard)
     if (!readable(s_hud.entry, 32) || !readable(s_hud.ea, bytes)) return;   /* hud_sync drops it */
     const uint8_t* t = vm_base + s_hud.entry;
     if (be16(t + 0x18) != kHudW || be16(t + 0x1A) != kKeyH || t[6] != 0xA8) return;
+    if (cellGcmResolveLocated(0, be32(t)) != s_hud.ea) { s_hud.ea = 0; s_hudkb.have = 0; return; }   /* the picture moved */
     if (s_hudkb.ea != s_hud.ea) { s_hudkb.ea = s_hud.ea; s_hudkb.have = 0; }
     uint8_t* tex = vm_base + s_hud.ea;
     const bool is_keys = s_hudkb.have && !memcmp(tex, s_hudkb.keys, bytes);
@@ -223,6 +258,18 @@ static void hud_keys_sync(bool keyboard)
         return;
     }
     if (is_keys) return;
+    /* Only the picture itself gets keys: as the game left it before (with the
+     * R2 key, or the R1 one hud_sync draws), never memory the game has since
+     * freed and reused for something else. */
+    if (!(s_hudkb.have && !memcmp(tex, s_hudkb.before, bytes))) {
+        uint8_t cur[kKeyBytes];
+        hud_blocks(tex, cur);
+        const bool known = s_hud.have && (!memcmp(cur, s_hud.orig, sizeof cur) || !memcmp(cur, s_hud.mine, sizeof cur));
+        if (!known && !tether_is_picture(tex)) {
+            fprintf(stderr, "[prompts] HUD picture at %08X: not the \"R2 + square\" picture now, left alone until the next scan%c", s_hud.ea, 10);
+            s_hud.ea = 0; s_hudkb.have = 0; return;
+        }
+    }
     const int cols = kHudPitch / 16, w = cols * 4;
     static uint8_t a[(kHudPitch / 16 * 4) * kHudRows * 4 * 4], b[sizeof a];
     memcpy(s_hudkb.before, tex, bytes);
@@ -259,10 +306,19 @@ static void badge_keys_sync(bool keyboard)
     for (int i = 0; i < 2; i++) {
         Badge& bd = s_badge[i];
         auto& k = s_badgekb[i];
-        if (!bd.ea || !readable(bd.ea, kBadgeBytes)) { k.have = 0; continue; }
+        if (!bd.ea || !readable(bd.ea, kBadgeBytes) || !readable(bd.entry, 32)) { k.have = 0; continue; }
+        const uint8_t* t = vm_base + bd.entry;
+        if (be16(t + 0x18) != kBadgeW || be16(t + 0x1A) != kBadgeH || t[6] != 0xA8 ||
+            cellGcmResolveLocated(1, be32(t)) != bd.ea) { bd.ea = 0; bd.have = 0; k.have = 0; continue; }   /* memory reused or moved */
         if (k.ea != bd.ea) { k.ea = bd.ea; k.have = 0; }
         uint8_t* tex = vm_base + bd.ea;
         const bool is_keys = k.have && !memcmp(tex, k.keys, kBadgeBytes);
+        if (k.have && !is_keys && memcmp(tex, k.before, kBadgeBytes) &&
+            !(bd.have && (!memcmp(tex, bd.orig, kBadgeBytes) || !memcmp(tex, bd.mine, kBadgeBytes)))) {
+            /* Neither state of this badge: the memory was reused. Leave it. */
+            fprintf(stderr, "[prompts] quick select badge at %08X: changed, left alone until the next scan%c", bd.ea, 10);
+            bd.ea = 0; bd.have = 0; k.have = 0; continue;
+        }
         if (!keyboard) {
             if (is_keys) { memcpy(tex, k.before, kBadgeBytes);
                            fprintf(stderr, "[prompts] quick select badge at %08X: put back%c", bd.ea, 10); }
