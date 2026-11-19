@@ -1,4 +1,12 @@
 cmake_minimum_required(VERSION 3.20)
+# macOS: run on macOS 14 and later. Without a target the SDK's own version is
+# the minimum, so a build made on a newer Mac would not start on an older one.
+# APIs newer than the target stay in use behind @available /
+# __builtin_available checks (-Werror=unguarded-availability-new below).
+# Must be set before project().
+if(APPLE AND NOT CMAKE_OSX_DEPLOYMENT_TARGET AND NOT DEFINED ENV{MACOSX_DEPLOYMENT_TARGET})
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum macOS version" FORCE)
+endif()
 project(RaCACiTRecomp
     VERSION 0.1.0
     LANGUAGES C CXX
@@ -12,6 +20,10 @@ set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+if(APPLE)
+    # A call to an API newer than the deployment target must be guarded.
+    add_compile_options(-Werror=unguarded-availability-new)
+endif()
 
 # Prefer Ninja if available
 if(NOT CMAKE_GENERATOR MATCHES "Ninja" AND NOT DEFINED ENV{CMAKE_GENERATOR})
