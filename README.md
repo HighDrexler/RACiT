@@ -14,7 +14,7 @@ RACiT is Recomped A Crack in Time.
 
 RACiT is a project to bring **Ratchet & Clank: A Crack in Time** (the greatest game ever made) to Windows and Android through static recompilation. It takes the original PS3 code and converts it to native C/C++, using ps3recomp.
 
-The Android target is ARM64. There is also a Linux build for debugging (Android and Linux builds not yet public)
+The Android target is ARM64. There is also a Linux build for debugging (Linux build not yet public)
 
 ## Features
 
@@ -41,3 +41,5 @@ This is a work in progress.
 
 RACiT is an unofficial project and is not affiliated with Sony, Insomniac Games, or the game's rights holders.
 Saves are currently not transferable between windows and android. Feature will be added in the future to sync saves between devices
+
+As of 11/18 Android and MacOS versions are available, along with a windows build for Into The Nexus.
