@@ -35,7 +35,9 @@ def rows(name):
 def update_inputs(elf):
     profile = identify_profile(elf, os.environ.get('RACACIT_GAME_PROFILE', 'auto'),
                                require_buildable=False)
-    if profile['id'] == 'BCUS98124-1.00':
+    # A disc build: no remap. The European disc's tree is already at its own addresses
+    # (scripts/retarget.py rewrote them), so it is lifted as the disc's own too.
+    if profile['id'] in ('BCUS98124-1.00', 'BCES00511-1.00'):
         return None
     if profile['id'] != UPDATE:
         raise ValueError('No SPU input implementation for ' + profile['id'])

@@ -185,7 +185,23 @@ public:
     // Every settings.txt value also goes in the environment and the game's
     // EBOOT on the command line, so builds that only read the settings.txt
     // beside their exe (v65 and older) get them too.
-    std::string launch(void** process);   // Windows: a process HANDLE; macOS: a ChildProcess*
+    // prepare: the shader prepare instead (RACACIT_PREPARE=1: no window, no game, every
+    // pipeline in data\cache\pipelinelist.bin built on all cores, then it exits; Windows only).
+    std::string launch(void** process, bool prepare = false);   // Windows: a process HANDLE; macOS: a ChildProcess*
+
+    // Shaders (data\cache): pipelinelist.bin (the pipelines recorded), shaders.state (the game
+    // writes it each start: the cache ok / empty / refused, the graphics driver), shaders.stamp
+    // (each prepare: the build and the driver it was for, the counts), shaders.progress (the
+    // prepare's "state done total failed absent", rewritten while it runs).
+    int shader_variants() const;
+    std::map<std::string, std::string> shader_stamp() const;
+    std::map<std::string, std::string> shader_state() const;
+    std::string shader_build_tag() const;            // "v122": what a prepare stamps
+    enum { SH_READY, SH_NONE, SH_NEVER, SH_DRIVER, SH_BUILD };
+    int shader_status() const;
+    // state 0 starting, 1 reading, 2 building, 3 done, 4 failed, 5 updating shader text; false: none yet.
+    bool shader_progress(int out[5]) const;
+    fs::path prepare_log() const { return data() / L"prepare_log.txt"; }
     // The build's shader and pipeline caches into data\cache: copied when there are none,
     // else merged in once per build (launch does this).
     void seed_caches(const BuildInfo& b);

@@ -1454,10 +1454,64 @@ void Store::seed_caches(const BuildInfo& b)
     if (!merged && ok) write_text_atomic(mark, std::to_string(b.version) + "\r\n");   // else tried again next Play
 }
 
+// ---- shaders: the prepare's files in data\cache ---------------------------------------------
+static std::map<std::string, std::string> key_values(const fs::path& p)
+{
+    std::map<std::string, std::string> m;
+    const std::string t = read_text(p, 1u << 16);
+    size_t a = 0;
+    while (a < t.size()) {
+        size_t e = t.find('\n', a); if (e == std::string::npos) e = t.size();
+        const std::string line = t.substr(a, e - a);
+        const size_t eq = line.find('=');
+        if (eq != std::string::npos && eq > 0) m[trim(line.substr(0, eq))] = trim(line.substr(eq + 1));
+        a = e + 1;
+    }
+    return m;
+}
+
+int Store::shader_variants() const
+{
+    // pipelinelist.bin: "RSXPLS01", u32 record size, u32 version, then records of that size.
+    std::error_code ec;
+    const fs::path p = cache() / L"pipelinelist.bin";
+    const uint64_t size = fs::file_size(p, ec);
+    if (ec || size < 16) return 0;
+    std::ifstream f(p, std::ios::binary);
+    unsigned char h[16];
+    if (!f.read((char*)h, 16) || memcmp(h, kPlistMagic, 8)) return 0;
+    uint32_t rec; memcpy(&rec, h + 8, 4);
+    return rec ? (int)((size - 16) / rec) : 0;
+}
+
+std::map<std::string, std::string> Store::shader_stamp() const { return key_values(cache() / L"shaders.stamp"); }
+std::map<std::string, std::string> Store::shader_state() const { return key_values(cache() / L"shaders.state"); }
+std::string Store::shader_build_tag() const { const BuildInfo b = current_build(); return b.version ? "v" + std::to_string(b.version) : std::string(); }
+
+int Store::shader_status() const
+{
+    if (shader_variants() == 0) return SH_NONE;
+    const auto stamp = shader_stamp(), state = shader_state();
+    if (stamp.empty()) return SH_NEVER;
+    const auto drv = state.find("driver"), sdrv = stamp.find("driver");
+    const auto cs = state.find("cache");
+    if ((cs != state.end() && cs->second == "refused") ||
+        (drv != state.end() && (sdrv == stamp.end() || drv->second != sdrv->second))) return SH_DRIVER;
+    const auto b = stamp.find("build");
+    if (b == stamp.end() || b->second != shader_build_tag()) return SH_BUILD;
+    return SH_READY;
+}
+
+bool Store::shader_progress(int out[5]) const
+{
+    const std::string t = read_text(cache() / L"shaders.progress", 256);
+    return sscanf(t.c_str(), "%d %d %d %d %d", &out[0], &out[1], &out[2], &out[3], &out[4]) == 5;
+}
+
 // ---- launch -----------------------------------------------------------------------------
 static std::wstring fwd(const fs::path& p) { std::wstring s = p.wstring(); for (auto& c : s) if (c == L'\\') c = L'/'; return s; }
 
-std::string Store::launch(void** process)
+std::string Store::launch(void** process, bool prepare)
 {
     *process = nullptr;
     reload();
@@ -1467,8 +1521,8 @@ std::string Store::launch(void** process)
     if (!b.version) return "No build installed: reinstall the launcher.";
     std::error_code ec;
     fs::create_directories(hdd(), ec); fs::create_directories(cache(), ec);
-    seed_caches(b);
-    if (ini.get("backup_on_play", "1") != "0") {
+    seed_caches(b);   // a prepare too: a new build's shipped pipelines are then built as well
+    if (!prepare && ini.get("backup_on_play", "1") != "0") {
         /* A backup that cannot be made must not keep the game from starting
          * (GitHub #5: "backup save failed, game won't open"); the reason goes
          * to logs\backup_failed.txt. */
@@ -1480,7 +1534,7 @@ std::string Store::launch(void** process)
             }
         }
     }
-    rotate_log();
+    if (!prepare) rotate_log();
 
     std::map<std::wstring, std::wstring> set;
     {   // settings.txt as environment (the game's own reading of it does the same)
@@ -1504,7 +1558,12 @@ std::string Store::launch(void** process)
     set[L"RSX_SHADER_CACHE"] = (cache() / L"shadercache.bin").wstring();
     set[L"RSX_PIPELINE_CACHE"] = (cache() / L"pipelinecache.bin").wstring();
     set[L"RSX_PIPELINE_LIST"] = (cache() / L"pipelinelist.bin").wstring();
-    set[L"RACACIT_LOG_FILE"] = log().wstring();
+    set[L"RACACIT_LOG_FILE"] = (prepare ? prepare_log() : log()).wstring();
+    if (prepare) {
+        set[L"RACACIT_PREPARE"] = L"1";
+        set[L"RACACIT_PREPARE_TAG"] = widen(shader_build_tag());
+        fs::remove(cache() / L"shaders.progress", ec);
+    }
     set[L"RACACIT_LAUNCHER"] = L"1";
     set[L"RACIT_GAME_VERSION"] = widen(g_launcher_version);   // code mods' racit_api.game_version
     std::wstring modlist;
@@ -1522,6 +1581,7 @@ std::string Store::launch(void** process)
     if (!codelist.empty()) set[L"RACACIT_CODE_MODS"] = codelist;
 
 #ifdef __APPLE__
+    if (prepare) return "Preparing shaders is not available on this system yet.";
     return launch_mac(g, b, set, process);
 #else
     std::wstring env;
@@ -1557,11 +1617,15 @@ std::string Store::launch(void** process)
     std::wstring cl = L"\"" + exe.wstring() + L"\" \"" + eboot.wstring() + L"\"";
     // An older build writes log.txt beside itself: clear the last one so a stale
     // file is never taken for this session's.
-    fs::remove(b.dir / L"log.txt", ec);
-    launched_dir = b.dir;
+    if (!prepare) {
+        fs::remove(b.dir / L"log.txt", ec);
+        launched_dir = b.dir;
+    }
     STARTUPINFOW si{}; si.cb = sizeof si;
     PROCESS_INFORMATION pi{};
-    if (!CreateProcessW(exe.c_str(), cl.data(), nullptr, nullptr, FALSE, CREATE_UNICODE_ENVIRONMENT, env.data(),
+    // The prepare uses every core: below normal, so the PC stays usable while it runs.
+    const DWORD flags = CREATE_UNICODE_ENVIRONMENT | (prepare ? BELOW_NORMAL_PRIORITY_CLASS : 0);
+    if (!CreateProcessW(exe.c_str(), cl.data(), nullptr, nullptr, FALSE, flags, env.data(),
                         b.dir.c_str(), &si, &pi))
         return "Could not start " + u8(exe) + " (error " + std::to_string(GetLastError()) + ").";
     CloseHandle(pi.hThread);

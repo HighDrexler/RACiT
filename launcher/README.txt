@@ -48,6 +48,12 @@ SET UP
 4. Play. Settings (display, graphics, controller) can be changed any time
    from the main menu, or in the game: F1, the touchpad on a DualSense, or
    hold Select (View) for a moment on any other controller.
+SHADERS (Windows)
+The game builds each graphics pipeline the first time it needs it; one that is
+not ready yet can show for a moment in the wrong colours. Shaders on the main
+menu builds every recorded one on all processor cores before you play
+(seconds to a few minutes). The launcher offers it once by itself after a new
+build or a graphics driver update.
 ON A MAC (Apple Silicon, macOS)
 The same launcher and the same steps, in the Mac release (RACiT-<version>-macos):
   1. Unzip it anywhere (about 27 GB free on that drive) and open "RaCACiT Launcher.app".

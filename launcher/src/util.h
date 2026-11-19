@@ -31,6 +31,7 @@ std::string file_date(const fs::path& p);        // 2026-10-24 07:15
 struct Progress {
     std::atomic<uint64_t> done{0}, total{0};
     std::atomic<bool> cancel{false};
+    std::atomic<bool> counts{false};             // done / total are counts, not bytes
     void set_line(const std::string& s) { std::lock_guard<std::mutex> l(m_); line_ = s; }
     std::string line() { std::lock_guard<std::mutex> l(m_); return line_; }
 private:

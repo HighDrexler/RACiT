@@ -238,6 +238,7 @@ extern "C" int  rsx_null_backend_pump_messages(void);
 #  endif
 #  if defined(RACACIT_HAVE_VULKAN)
 extern "C" int  rsx_vulkan_backend_init(uint32_t w, uint32_t h, const char* title);
+extern "C" int  rsx_vulkan_prepare_shaders(void);
 extern "C" void rsx_vulkan_backend_present(void);
 extern "C" int  rsx_host_ui_modal(void);
 extern "C" unsigned long long g_rt_drain_total_us, g_rt_present_total_us;
@@ -1446,8 +1447,16 @@ static void windows_setup(int* argc, char*** argv)
      * update made pipelinecache.bin useless (rsx_vulkan_backend.c). */
     snprintf(path, sizeof path, "%s\\pipelinelist.bin", dir);
     if (!getenv("RSX_PIPELINE_LIST")) _putenv_s("RSX_PIPELINE_LIST", path);
+    /* What each pipeline's shader text was made from, so the launcher's
+     * "Prepare shaders" can make it again when a new build changed the
+     * translator (rsx_vulkan_backend.c, programlist.bin). */
+    snprintf(path, sizeof path, "%s\\programlist.bin", dir);
+    if (!getenv("RSX_PROGRAM_LIST")) _putenv_s("RSX_PROGRAM_LIST", path);
 
     if (*argc >= 2) return;
+    /* The shader prepare (RACACIT_PREPARE=1) needs no game: no search, no
+     * "Could not find the game" box. */
+    if (getenv("RACACIT_PREPARE") && getenv("RACACIT_PREPARE")[0] == '1') return;
 
     const char* cands[4] = { NULL, NULL, NULL, NULL };
     char c0[MAX_PATH * 3], c1[MAX_PATH * 3], c2[MAX_PATH * 3];
@@ -1590,10 +1599,18 @@ int main(int argc, char** argv)
 #if defined(_WIN32) && (defined(__x86_64__) || defined(_M_X64))
     if (!racacit_cpu_ok()) { racacit_cpu_refuse(); return 1; }
 #endif
+#if defined(_WIN32) && defined(RACACIT_HAVE_VULKAN)
+    /* RACACIT_PREPARE=1 (the launcher's "Prepare shaders"): no window -- the
+     * launcher draws the progress from shaders.progress. */
+    const int prepare_only = getenv("RACACIT_PREPARE") && getenv("RACACIT_PREPARE")[0] == '1';
+    if (prepare_only) _putenv_s("PS3RECOMP_VK_WINDOW", "0");
+#else
+    const int prepare_only = 0;
+#endif
 #if defined(_WIN32)
     windows_setup(&argc, &argv);
 #endif
-    if (argc < 2) {
+    if (argc < 2 && !prepare_only) {
         printf("usage: %s <PPU ELF>\n", argv[0]);
         return 2;
     }
@@ -1654,6 +1671,25 @@ int main(int argc, char** argv)
         ppu_inl_clip_hole = 1;
     }
 
+#if defined(_WIN32) && defined(RACACIT_HAVE_VULKAN)
+    /* The prepare: Vulkan only, no game -- every pipeline pipelinelist.bin
+     * holds built into the cache on all cores (rsx_vulkan_prepare_shaders),
+     * shaders.stamp written, then out. */
+    if (prepare_only) {
+        const char* t = getenv("PS3_TITLE");
+        if (rsx_backend_init(WINDOW_WIDTH, WINDOW_HEIGHT, t ? t : "RACiT") != 0) {
+            fprintf(stderr, "[prepare] Vulkan init failed%c", 10);
+            fflush(stdout); fflush(stderr);
+            racacit_log_flush();
+            _exit(2);
+        }
+        const int r = rsx_vulkan_prepare_shaders();
+        fprintf(stderr, "[prepare] finished (%d)%c", r, 10);
+        fflush(stdout); fflush(stderr);
+        racacit_log_flush();
+        _exit(r == 0 ? 0 : 1);
+    }
+#endif
     if (!racit_menu_archive_init()) return 1;
     uint32_t entry = ppu_load_elf(argv[1]);
     if (!entry) {

@@ -1075,6 +1075,127 @@ static void stop_game()
     confirm("Stop the game?", "Unsaved progress is lost.", "Stop it", [] { if (game_proc) TerminateProcess(game_proc, 1); });
 }
 
+// ---- shaders: Prepare shaders (the game's RACACIT_PREPARE start) --------------------------------
+// The game builds each Vulkan pipeline in the background the first time it is needed, and a draw
+// that comes up before its pipeline is ready shows briefly in the wrong colours. The prepare starts
+// the game without a window and builds every pipeline recorded in data\cache\pipelinelist.bin on
+// all cores, then exits (rsx_vulkan_prepare_shaders); where a new build changed the shader text, it
+// makes the text again from programlist.bin first. Windows, A Crack in Time only.
+static bool shaders_here()
+{
+#ifdef __APPLE__
+    return false;
+#else
+    return S->prof == &kRacitProfile;
+#endif
+}
+static const char* const k_sh_short[] = { "Ready", "None recorded yet", "Not prepared yet",
+                                          "Graphics driver changed: prepare again", "New build: prepare again" };
+static void shaders_screen();
+static void prepare_shaders()
+{
+#ifndef __APPLE__
+    if (prog || game_proc) return;
+    void* h = nullptr;
+    const std::string r = S->launch(&h, true);
+    if (!r.empty()) { message("Cannot prepare shaders", r); return; }
+    HANDLE proc = (HANDLE)h;
+    Store* st = S;
+    run_task("Preparing shaders", [proc, st](Progress* p) -> std::string {
+        p->counts = true;
+        p->set_line("Starting...");
+        for (;;) {
+            if (p->cancel) {
+                TerminateProcess(proc, 1); WaitForSingleObject(proc, 5000); CloseHandle(proc);
+                return "Stopped. What was built so far is kept: prepare again to finish.";
+            }
+            const DWORD w = WaitForSingleObject(proc, 200);
+            int pr[5];
+            if (st->shader_progress(pr)) {
+                if (pr[0] == 5) {
+                    p->set_line("Updating the shaders for this build: " + std::to_string(pr[1]) + " of " + std::to_string(pr[2]) + " programs");
+                    p->total = (uint64_t)std::max(0, pr[2]); p->done = (uint64_t)std::max(0, pr[1]);
+                } else if (pr[0] == 2 || pr[0] == 3) {
+                    p->set_line("Building pipelines on every processor core" +
+                                (pr[3] ? ", " + std::to_string(pr[3]) + " failed" : std::string()));
+                    p->total = (uint64_t)std::max(0, pr[2]); p->done = (uint64_t)std::max(0, pr[1]);
+                } else {
+                    p->set_line("Reading the shader cache..."); p->total = 0; p->done = 0;
+                }
+            }
+            if (w != WAIT_TIMEOUT) break;
+        }
+        DWORD code = 1; GetExitCodeProcess(proc, &code); CloseHandle(proc);
+        if (code == 0) return {};
+        if (code == 2) return "Vulkan could not start, so nothing was built. Details: data\\prepare_log.txt.";
+        char hx[32]; snprintf(hx, sizeof hx, "0x%08lX", (unsigned long)code);
+        return std::string(code == 1 ? std::string("Some pipelines could not be built") : std::string("The prepare ended with code ") + hx) +
+               ". Details: data\\prepare_log.txt.";
+    }, [](const std::string& r) {
+        if (!r.empty()) { message("Prepare shaders", r); refresh(); return; }
+        const auto stamp = S->shader_stamp();
+        auto v = [&](const char* k) { auto it = stamp.find(k); return it == stamp.end() ? std::string("?") : it->second; };
+        std::string t = v("built") + " of " + v("variants") + " pipelines built in " + v("seconds") + " s on " + v("threads") + " threads.";
+        if (v("stages_changed") != "0" && v("stages_changed") != "?") t += " " + v("stages_changed") + " shaders were updated for this build first.";
+        message("Shaders ready", t);
+        refresh();
+    });
+#endif
+}
+
+static void shaders_screen()
+{
+    const int st = S->shader_status();
+    const int n = S->shader_variants();
+    scr = Screen(); scr.title = "Shaders"; scr.subtitle = ""; scr.back = [] { set_screen(home); };
+    static const char* const said[] = {
+        "Ready: every recorded pipeline is built for this graphics driver and this build.",
+        "Nothing recorded yet. The game records each pipeline the first time it draws it: play a while, then come back.",
+        "Not prepared on this PC yet. Preparing builds them now, so nothing shows in the wrong colours the first time it is drawn.",
+        "The graphics driver changed since the last prepare: its pipelines have to be built again.",
+        "Prepared for another build. Prepare again for this one." };
+    scr.info.push_back({ "Now", said[st], st == Store::SH_READY ? col::TEXT_GOOD : st == Store::SH_NONE ? col::TEXT_DIM : col::ORANGE });
+    scr.info.push_back({ "Recorded", std::to_string(n) + (n == 1 ? " pipeline" : " pipelines") });
+    const auto stamp = S->shader_stamp();
+    if (!stamp.empty()) {
+        auto v = [&](const char* k) { auto it = stamp.find(k); return it == stamp.end() ? std::string("?") : it->second; };
+        std::string t = v("built") + " of " + v("variants") + " built in " + v("seconds") + " s on " + v("threads") + " threads (" + v("build") + ")";
+        if (v("absent") != "0" && v("absent") != "?") t += ", " + v("absent") + " without their shaders";
+        if (v("failed") != "0" && v("failed") != "?") t += ", " + v("failed") + " failed";
+        scr.info.push_back({ "Last prepare", t, col::TEXT_DIM });
+    }
+    scr.info.push_back({ "What it does", "Starts the game without its window and builds every recorded pipeline on all processor cores, "
+                         "then closes. Without it the game builds them in the background while you play. Takes from seconds to a few minutes.", col::TEXT_DIM });
+    if (n > 0) {
+        Item p = button("Prepare shaders", game_proc ? "Not while the game is running" : st == Store::SH_READY ? "Build them again anyway" : "Build them now",
+                        prepare_shaders, !game_proc);
+        p.accent = st != Store::SH_READY; scr.items.push_back(p);
+    }
+    scr.items.push_back(button("Back", "", [] { set_screen(home); }));
+}
+
+// Once per build and graphics driver (launcher.ini shaders_offered): a new build, a new driver, or
+// never prepared -- asked when the launcher opens and after the game ends.
+static bool g_sh_checked;
+static void maybe_offer_prepare()
+{
+    if (!shaders_here() || prog || game_proc || ov.type != Overlay::NONE || !S->game().ok) return;
+    const int st = S->shader_status();
+    if (st != Store::SH_NEVER && st != Store::SH_DRIVER && st != Store::SH_BUILD) return;
+    const auto state = S->shader_state();
+    const auto it = state.find("driver");
+    const std::string key = S->shader_build_tag() + "|" + (it == state.end() ? std::string() : it->second);
+    if (S->ini.get("shaders_offered") == key) return;
+    S->ini.put("shaders_offered", key); S->ini.save();
+    const char* why = st == Store::SH_DRIVER ? "The graphics driver changed since the shaders were last prepared."
+                    : st == Store::SH_BUILD ? "This is a new build of the game."
+                    : "The shaders have not been prepared on this PC yet.";
+    const int n = S->shader_variants();
+    confirm("Prepare shaders?", std::string(why) + " Preparing builds all " + std::to_string(n) + " recorded pipelines now (seconds to a few "
+            "minutes), so nothing shows in the wrong colours the first time it is drawn. You can also do it later under Shaders.",
+            "Prepare", prepare_shaders);
+}
+
 static void more_screen();
 static void home()
 {
@@ -1105,6 +1226,7 @@ static void home()
     }
     if (show_update) scr.items.push_back(button("Update available", "See what is new, then download and install it", open_updates));
     scr.items.push_back(button("Settings", "Display, graphics, controller", [] { set_screen(settings_screen); }));
+    if (shaders_here() && gi.ok) scr.items.push_back(button("Shaders", k_sh_short[S->shader_status()], [] { set_screen(shaders_screen); }));
     scr.items.push_back(button("Saves", "Back up, export, restore", [] { set_screen(saves_screen); }));
     scr.items.push_back(button("More", "Your game, mods, logs", [] { set_screen(more_screen); }));
     scr.items.push_back(button("Quit", "", [] { PostMessageW(g_hwnd, WM_CLOSE, 0, 0); }));
@@ -1162,6 +1284,7 @@ static void game_exited(DWORD code)
     ShowWindow(g_hwnd, SW_RESTORE);
     SetForegroundWindow(g_hwnd);
     pad_open();
+    g_sh_checked = false;   // the game may have found a new driver: offer the prepare (once)
     if (scr.title == S->prof->name) set_screen(home);   // back on Play
     else refresh();
 }
@@ -1506,7 +1629,7 @@ static void draw_overlay()
     if (ov.type == Overlay::PROGRESS) {
         const uint64_t d = prog->done, t = prog->total;
         text = prog->line();
-        if (t) text += "\n" + format_size(d) + " of " + format_size(t);
+        if (t) text += "\n" + (prog->counts ? std::to_string(d) + " of " + std::to_string(t) : format_size(d) + " of " + format_size(t));
     }
     if (ov.type == Overlay::CAPTURE) {
         const ULONGLONG now = GetTickCount64();
@@ -1711,6 +1834,10 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
         if (ov.type == Overlay::CAPTURE && GetTickCount64() > ov.deadline) { ov.type = Overlay::NONE; redraw(); }
         pad_poll();
         script_poll();
+        if (!g_sh_checked && GetTickCount64() - t0 > 2500 && ov.type == Overlay::NONE && !prog && !game_proc) {
+            g_sh_checked = true;
+            maybe_offer_prepare();
+        }
         if (!IsIconic(h) && IsWindowVisible(h)) {
             // 30 Hz only while the launcher is in front and the game is not running (the
             // focus glow, scrolling, typing); otherwise once a second for the clock, so a
