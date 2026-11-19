@@ -304,6 +304,35 @@ extern "C" unsigned ppu_boot_frames_presented(void)
     return (unsigned)g_frames_presented;
 }
 
+#ifdef __APPLE__
+/* RACACIT_LOAD_STATS=1 (macOS): "[load-stats]" lines with ms since the process
+ * started -- the renderer's init, the first event pump, every frame-clock pass
+ * that went 100 ms or more without pumping window events (macOS shows the
+ * beach ball after ~2 s of that), the main menu and each level change. */
+#include <sys/sysctl.h>
+#include <sys/time.h>
+extern "C" int racacit_load_stats_on(void)
+{
+    static int on = -1;
+    if (on < 0) { const char* e = getenv("RACACIT_LOAD_STATS"); on = (e && *e == '1') ? 1 : 0; }
+    return on;
+}
+extern "C" double racacit_since_start_ms(void)
+{
+    static double start = -1.0;
+    struct timeval tv; gettimeofday(&tv, NULL);
+    if (start < 0.0) {
+        struct kinfo_proc kp; size_t len = sizeof kp; int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, (int)getpid() };
+        start = sysctl(mib, 4, &kp, &len, NULL, 0) == 0
+            ? kp.kp_proc.p_starttime.tv_sec * 1e3 + kp.kp_proc.p_starttime.tv_usec / 1e3
+            : tv.tv_sec * 1e3 + tv.tv_usec / 1e3;
+    }
+    return tv.tv_sec * 1e3 + tv.tv_usec / 1e3 - start;
+}
+#define LOAD_STAT(...) do { if (racacit_load_stats_on()) { fprintf(stderr, "[load-stats] %8.0f ms: ", racacit_since_start_ms()); fprintf(stderr, __VA_ARGS__); fputc(10, stderr); } } while (0)
+#else
+#define LOAD_STAT(...) do { } while (0)
+#endif
 static unsigned long long rt_now_us(void);
 static unsigned long long s_rt_present_us;
 extern "C" void ps3_tl_at(unsigned long long t, char ev, uint32_t a, uint32_t b);
@@ -320,6 +349,13 @@ static void present_guest_frame(void)
      * than a volatile ++, which on arm64 is neither atomic nor a fence. */
     InterlockedIncrement(&g_frames_presented);
     racit_mods_frame();   /* code mods' frame/level events (mods.cpp) */
+#ifdef __APPLE__
+    { static unsigned long long last;   /* RACACIT_LOAD_STATS: presents 100 ms or more apart */
+      const unsigned long long now = rt_now_us();
+      if (last && now - last >= 100000 && racacit_load_stats_on())
+          LOAD_STAT("frame %.0f ms (presents >= 100 ms apart)", (now - last) / 1e3);
+      last = now; }
+#endif
 }
 
 /* The FIFO walker runs on frame_clock. A guest thread that has just moved
@@ -597,7 +633,9 @@ static DWORD WINAPI frame_clock(LPVOID)
 #endif
 
     { char _hb[160]; snprintf(_hb, sizeof _hb, "[hosttid] %lu rsx frame clock / FIFO walker%c", (unsigned long)GetCurrentThreadId(), 10); fputs(_hb, stderr); }
+    LOAD_STAT("renderer init starts");
     int rsx_ok = (rsx_backend_init(WINDOW_WIDTH, WINDOW_HEIGHT, title) == 0);
+    LOAD_STAT("renderer init done");
     fprintf(stderr, "[rsx] %s backend init %s\n", RSX_BACKEND_NAME,
             rsx_ok ? "OK -- window open" : "FAILED");
 
@@ -769,6 +807,19 @@ static DWORD WINAPI frame_clock(LPVOID)
             const unsigned long long pnow = rt_now_us();
             const int pump = pnow - s_pump_us >= 4000;
             if (pump) s_pump_us = pnow;
+#ifdef __APPLE__
+            if (racacit_load_stats_on()) {
+                static unsigned long long s_pass_us, s_pres0, s_drain0; static double s_worst;
+                if (!s_pass_us) LOAD_STAT("first event pump");
+                else if (pnow - s_pass_us >= 100000) {
+                    const double ms = (pnow - s_pass_us) / 1e3;
+                    if (ms > s_worst) s_worst = ms;
+                    LOAD_STAT("main thread %.0f ms without pumping events (present %.0f, FIFO drain %.0f; longest so far %.0f)",
+                              ms, (g_rt_present_total_us - s_pres0) / 1e3, (g_rt_drain_total_us - s_drain0) / 1e3, s_worst);
+                }
+                s_pass_us = pnow; s_pres0 = g_rt_present_total_us; s_drain0 = g_rt_drain_total_us;
+            }
+#endif
             if (pump && rsx_backend_pump() != 0) {
                 /* Window closed: quit. Guest threads are still running and
                  * an orderly exit() would wait on them, so leave at once. */
@@ -1585,6 +1636,9 @@ extern "C" int racacit_entry(void)
 
 int main(int argc, char** argv)
 {
+#ifdef __APPLE__
+    LOAD_STAT("main() entered");
+#endif
 #if defined(__APPLE__) && defined(RACACIT_HAVE_VULKAN)
     /* Preserve IEEE shader guards before SDL or the Vulkan loader starts.
      * Pending asynchronous pipelines currently skip draws in this backend. */
