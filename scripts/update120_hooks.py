@@ -5,6 +5,29 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+def drop_old_preamble(source, preamble, row_includes):
+    # A chunk patched with an earlier recipe carries that recipe's preamble
+    # (a hook's declaration may have changed since). Two preambles would
+    # redefine RacJbFrame and can conflict, so the old one goes: its marker
+    # line and the declarations that follow it, but not a hook row's own
+    # include lines.
+    marker = preamble.split('\n', 1)[0] + '\n'
+    start = source.find(marker)
+    if start < 0:
+        return source
+    end = start + len(marker)
+    while True:
+        line_end = source.find('\n', end)
+        if line_end < 0:
+            break
+        line = source[end:line_end]
+        if line in row_includes or not (line.startswith('extern "C"') or line == '#include "ps3_setjmp.h"'
+                                        or line.startswith('typedef struct RacJbFrame')):
+            break
+        end = line_end + 1
+    return source[:start] + source[end:]
+
+
 # This consumes source edits; executable bytes and generated game functions
 # remain local to the person building their own copy.
 def apply_update120_hooks(recomp, elf):
@@ -23,6 +46,7 @@ def apply_update120_hooks(recomp, elf):
         raise ValueError('Update hooks require the exact BCUS98124 1.20 executable')
 
     hooks = {row['function']: row for row in recipe['hooks']}
+    row_includes = {line for row in recipe['hooks'] for line in row.get('includes', [])}
     if len(hooks) != len(recipe['hooks']):
         raise ValueError('Duplicate update hook address')
     seen = set()
@@ -70,6 +94,7 @@ def apply_update120_hooks(recomp, elf):
             source = source[:position] + include + '\n' + source[position:]
         if replacements or missing_includes:
             if preamble not in source:
+                source = drop_old_preamble(source, preamble, row_includes)
                 include = source.index('\n', source.index('#include')) + 1
                 source = source[:include] + preamble + source[include:]
             pending[path] = source
