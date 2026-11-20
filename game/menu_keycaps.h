@@ -47,6 +47,13 @@ static void racit_menu_key_label(const char* binding, const char* fallback,
         {"Left Ctrl", "CTRL"}, {"Right Ctrl", "CTRL"},
         {"Left Shift", "SHIFT"}, {"Right Shift", "SHIFT"},
     };
+    /* The comma key: "Comma", or (settings saved before that) "," on its own
+     * as the first entry, since "," also separates the entries. */
+    if ((!strncmp(value, "Comma", 5) && (!value[5] || value[5] == ',')) ||
+        (value[0] == ',' && (!value[1] || value[1] == ','))) {
+        snprintf(label, 16, ",");
+        return;
+    }
     const size_t length = strcspn(value, ",");
     for (const Alias& alias : aliases) {
         if (strlen(alias.name) == length && !memcmp(value, alias.name, length)) {

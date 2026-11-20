@@ -90,6 +90,19 @@ class CommaBinding(unittest.TestCase):
             '[Comma]|[54]', '[A][Comma]|[4][54]', '[Comma]|[54]', '[A][Comma]|[4][54]',
             '[Comma][B]|[54][5]', '[A][Comma][B]|[4][54][5]', '[A][B]|[4][5]', '|'])
 
+    def test_menu_label_shows_the_comma_key(self):
+        menu = (ROOT / 'game' / 'menu_keycaps.h').read_text(encoding='utf-8')
+        label = function(menu, 'static void racit_menu_key_label(')
+        src = ('#include <cstdio>\n#include <cstdlib>\n#include <cstring>\n' + label +
+               'int main(int argc, char** argv) { for (int i = 1; i < argc; i++) { setenv("RACACIT_BIND_X", argv[i], 1);'
+               ' char l[16]; racit_menu_key_label("X", "Q", l); printf("%s\\n", l); } }\n')
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / 'm.cpp').write_text(src)
+            subprocess.run([CXX, '-std=c++17', '-o', str(Path(d) / 'm'), str(Path(d) / 'm.cpp')], check=True)
+            out = subprocess.run([str(Path(d) / 'm'), 'Comma', 'Comma,A', ',', ',,A', 'A,,', 'Space'],
+                                 check=True, capture_output=True, text=True).stdout.split()
+        self.assertEqual(out, [',', ',', ',', ',', 'A', 'SPC'])
+
     def test_launcher_saves_comma_by_name(self):
         app = (ROOT / 'launcher' / 'src' / 'app.cpp').read_text(encoding='utf-8')
         self.assertIn('SDL_SCANCODE_COMMA ? std::string("Comma")', app)
