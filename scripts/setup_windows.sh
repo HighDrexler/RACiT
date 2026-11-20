@@ -31,8 +31,8 @@ pin glslang-src    KhronosGroup/glslang        2fbed5e1fb43a1c480fe020e3bb686a31
 pin zlib           madler/zlib                 767c4c947852e143f582c85f14cf573411df1b35
 pin SDL2-src       libsdl-org/SDL              release-2.32.10
 
-# The runtime patch, swapped whenever it changed (scripts/update_runtime_patch.sh keeps your
-# own edits there; --reset throws them away instead). --ignore-whitespace inside: some of
+# The runtime patch, swapped whenever it changed (scripts/update_runtime_patch.sh). Your own
+# edits there stop it; --reset throws them away instead. --ignore-whitespace inside: some of
 # ps3recomp's files mix line endings.
 bash scripts/update_runtime_patch.sh "$ROOT/tools/ps3recomp" "$ROOT/patches/ps3recomp-0001-racacit-runtime-fixes.patch" "${1:-}"
 

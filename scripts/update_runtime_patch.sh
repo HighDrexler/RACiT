@@ -1,89 +1,101 @@
 #!/usr/bin/env bash
 # update_runtime_patch.sh RUNTIME PATCH [--reset]: put this repository's runtime patch into the
-# pinned runtime checkout (tools/ps3recomp), and swap it when it changed.
-# Used by scripts/setup_windows.sh and mac/setup_macos.sh.
+# pinned runtime checkout (tools/ps3recomp). Used by scripts/setup_windows.sh and
+# mac/setup_macos.sh. The pin is the runtime's checked-out commit (the setups check it).
 #
-# RUNTIME/.racit-patch holds the hash of the patch applied, RUNTIME/.racit-patch.applied a copy
-# of it. When the patch changed, the old one (that copy, or else a version from this
-# repository's history of the patch file, for a checkout set up before the copy was kept) is
-# swapped for the new one, so the builder's own edits in the runtime stay. The swap is tried
-# first on a copy of the files the two patches touch; the runtime is only changed when it
-# works, so on failure the old patch stays applied and the stamp as it was, and running this
-# again after resolving the conflict picks up from there. A runtime with no patch in it yet
-# gets the new one over whatever local edits it has, if it applies. When nothing works it
-# stops and says why; --reset instead resets the runtime to its pinned commit first, which
-# throws away every change in it.
+# - The runtime holds exactly this patch and nothing else: up to date.
+# - It holds nothing: the patch is applied.
+# - It holds exactly a patch this repository had before (the copy kept in RUNTIME/.git, or a
+#   version from the patch file's history): reset to the pin, the files that patch created
+#   removed, and the new patch applied.
+# - Anything else (your own edits, staged changes, a patch half taken out): it stops, and
+#   --reset resets the runtime to the pin (git reset --hard, git clean -fdx) and applies the
+#   patch, which throws those changes away.
 set -euo pipefail
 RUNTIME="$(cd "$1" && pwd)"
 PATCH="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"
 RESET="${3:-}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-STAMP="$RUNTIME/.racit-patch"
-APPLIED="$RUNTIME/.racit-patch.applied"
 REL=patches/ps3recomp-0001-racacit-runtime-fixes.patch
-hash() { (sha256sum "$1" 2>/dev/null || shasum -a 256 "$1") | cut -c1-64; }
-fits() { git -C "$RUNTIME" apply --check --ignore-whitespace "$@" 2>/dev/null; }
-want="$(hash "$PATCH")"
-done_() { echo "$want" > "$STAMP"; cp "$PATCH" "$APPLIED"; echo "Runtime patch applied."; exit 0; }
+KEPT="$RUNTIME/.git/racit-patch.applied"
+PIN="$(git -C "$RUNTIME" rev-parse HEAD)"
+rt() { git -C "$RUNTIME" "$@"; }
+# Earlier setups kept their stamp in the runtime's tree: never count those as changes.
+rm -f "$RUNTIME/.racit-patch" "$RUNTIME/.racit-patch.applied"
 
-# Already in: the stamp alone isn't trusted (a git restore in the runtime leaves it
-# behind), only the patch itself being there. --reset always starts over.
-if [ "$RESET" != --reset ] && fits --reverse "$PATCH"; then
-    [ "$(cat "$STAMP" 2>/dev/null)" = "$want" ] || { echo "$want" > "$STAMP"; cp "$PATCH" "$APPLIED"; }
-    echo "Runtime patch is already applied."; exit 0
-fi
-stop() {
-    echo "$RUNTIME: $1" >&2
-    echo "Commit or stash your changes there (git -C \"$RUNTIME\" stash -u), or run this setup again" >&2
-    echo "with --reset to reset the runtime to its pinned commit, which throws them away." >&2
-    exit 1
-}
-# The files a patch touches.
+# The files patch $1 touches, one per line.
 paths() { git apply --numstat "$1" | cut -f3; }
-# Whether swapping patch $1 for $2 works, tried on a copy of the files they touch.
-swap_fits() {
-    local t; t="$(mktemp -d)"
-    { paths "$1"; paths "$2"; } | sort -u | while IFS= read -r p; do
-        if [ -e "$RUNTIME/$p" ]; then mkdir -p "$t/$(dirname "$p")"; cp -p "$RUNTIME/$p" "$t/$p"; fi
-    done
-    local ok=0
-    ( cd "$t" && export GIT_CEILING_DIRECTORIES="$(dirname "$t")" &&
-      git apply --reverse --ignore-whitespace --whitespace=nowarn "$1" 2>/dev/null &&
-      git apply --check --ignore-whitespace "$2" 2>/dev/null ) || ok=1
+# Whether the runtime is exactly the pin plus patch $1: nothing staged, no change outside the
+# patch's files, and each of them as the patch makes it from the pin.
+holds() {
+    local p t ok=0
+    rt diff --cached --quiet || return 1
+    while IFS= read -r p; do
+        grep -qxF -- "$p" < <(paths "$1") || return 1
+    done < <(rt status --porcelain --untracked-files=all | cut -c4-)
+    t="$(mktemp -d)"
+    while IFS= read -r p; do
+        if rt cat-file -e "$PIN:$p" 2>/dev/null; then mkdir -p "$t/$(dirname "$p")"; rt show "$PIN:$p" > "$t/$p"; fi
+    done < <(paths "$1")
+    if ( cd "$t" && export GIT_CEILING_DIRECTORIES="$(dirname "$t")" &&
+         git apply --ignore-whitespace --whitespace=nowarn "$1" 2>/dev/null ); then
+        while IFS= read -r p; do
+            if [ -e "$t/$p" ]; then cmp -s "$t/$p" "$RUNTIME/$p" || { ok=1; break; }
+            elif [ -e "$RUNTIME/$p" ]; then ok=1; break; fi
+        done < <(paths "$1")
+    else
+        ok=1
+    fi
     rm -rf "$t"
     return $ok
 }
+apply_new() {
+    rt apply --ignore-whitespace --whitespace=nowarn "$PATCH"
+    cp "$PATCH" "$KEPT"
+    echo "Runtime patch applied."
+}
+to_pin() { rt reset -q --hard "$PIN"; }
+
 if [ "$RESET" = --reset ]; then
     echo "Resetting $RUNTIME to its pinned commit (--reset): its changes are thrown away."
-    git -C "$RUNTIME" checkout -q -- .
-    git -C "$RUNTIME" clean -fdq -e .racit-patch -e .racit-patch.applied
-    fits "$PATCH" || stop "the runtime patch doesn't apply to the pinned commit."
-    git -C "$RUNTIME" apply --ignore-whitespace --whitespace=nowarn "$PATCH"
-    done_
+    to_pin
+    rt clean -fdxq
+    apply_new
+    exit 0
 fi
-# Which earlier patch is in the runtime, if any.
+if holds "$PATCH"; then
+    cp "$PATCH" "$KEPT"
+    echo "Runtime patch is already applied."
+    exit 0
+fi
+if rt diff --cached --quiet && [ -z "$(rt status --porcelain --untracked-files=all)" ]; then
+    apply_new
+    exit 0
+fi
+# A patch this repository had before, and nothing else?
 old=""
-if [ -f "$APPLIED" ] && fits --reverse "$APPLIED"; then
-    old="$APPLIED"
-elif [ -n "$(git -C "$RUNTIME" status --porcelain -- . ':!.racit-patch' ':!.racit-patch.applied')" ]; then
+if [ -f "$KEPT" ] && holds "$KEPT"; then
+    old="$KEPT"
+else
     tmp="$(mktemp)"
     trap 'rm -f "$tmp"' EXIT
     for c in $(git -C "$ROOT" log --format=%H -n 60 -- "$REL" 2>/dev/null); do
         git -C "$ROOT" show "$c:$REL" > "$tmp" 2>/dev/null || continue
-        if fits --reverse "$tmp"; then old="$tmp"; echo "The runtime has the patch of $(git -C "$ROOT" log -1 --format='%h (%cs)' "$c")."; break; fi
+        if holds "$tmp"; then old="$tmp"; echo "The runtime has the patch of $(git -C "$ROOT" log -1 --format='%h (%cs)' "$c")."; break; fi
     done
 fi
 if [ -z "$old" ]; then
-    # No patch of ours in it: the new one goes over whatever edits are there.
-    fits "$PATCH" || stop "the runtime patch doesn't apply over the changes there (and they aren't a runtime patch this repository had)."
-    git -C "$RUNTIME" apply --ignore-whitespace --whitespace=nowarn "$PATCH"
-    done_
+    echo "$RUNTIME has local changes (edits, staged changes, or a runtime patch only partly there)." >&2
+    echo "Commit or move them, then run this setup again with --reset (which resets it to the pinned commit)." >&2
+    exit 1
 fi
-swap_fits "$old" "$PATCH" || stop "the new runtime patch doesn't apply over your changes there; the previous one is still applied."
-git -C "$RUNTIME" apply --reverse --ignore-whitespace --whitespace=nowarn "$old"
-if ! git -C "$RUNTIME" apply --ignore-whitespace --whitespace=nowarn "$PATCH"; then
-    git -C "$RUNTIME" apply --ignore-whitespace --whitespace=nowarn "$old"   # as it was
-    stop "the new runtime patch didn't apply; the previous one is back."
-fi
-echo "The previous runtime patch is swapped for the new one."
-done_
+# Back to the pin: tracked files reset, and only the files the old patch created removed.
+created="$(paths "$old" | while IFS= read -r p; do rt cat-file -e "$PIN:$p" 2>/dev/null || printf '%s\n' "$p"; done)"
+to_pin
+printf '%s\n' "$created" | while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    rm -f -- "$RUNTIME/$p"
+    rmdir -p -- "$(dirname "$RUNTIME/$p")" 2>/dev/null || true   # folders it made, once empty
+done
+echo "The previous runtime patch is out."
+apply_new

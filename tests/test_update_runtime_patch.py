@@ -1,14 +1,18 @@
-"""scripts/update_runtime_patch.sh swaps the runtime patch without losing anything.
+"""scripts/update_runtime_patch.sh: the runtime checkout gets this repository's patch, safely.
 
-A small git repository stands in for tools/ps3recomp, with two versions of a patch:
-the first setup applies it (over unrelated local edits too), a changed patch is
-swapped in keeping the builder's edits, a swap that conflicts changes nothing (the old
-patch and the stamp stay) and works when run again after the conflict is resolved,
-and --reset starts over from the pinned commit. Needs git and bash.
+The rule: a runtime holding exactly the current patch is up to date; one holding nothing
+gets it; one holding exactly an earlier patch of ours is reset to the pin (the files that
+patch created removed) and gets the new one; anything else stops and asks for --reset,
+which resets to the pin, cleans and applies. A small git repository stands in for
+tools/ps3recomp with patches shaped like the real one (they edit files and create one).
+Needs git and bash.
+
+With RACIT_RUNTIME_CLONE set to a ps3recomp checkout that has the pinned commit, the same
+cases also run with the real patch.
 
     python -m unittest discover -s tests
 """
-import hashlib
+import os
 import shutil
 import subprocess
 import tempfile
@@ -17,6 +21,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / 'scripts' / 'update_runtime_patch.sh'
+REAL_PATCH = ROOT / 'patches' / 'ps3recomp-0001-racacit-runtime-fixes.patch'
+PIN = '5244db92669b54831c6d3ebb7a96d58c4dbfa6df'
 BASE = {'a.c': 'one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\n', 'b.c': 'alpha\nbeta\ngamma\ndelta\n'}
 
 
@@ -24,8 +30,74 @@ def git(cwd, *args):
     return subprocess.run(['git', '-C', str(cwd), *args], check=True, capture_output=True, text=True).stdout
 
 
+class Cases:
+    """The cases, for a runtime self.rt, patches self.p1 (older) and self.p2 (current),
+    self.created (a file p1 creates) and self.edited (a file both change)."""
+
+    def run_script(self, patch, *extra):
+        return subprocess.run(['bash', str(SCRIPT), str(self.rt), str(patch), *extra], capture_output=True, text=True)
+
+    def status(self):
+        return git(self.rt, 'status', '--porcelain', '--untracked-files=all')
+
+    def assert_holds(self, patch):
+        r = self.run_script(patch)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('already applied', r.stdout)
+
+    def test_clean_runtime_gets_the_patch_then_is_up_to_date(self):
+        r = self.run_script(self.p2)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assert_holds(self.p2)
+
+    def test_earlier_patch_is_swapped(self):
+        self.assertEqual(self.run_script(self.p1).returncode, 0)
+        self.assertTrue((self.rt / self.created).exists())
+        (self.rt / '.git' / 'racit-patch.applied').unlink()   # found from history or not: both work
+        shutil.copy(self.p1, self.rt / '.git' / 'racit-patch.applied')
+        r = self.run_script(self.p2)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('previous runtime patch is out', r.stdout)
+        self.assertFalse((self.rt / self.created).exists(), 'the earlier patch\'s own file was left behind')
+        self.assert_holds(self.p2)
+
+    def test_patch_left_half_after_a_restore_stops_then_reset_works(self):
+        self.assertEqual(self.run_script(self.p1).returncode, 0)
+        git(self.rt, 'restore', '.')            # tracked files back; the created file stays
+        self.assertTrue((self.rt / self.created).exists())
+        r = self.run_script(self.p2)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('--reset', r.stderr)
+        r = self.run_script(self.p2, '--reset')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assert_holds(self.p2)
+
+    def test_own_edits_and_staged_changes_stop_and_reset_clears_them(self):
+        self.assertEqual(self.run_script(self.p2).returncode, 0)
+        path = self.rt / self.edited
+        path.write_bytes(path.read_bytes() + b'\n/* mine */\n')
+        r = self.run_script(self.p2)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('local changes', r.stderr)
+        self.assertIn('/* mine */', path.read_text(errors='replace'), 'stopping must not touch the edit')
+        git(self.rt, 'add', self.edited)        # staged now
+        self.assertNotEqual(self.run_script(self.p2).returncode, 0)
+        r = self.run_script(self.p2, '--reset')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn('/* mine */', path.read_text(errors='replace'))
+        self.assertEqual(git(self.rt, 'diff', '--cached'), '')
+        self.assert_holds(self.p2)
+
+    def test_old_stamp_files_in_the_tree_are_ignored(self):
+        self.assertEqual(self.run_script(self.p2).returncode, 0)
+        (self.rt / '.racit-patch').write_text('stale\n')
+        (self.rt / '.racit-patch.applied').write_text('stale\n')
+        self.assert_holds(self.p2)
+        self.assertFalse((self.rt / '.racit-patch').exists())
+
+
 @unittest.skipUnless(shutil.which('git') and shutil.which('bash'), 'needs git and bash')
-class UpdateRuntimePatch(unittest.TestCase):
+class FakeRuntime(Cases, unittest.TestCase):
     def setUp(self):
         self.dir = Path(tempfile.mkdtemp())
         self.rt = self.dir / 'runtime'
@@ -35,89 +107,50 @@ class UpdateRuntimePatch(unittest.TestCase):
             (self.rt / name).write_text(text)
         git(self.rt, 'add', '.')
         git(self.rt, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'pinned')
-        # Patch 1 changes "two"; patch 2 changes "two" differently and also "seven".
-        self.p1 = self.patch('p1', {'a.c': BASE['a.c'].replace('two', 'TWO')})
-        self.p2 = self.patch('p2', {'a.c': BASE['a.c'].replace('two', 'Two').replace('seven', 'SEVEN')})
+        self.created, self.edited = 'new/made.c', 'a.c'
+        self.p1 = self.patch('p1', {'a.c': BASE['a.c'].replace('two', 'TWO'), 'new/made.c': 'made\n'})
+        self.p2 = self.patch('p2', {'a.c': BASE['a.c'].replace('two', 'Two').replace('seven', 'SEVEN'),
+                                    'b.c': BASE['b.c'].replace('beta', 'BETA')})
 
     def tearDown(self):
         shutil.rmtree(self.dir, ignore_errors=True)
 
     def patch(self, name, files):
         for f, text in files.items():
+            (self.rt / f).parent.mkdir(parents=True, exist_ok=True)
             (self.rt / f).write_text(text)
+        git(self.rt, 'add', '-N', '.')
         out = git(self.rt, 'diff')
-        git(self.rt, 'checkout', '-q', '--', '.')
+        git(self.rt, 'reset', '-q', '--hard')
+        git(self.rt, 'clean', '-fdq')
         path = self.dir / (name + '.patch')
         path.write_text(out)
         return path
 
-    def run_script(self, patch, *extra):
-        return subprocess.run(['bash', str(SCRIPT), str(self.rt), str(patch), *extra], capture_output=True, text=True)
 
-    def stamp(self):
-        return (self.rt / '.racit-patch').read_text().strip()
+CLONE = os.environ.get('RACIT_RUNTIME_CLONE')
 
-    def a(self):
-        return (self.rt / 'a.c').read_text()
 
-    def test_first_setup_over_unrelated_edits(self):
-        (self.rt / 'b.c').write_text(BASE['b.c'].replace('gamma', 'mine'))
-        r = self.run_script(self.p1)
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn('TWO', self.a())
-        self.assertIn('mine', (self.rt / 'b.c').read_text())
-        self.assertEqual(self.stamp(), hashlib.sha256(self.p1.read_bytes()).hexdigest())
+@unittest.skipUnless(CLONE and shutil.which('git'), 'set RACIT_RUNTIME_CLONE to a ps3recomp checkout with the pinned commit')
+class RealPatch(Cases, unittest.TestCase):
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp())
+        self.rt = self.dir / 'ps3recomp'
+        subprocess.run(['git', 'clone', '-q', '--no-checkout', CLONE, str(self.rt)], check=True)
+        git(self.rt, '-c', 'core.autocrlf=false', 'checkout', '-q', '--detach', PIN)
+        self.p2 = REAL_PATCH
+        # The earlier patch: the real one with one more file of its own, which the
+        # swap must remove.
+        text = REAL_PATCH.read_text(encoding='utf-8', errors='surrogateescape')
+        extra = ('diff --git a/libs/video/racit_test_left.c b/libs/video/racit_test_left.c\nnew file mode 100644\n'
+                 'index 0000000..1111111\n--- /dev/null\n+++ b/libs/video/racit_test_left.c\n@@ -0,0 +1 @@\n+/* made by the earlier patch */\n')
+        self.p1 = self.dir / 'p1.patch'
+        self.p1.write_text(text + extra, encoding='utf-8', errors='surrogateescape')
+        self.created = 'libs/video/racit_test_left.c'
+        self.edited = 'libs/input/cellPad.c'
 
-    def test_swap_keeps_own_edits(self):
-        self.assertEqual(self.run_script(self.p1).returncode, 0)
-        (self.rt / 'b.c').write_text(BASE['b.c'].replace('gamma', 'mine'))
-        r = self.run_script(self.p2)
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn('Two', self.a()); self.assertIn('SEVEN', self.a()); self.assertNotIn('TWO', self.a())
-        self.assertIn('mine', (self.rt / 'b.c').read_text())
-
-    def test_conflicting_swap_changes_nothing_then_retry_works(self):
-        self.assertEqual(self.run_script(self.p1).returncode, 0)
-        old_stamp = self.stamp()
-        # The builder's own edit where patch 2 changes "seven".
-        (self.rt / 'a.c').write_text(self.a().replace('seven', 'my seven'))
-        before = self.a()
-        r = self.run_script(self.p2)
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn('stash', r.stderr)
-        self.assertEqual(self.a(), before, 'the runtime changed although the swap failed')
-        self.assertEqual(self.stamp(), old_stamp)
-        # Resolved: the builder takes the edit back out. Running again swaps.
-        (self.rt / 'a.c').write_text(before.replace('my seven', 'seven'))
-        r = self.run_script(self.p2)
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn('Two', self.a()); self.assertIn('SEVEN', self.a())
-        # And again: nothing to do.
-        r = self.run_script(self.p2)
-        self.assertEqual(r.returncode, 0); self.assertIn('already applied', r.stdout)
-
-    def test_stale_stamp_after_a_restore(self):
-        self.assertEqual(self.run_script(self.p1).returncode, 0)
-        git(self.rt, 'checkout', '-q', '--', 'a.c')   # the patch is gone, the stamp stays
-        r = self.run_script(self.p1)
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertNotIn('already applied', r.stdout)
-        self.assertIn('TWO', self.a())
-
-    def test_reset_when_already_applied(self):
-        self.assertEqual(self.run_script(self.p1).returncode, 0)
-        (self.rt / 'b.c').write_text(BASE['b.c'].replace('gamma', 'mine'))
-        r = self.run_script(self.p1, '--reset')
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertEqual((self.rt / 'b.c').read_text(), BASE['b.c'])
-        self.assertIn('TWO', self.a())
-
-    def test_reset_starts_from_the_pinned_commit(self):
-        self.assertEqual(self.run_script(self.p1).returncode, 0)
-        (self.rt / 'a.c').write_text(self.a().replace('seven', 'my seven'))
-        r = self.run_script(self.p2, '--reset')
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertEqual(self.a(), BASE['a.c'].replace('two', 'Two').replace('seven', 'SEVEN'))
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
 
 
 if __name__ == '__main__':

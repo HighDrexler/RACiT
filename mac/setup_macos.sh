@@ -27,7 +27,7 @@ fi
   echo "Runtime revision differs. Use the pinned runtime in a separate checkout."
   exit 1
 }
-# The patch, swapped whenever it changed (scripts/update_runtime_patch.sh keeps your own edits
-# in the runtime; --reset throws them away instead).
+# The patch, swapped whenever it changed (scripts/update_runtime_patch.sh). Your own edits in
+# the runtime stop it; --reset throws them away instead.
 bash "$ROOT/scripts/update_runtime_patch.sh" "$RUNTIME" "$PATCH" "${1:-}"
 echo "Ready for scripts/pipeline.sh. Dependency and input requirements are in BUILDING.md."
