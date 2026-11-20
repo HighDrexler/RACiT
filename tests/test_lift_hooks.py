@@ -150,6 +150,22 @@ class CheckLiftHooks(unittest.TestCase):
                 result = self.run_check(directory, profile)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_non_ascii_path_on_a_cp1252_console(self):
+        """A checkout under C:\\Users\\李 on a cp1252 console: the messages name the path."""
+        import os
+        profile = PROFILES[0]
+        hooks, functions = hook_list(profile)
+        with tempfile.TemporaryDirectory() as parent:
+            directory = os.path.join(parent, '李', 'recomp')
+            os.makedirs(directory)
+            self.lift(directory, hooks, functions)
+            env = dict(os.environ, PYTHONIOENCODING='cp1252')
+            result = subprocess.run([sys.executable, str(CHECK), directory, '--profile', profile],
+                                    capture_output=True, env=env)
+            out = (result.stdout + result.stderr).decode('utf-8', 'replace')
+            self.assertEqual(result.returncode, 0, out)
+            self.assertIn('李', out)
+
     def test_chunk_count_does_not_change_the_count(self):
         # Each chunk declares and defines the hooks again: only the calls count.
         hooks, functions = hook_list('BCUS98124-1.00')

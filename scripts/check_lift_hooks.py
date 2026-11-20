@@ -156,6 +156,11 @@ def count_calls(sources, hooks):
 
 
 def main():
+    # Paths in the messages can be anything (a Windows checkout under C:\Users\李): never let the
+    # console's code page (cp1252) stop a build whose hooks are fine.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, 'reconfigure'):
+            stream.reconfigure(encoding='utf-8', errors='replace')
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('recomp')
     parser.add_argument('--profile', required=True)
@@ -177,7 +182,7 @@ def main():
     check_identity(sources, options.profile, functions)
     stale = options.patch and (not options.stamp or not os.path.exists(options.stamp) or os.path.getmtime(options.stamp) < newest)
     if stale:
-        command = [sys.executable, '-I', os.path.join(ROOT, 'scripts', 'patch_lift.py'), options.recomp]
+        command = [sys.executable, '-I', '-X', 'utf8', os.path.join(ROOT, 'scripts', 'patch_lift.py'), options.recomp]
         if options.elf:
             command += ['--elf', options.elf, '--profile', options.profile]
         elif options.profile != 'BCUS98124-1.00':

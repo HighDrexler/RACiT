@@ -270,7 +270,7 @@ if(RACACIT_CHECK_HOOKS)
     # or a hook list configures (and so re-patches) again.
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_racit_hook_inputs})
     execute_process(
-        COMMAND "${Python3_EXECUTABLE}" -I "${_racit_root}/scripts/check_lift_hooks.py" "${RECOMP_DIR}"
+        COMMAND "${Python3_EXECUTABLE}" -I -X utf8 "${_racit_root}/scripts/check_lift_hooks.py" "${RECOMP_DIR}"
                 --profile "${_racit_profile}" --elf "${_racit_elf}" --patch
                 --stamp "${CMAKE_CURRENT_BINARY_DIR}/lift-patched.ok"
         RESULT_VARIABLE _racit_patch_result)
@@ -281,7 +281,7 @@ if(RACACIT_CHECK_HOOKS)
     # since this configure, and not patched, stops the build.
     set(_racit_stamp "${CMAKE_CURRENT_BINARY_DIR}/lift-hooks.ok")
     add_custom_command(OUTPUT "${_racit_stamp}"
-        COMMAND "${Python3_EXECUTABLE}" -I "${_racit_root}/scripts/check_lift_hooks.py" "${RECOMP_DIR}"
+        COMMAND "${Python3_EXECUTABLE}" -I -X utf8 "${_racit_root}/scripts/check_lift_hooks.py" "${RECOMP_DIR}"
                 --profile "${_racit_profile}" --stamp "${_racit_stamp}"
         DEPENDS ${_racit_hook_inputs} ${RECOMP_SOURCES}
         COMMENT "Checking the lift's hooks (${_racit_profile})"
