@@ -185,6 +185,27 @@ class GamePreparesItself(unittest.TestCase):
             _, again, _ = self.run_game(directory, None)
             self.assertEqual(again, opened)
 
+    def test_only_its_own_checked_archive_is_reused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _, opened, _ = self.run_game(directory, None)
+            marker = Path(str(opened) + '.ok')
+            self.assertTrue(marker.exists(), 'no marker after publishing')
+            good = opened.read_bytes()
+            # A file the game didn't check (no marker): made again over it.
+            marker.unlink()
+            opened.write_bytes(b'PSAR' + bytes(28) + b'junk' * 100)
+            _, again, _ = self.run_game(directory, None)
+            self.assertEqual(again, opened)
+            self.assertEqual(opened.read_bytes(), good)
+            self.assertTrue(marker.exists())
+            # Changed since its marker (same name, other bytes): made again too.
+            tampered = bytearray(good); tampered[-1] ^= 0xFF
+            opened.write_bytes(bytes(tampered))
+            self.run_game(directory, None)
+            self.assertEqual(opened.read_bytes(), good)
+            # No temporaries left behind.
+            self.assertEqual([p.name for p in opened.parent.iterdir() if p.name.endswith('.tmp')], [])
+
     def test_off_with_zero(self):
         with tempfile.TemporaryDirectory() as directory:
             original, opened, active = self.run_game(directory, '0')
