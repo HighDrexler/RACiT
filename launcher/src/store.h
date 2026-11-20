@@ -60,7 +60,7 @@ struct GameProfile {
     std::vector<GameDisc> discs;
     bool updates;                // releases on GitHub (Updates screen, the check at start)
     std::vector<const char*> save_ids;   // save folder name prefixes (Into the Nexus saves as NPUA80908)
-    const char* version;         // the game's version on screen: RACiT "1.0.0", Into the Nexus "0.1.0"
+    const char* version;         // the game's version on screen: RACiT "1.0.1", Into the Nexus "0.1.0"
     std::string disc_list() const;   // "BCUS98124 or BCES00511"
 };
 extern const GameProfile kRacitProfile, kNexusProfile;

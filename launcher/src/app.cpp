@@ -22,7 +22,7 @@
 #include "gfx.h"
 #include "store.h"
 
-static const char* kLauncherVersion = "1.0.0";
+static const char* kLauncherVersion = "1.0.1";
 const char* g_launcher_version = kLauncherVersion;
 enum { WM_APP_TASK = WM_APP + 1, WM_APP_GAME_EXIT, WM_APP_UPDATE, TIMER_TICK = 1 };
 
