@@ -1592,6 +1592,11 @@ int main(int argc, char** argv)
     setenv("RACACIT_HLE_SPURS", "1", 0);
     setenv("RACACIT_KBM", "1", 0);
     setenv("PS3RECOMP_VK_WINDOW", "1", 0);
+    /* The register-file draw engine, as on Windows and Android. Without it
+     * the renderer takes the vtable path, which uploads no textures: the
+     * window stays black (#72). */
+    setenv("PS3RECOMP_VK_GUEST_PROGRAMS", "1", 0);
+    setenv("PS3_TITLE", "Ratchet & Clank: A Crack in Time", 0);
 #endif
 #ifdef __ANDROID__
     android_setup(&argc, &argv);
