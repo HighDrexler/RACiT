@@ -81,6 +81,7 @@ struct ModInfo {
 
 struct BuildInfo {
     int version = 0;
+    bool update120 = false;             // builds\vNN-u120: made from update 1.20's EBOOT.elf
     fs::path dir;
     std::string notes_first_line;
 };
@@ -122,10 +123,22 @@ public:
     std::string import_iso(const fs::path& iso, Progress* p, std::string* summary);
     // EBOOT.elf, the game's main program unlocked with RPCS3: checked, then put in
     // PS3_GAME\USRDIR -- or kept in data\ until the game is imported.
-    // check_elf: "" = a PS3 program; *known = the program of a disc the build is made from.
-    static std::string check_elf(const fs::path& elf, bool* known);
+    // check_elf: "" = a PS3 program; *known = one a build is made from: the USA disc's
+    // (*version 100) or update 1.20's (*version 120), told apart by SHA-256.
+    static std::string check_elf(const fs::path& elf, bool* known, int* version = nullptr);
+    // A 1.20 EBOOT.elf goes to update\EBOOT.elf instead; the disc's stays where it is.
     std::string add_elf(const fs::path& elf);
     fs::path pending_elf() const { return data() / L"EBOOT.elf"; }
+    // Update 1.20 (optional): its installed folder (RPCS3's dev_hdd0/game/BCUS98124, holding
+    // PARAM.SFO and USRDIR) copied to data\update, plus its decrypted EBOOT.elf. With both,
+    // and a vNN-u120 build, Play runs 1.20 (launcher.ini play_version=1.00 keeps the disc's).
+    fs::path update_dir() const { return data() / L"update"; }
+    fs::path update_elf() const { return update_dir() / L"EBOOT.elf"; }
+    fs::path hdd_update() const { return data() / L"dev_hdd0_u120"; }   // its own game data; saves shared
+    std::string import_update(const fs::path& picked, Progress* p, std::string* summary);
+    bool update_added() const;          // update\PARAM.SFO is 1.20's
+    bool update_ready() const;          // and its EBOOT.elf is in place
+    bool plays_update() const;          // Play runs the 1.20 build
     std::string refresh_art();          // ICON0.PNG / PIC1.PNG from PS3_GAME into assets\ (the game's own art)
     fs::path icon() const { return assets() / L"icon0.png"; }
     fs::path background() const { return assets() / L"pic1.png"; }
@@ -143,7 +156,8 @@ public:
 
     // Builds: installed under builds\vNN, one is current.
     std::vector<BuildInfo> builds() const;
-    BuildInfo current_build() const;
+    BuildInfo current_build() const;    // the newest disc (1.00) build
+    BuildInfo build_for(bool update120) const;
     bool set_current(int version);
     std::string install_build_folder(const fs::path& from, int* version, bool make_current);
 
@@ -209,8 +223,10 @@ public:
     // older) -- moved to data\log.txt.
     void collect_log();
     fs::path launched_dir;
+private:
+    std::string prepare_update_hdd();   // update files and the disc's installed data into hdd_update()
 #ifdef __APPLE__
 private:
-    std::string launch_mac(const GameInfo& g, const BuildInfo& b, std::map<std::wstring, std::wstring>& set, void** process);
+    std::string launch_mac(const GameInfo& g, const BuildInfo& b, const fs::path& eboot, std::map<std::wstring, std::wstring>& set, void** process);
 #endif
 };
