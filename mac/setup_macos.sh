@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Fetch the pinned runtime and apply this port's patch. The user's Vulkan SDK
 # or package manager supplies the dependencies listed in BUILDING.md.
+# --reset: reset the runtime to its pinned commit before patching (throws away edits there).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RUNTIME="$ROOT/tools/ps3recomp"
@@ -26,24 +27,7 @@ fi
   echo "Runtime revision differs. Use the pinned runtime in a separate checkout."
   exit 1
 }
-# The patch again whenever it changed (.racit-patch holds the hash of the one applied):
-# an older patch left in place builds against the wrong runtime (1.0.0's cellPad.c, for one).
-STAMP="$RUNTIME/.racit-patch"
-want="$(shasum -a 256 "$PATCH" | cut -c1-64)"
-if [ "$(cat "$STAMP" 2>/dev/null)" = "$want" ]; then
-  echo "Runtime patch is already applied."
-elif [ ! -s "$STAMP" ] && git -C "$RUNTIME" apply --reverse --check --ignore-whitespace "$PATCH" 2>/dev/null; then
-  echo "$want" > "$STAMP"
-  echo "Runtime patch is already applied."
-else
-  if [ -n "$(git -C "$RUNTIME" status --porcelain)" ]; then
-    echo "The runtime patch changed: resetting the runtime to $COMMIT first."
-    git -C "$RUNTIME" checkout -q -- .
-    git -C "$RUNTIME" clean -fdq -e .racit-patch
-  fi
-  git -C "$RUNTIME" apply --check --ignore-whitespace "$PATCH"
-  git -C "$RUNTIME" apply --ignore-whitespace "$PATCH"
-  echo "$want" > "$STAMP"
-  echo "Runtime patch applied."
-fi
+# The patch, swapped whenever it changed (scripts/update_runtime_patch.sh keeps your own edits
+# in the runtime; --reset throws them away instead).
+bash "$ROOT/scripts/update_runtime_patch.sh" "$RUNTIME" "$PATCH" "${1:-}"
 echo "Ready for scripts/pipeline.sh. Dependency and input requirements are in BUILDING.md."

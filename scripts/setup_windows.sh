@@ -2,6 +2,7 @@
 # setup_windows.sh: everything the Windows build needs into tools/, at the exact
 # versions the releases are built with. Run from Git Bash; needs git and Python 3.12.
 # PYTHON=<command> picks the interpreter (default: py -3.12). Safe to run again.
+# --reset: reset tools/ps3recomp to its pinned commit before patching (throws away edits there).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -30,23 +31,10 @@ pin glslang-src    KhronosGroup/glslang        2fbed5e1fb43a1c480fe020e3bb686a31
 pin zlib           madler/zlib                 767c4c947852e143f582c85f14cf573411df1b35
 pin SDL2-src       libsdl-org/SDL              release-2.32.10
 
-# The runtime patch, again whenever it changed: an older patch left in place builds
-# against the wrong runtime (1.0.0's cellPad.c, for one). tools/ps3recomp/.racit-patch
-# holds the hash of the patch applied; on a change the pinned runtime is reset first.
-# --ignore-whitespace: some of ps3recomp's files mix line endings.
-PATCH=patches/ps3recomp-0001-racacit-runtime-fixes.patch
-STAMP=tools/ps3recomp/.racit-patch
-want="$( (sha256sum "$PATCH" 2>/dev/null || shasum -a 256 "$PATCH") | cut -c1-64)"
-if [ "$(cat "$STAMP" 2>/dev/null)" != "$want" ]; then
-    if [ -s "$STAMP" ] || [ -n "$(git -C tools/ps3recomp status --porcelain)" ]; then
-        echo "tools/ps3recomp: the runtime patch changed, resetting the runtime to $(git -C tools/ps3recomp rev-parse --short HEAD)"
-        git -C tools/ps3recomp checkout -q -- .
-        git -C tools/ps3recomp clean -fdq -e .racit-patch
-    fi
-    git -C tools/ps3recomp apply --ignore-whitespace "../../$PATCH"
-    echo "$want" > "$STAMP"
-    echo "tools/ps3recomp: patched"
-fi
+# The runtime patch, swapped whenever it changed (scripts/update_runtime_patch.sh keeps your
+# own edits there; --reset throws them away instead). --ignore-whitespace inside: some of
+# ps3recomp's files mix line endings.
+bash scripts/update_runtime_patch.sh "$ROOT/tools/ps3recomp" "$ROOT/patches/ps3recomp-0001-racacit-runtime-fixes.patch" "${1:-}"
 
 echo "== SDL2 (static)"
 if [ ! -f tools/sdl2-win/lib/libSDL2.a ]; then
