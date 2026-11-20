@@ -8,7 +8,9 @@
 #include <unistd.h>
 extern char** environ;
 #endif
+#if defined(__x86_64__) || defined(__i386__)
 #include <cpuid.h>
+#endif
 
 #include <algorithm>
 #include <cctype>
@@ -303,9 +305,16 @@ std::string Store::import_iso(const fs::path& iso, Progress* p, std::string* sum
     p->total = need;
     std::error_code ec;
     fs::create_directories(game_copy(), ec);
+#ifdef _WIN32
     ULARGE_INTEGER free_{};
     if (GetDiskFreeSpaceExW(game_copy().c_str(), &free_, nullptr, nullptr) && free_.QuadPart < need + (512ull << 20))
         return "Not enough space: the game needs " + format_size(need) + ", " + format_size(free_.QuadPart) + " free on this drive.";
+#else
+    const fs::space_info space = fs::space(game_copy(), ec);
+    if (!ec && space.available < need + (512ull << 20))
+        return "Not enough space: the game needs " + format_size(need) + ", " + format_size(space.available) + " free on this drive.";
+    ec.clear();
+#endif
     // An EBOOT.elf already in the launcher's copy is kept for the new one.
     const fs::path old_elf = game_copy() / L"PS3_GAME" / L"USRDIR" / L"EBOOT.elf";
     bool k = false;
@@ -409,6 +418,9 @@ std::vector<fs::path> Store::find_old_installs() const
 
 bool cpu_has_avx2()
 {
+#if !defined(__x86_64__) && !defined(__i386__)
+    return true;   // not an x86 processor: there is no older-processor build to pick
+#else
     unsigned a, b, c, d;
     if (!__get_cpuid(1, &a, &b, &c, &d) || !(c & (1u << 12)) || !(c & (1u << 27)) || !(c & (1u << 28))) return false;
     unsigned lo, hi;                                       /* FMA, OSXSAVE, AVX; then YMM state saved */
@@ -416,7 +428,12 @@ bool cpu_has_avx2()
     if ((lo & 6u) != 6u) return false;
     if (!__get_cpuid_count(7, 0, &a, &b, &c, &d)) return false;
     if (!(b & (1u << 5)) || !(b & (1u << 8))) return false;   /* AVX2, BMI2 */
+#ifdef _WIN32
     return !GetEnvironmentVariableA("RACACIT_TEST_NO_AVX2", nullptr, 0);
+#else
+    return !getenv("RACACIT_TEST_NO_AVX2");
+#endif
+#endif
 }
 
 static bool launcher_owned_key(const std::string& k)
@@ -848,12 +865,16 @@ void Store::clean_update_leftovers()
     fs::path old = exe_path(); old += L".old";
     std::error_code ec;
     if (!fs::exists(old, ec)) return;
+#ifdef _WIN32
     std::thread([old] {
         for (int i = 0; i < 40; i++) {
             if (DeleteFileW(old.c_str()) || GetLastError() == ERROR_FILE_NOT_FOUND) return;
             Sleep(250);
         }
     }).detach();
+#else
+    delete_tree(old);   // nothing holds a replaced program open here
+#endif
 }
 
 std::string Store::download_release(const ReleaseInfo& rel, Progress* p)
@@ -1038,7 +1059,7 @@ std::string Store::install_release(const ReleaseInfo& rel, Progress* p, std::str
     if (ok && !new_launcher.empty()) {
         // A running exe can be renamed but not deleted: this one goes aside beside itself, and the next
         // start deletes it. The new launcher takes its name, whatever the player calls it.
-        DeleteFileW(self_old.c_str());
+        { std::error_code gone; fs::remove_all(self_old, gone); }
         ok = put(new_launcher, self, self_old);
     }
     if (!ok) {
@@ -1528,10 +1549,8 @@ std::string Store::launch(void** process, bool prepare)
          * to logs\backup_failed.txt. */
         const std::string r = backup_saves("play", nullptr);
         if (!r.empty()) {
-            if (FILE* f = _wfopen((logs() / L"backup_failed.txt").c_str(), L"ab")) {
-                fprintf(f, "%s  backup on Play failed: %s\r\n", stamp_now().c_str(), r.c_str());
-                fclose(f);
-            }
+            std::ofstream f(logs() / L"backup_failed.txt", std::ios::binary | std::ios::app);
+            if (f) f << stamp_now() << "  backup on Play failed: " << r << "\r\n";
         }
     }
     if (!prepare) rotate_log();
@@ -1670,6 +1689,7 @@ std::string Store::launch_mac(const GameInfo& g, const BuildInfo& b, std::map<st
     if (!c) return "Could not start " + u8(exe) + " (" + why + ").";
     *process = c;
     return {};
+}
 #endif
 
 void Store::collect_log()
