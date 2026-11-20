@@ -737,7 +737,11 @@ void prompt_check(bool keyboard)
     }
     if (s_hudkb.have && s_hud.ea == s_hudkb.ea && readable(s_hudkb.ea, kHudRows * kHudPitch)) {
         pictures++;
-        if (keyboard && memcmp(vm_base + s_hudkb.ea, s_hudkb.keys, kHudRows * kHudPitch)) { wrong++; note("hud-tether", 0, s_hudkb.ea); }
+        const uint8_t* tex = vm_base + s_hudkb.ea;
+        /* With the controller: the picture as the game left it, or the controller's own art
+         * (hud_sync redraws it with R1 for the other layout), never the keys. */
+        if (keyboard ? memcmp(tex, s_hudkb.keys, kHudRows * kHudPitch) != 0
+                     : memcmp(tex, s_hudkb.before, kHudRows * kHudPitch) && !tether_is_picture(tex)) { wrong++; note("hud-tether", 0, s_hudkb.ea); }
     } else if (keyboard && s_hud.entry && readable(s_hud.entry, 32)) {
         /* The tether picture without keys yet (moved, or never prepared): wrong while it
          * still shows the controller's R2 + square where its entry points, at two checks
@@ -754,10 +758,16 @@ void prompt_check(bool keyboard)
             s_unprepared = ea;
         } else s_unprepared = 0;
     }
-    for (const auto& k : s_badgekb) {
+    for (int i = 0; i < 2; i++) {
+        const auto& k = s_badgekb[i];
+        const Badge& bd = s_badge[i];
         if (!k.have || !k.ea || !readable(k.ea, kBadgeBytes)) continue;
         pictures++;
-        if (keyboard && memcmp(vm_base + k.ea, k.keys, kBadgeBytes)) { wrong++; note("badge", 0, k.ea); }
+        const uint8_t* tex = vm_base + k.ea;
+        /* With the controller: as the game left it, or one of the badge's two controller states. */
+        const bool controller_art = !memcmp(tex, k.before, kBadgeBytes) ||
+            (bd.have && bd.ea == k.ea && (!memcmp(tex, bd.orig, kBadgeBytes) || !memcmp(tex, bd.mine, kBadgeBytes)));
+        if (keyboard ? memcmp(tex, k.keys, kBadgeBytes) != 0 : !controller_art) { wrong++; note("badge", 0, k.ea); }
     }
     fprintf(stderr, "[prompt-check] %s: %d glyph tables (%d unscanned), %d glyphs, %d HUD pictures; %d showing the %s%s%c",
             keyboard ? "keyboard" : "controller", tables, unknown, glyphs, pictures, wrong,
