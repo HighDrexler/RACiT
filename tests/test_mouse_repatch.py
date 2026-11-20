@@ -32,6 +32,30 @@ def recipe():
     return names
 
 
+# patch_lift.py's definitions (everything before it reads its arguments), for the update
+# 1.20 path: that profile is only chosen for its own executable, which a test doesn't
+# have, so the test calls the camera pass with the profile itself.
+PREFIX_END = "if len(sys.argv) > 1 and sys.argv[1] == '--check-profile':"
+U120_DRIVER = r'''
+import sys
+path, recomp = sys.argv[1], sys.argv[2]
+source = open(path, encoding='utf-8').read()
+namespace = {'__file__': path, '__name__': 'patch_lift'}
+sys.path.insert(0, __import__('os').path.dirname(path))
+exec(compile(source[:source.index(sys.argv[3])], path, 'exec'), namespace)
+if sys.argv[4] == 'table':
+    print(repr(namespace['MOUSE_CAMERA_FUNCS']['BCUS98124-1.20']))
+else:
+    namespace['apply_mouse_cameras'](recomp, 'BCUS98124-1.20')
+'''
+
+
+def update120_cameras():
+    out = subprocess.run([sys.executable, '-I', '-c', U120_DRIVER, str(PATCH_LIFT), '', PREFIX_END, 'table'],
+                         check=True, capture_output=True, text=True).stdout
+    return ast.literal_eval(out.strip())
+
+
 def camera_function(func, edits):
     start = int(func[5:], 16)
     lines = ['void %s(ppu_context* ctx) {' % func, '        ctx->gpr[3] = 0;']
@@ -61,15 +85,21 @@ def old_patched_follow(names, update120=False):
 
 
 class MouseRepatch(unittest.TestCase):
-    def lift(self, directory, follow):
+    def lift(self, directory, follow, cameras=None):
         names = recipe()
-        cameras = names['_DISC_CAMERAS']
+        cameras = cameras or names['_DISC_CAMERAS']
         parts = ['#include "ppu_recomp.h"\n', names['OLD_MOUSE_DECL'] if 'racit_camera_take' in follow else '']
         for name, func in sorted(cameras.items()):
             parts.append(follow if name == 'follow' else camera_function(func, names['MOUSE_CAMERAS'][name]))
         path = Path(directory) / 'ppu_recomp_000.cpp'
         path.write_text(''.join(parts), encoding='utf-8')
         return path
+
+    def patch_update120(self, directory):
+        result = subprocess.run([sys.executable, '-I', '-c', U120_DRIVER, str(PATCH_LIFT), directory, PREFIX_END, 'patch'],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return result.stdout
 
     def patch(self, directory):
         result = subprocess.run([sys.executable, '-I', str(PATCH_LIFT), directory], capture_output=True, text=True)
@@ -99,8 +129,14 @@ class MouseRepatch(unittest.TestCase):
     def test_v100_update120_patch_is_replaced(self):
         names = recipe()
         with tempfile.TemporaryDirectory() as directory:
-            path = self.lift(directory, old_patched_follow(names, update120=True))
-            self.assertIn('taken out', self.patch(directory))
+            # The 1.20 lift: its own camera table (two cameras sit elsewhere), patched
+            # by the 1.20 camera pass.
+            cameras = update120_cameras()
+            self.assertNotEqual(cameras, names['_DISC_CAMERAS'])
+            path = self.lift(directory, old_patched_follow(names, update120=True), cameras)
+            out = self.patch_update120(directory)
+            self.assertIn('taken out', out)
+            self.assertIn('mouse hooks in all 10 cameras (BCUS98124-1.20)', out)
             _, follow = self.follow_of(path)
             self.assertEqual(len(re.findall(r'double mouse_angles\[2\]', follow)), 1, follow)
             self.assertNotIn('racit_camera_take', follow)
