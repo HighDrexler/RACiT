@@ -614,10 +614,11 @@ void scan(void)
         bd.entry = badges[k]; bd.ea = ea; bd.have = 0;
         fprintf(stderr, "[prompts] quick select badge found at %08X (table %08X)%c", ea, badges[k], 10);
     }
-    if (hud && hud != s_hud.entry) {
+    if (hud) {   /* resolved again on every scan: the picture can move while its entry stays */
         const uint32_t ea = cellGcmResolveLocated(0, be32(vm_base + hud));
-        if (ea) { s_hud.entry = hud; s_hud.ea = ea;
-                  fprintf(stderr, "[prompts] HUD picture \"R2 + square\" found at %08X (table %08X)%c", ea, hud, 10); } }
+        if (ea && (hud != s_hud.entry || ea != s_hud.ea)) {
+            s_hud.entry = hud; s_hud.ea = ea;
+            fprintf(stderr, "[prompts] HUD picture \"R2 + square\" found at %08X (table %08X)%c", ea, hud, 10); } }
     if (s_hud.entry) hud_faces_find(s_hud.entry);
 }
 
@@ -711,6 +712,15 @@ void prompt_check(bool keyboard)
     if (s_hudkb.have && s_hud.ea == s_hudkb.ea && readable(s_hudkb.ea, kHudRows * kHudPitch)) {
         pictures++;
         if (keyboard && memcmp(vm_base + s_hudkb.ea, s_hudkb.keys, kHudRows * kHudPitch)) { wrong++; note("hud-tether", 0, s_hudkb.ea); }
+    } else if (keyboard && s_hud.entry && readable(s_hud.entry, 32)) {
+        /* The tether picture without keys yet (moved, or never prepared): wrong while it
+         * still shows the controller's R2 + square where its entry points. */
+        const uint8_t* t = vm_base + s_hud.entry;
+        const uint32_t ea = cellGcmResolveLocated(0, be32(t));
+        if (be16(t + 0x18) == kHudW && be16(t + 0x1A) == kKeyH && t[6] == 0xA8 && ea &&
+            readable(ea, kHudRows * kHudPitch) && tether_is_picture(vm_base + ea)) {
+            pictures++; wrong++; note("hud-tether-unprepared", 0, ea);
+        }
     }
     for (const auto& k : s_badgekb) {
         if (!k.have || !k.ea || !readable(k.ea, kBadgeBytes)) continue;

@@ -269,7 +269,14 @@ static void hud_keys_sync(bool keyboard)
     if (!readable(s_hud.entry, 32) || !readable(s_hud.ea, bytes)) return;   /* hud_sync drops it */
     const uint8_t* t = vm_base + s_hud.entry;
     if (be16(t + 0x18) != kHudW || be16(t + 0x1A) != kKeyH || t[6] != 0xA8) return;
-    if (cellGcmResolveLocated(0, be32(t)) != s_hud.ea) { s_hud.ea = 0; s_hudkb.have = 0; return; }   /* the picture moved */
+    {   /* The picture moved and the entry with it: follow it (its content is checked below). */
+        const uint32_t now = cellGcmResolveLocated(0, be32(t));
+        if (!now || !readable(now, bytes)) { s_hud.ea = 0; s_hudkb.have = 0; return; }
+        if (now != s_hud.ea) {
+            fprintf(stderr, "[prompts] HUD picture \"R2 + square\" moved %08X -> %08X%c", s_hud.ea, now, 10);
+            s_hud.ea = now;
+        }
+    }
     if (s_hudkb.ea != s_hud.ea) { s_hudkb.ea = s_hud.ea; s_hudkb.have = 0; }
     uint8_t* tex = vm_base + s_hud.ea;
     const bool is_keys = s_hudkb.have && !memcmp(tex, s_hudkb.keys, bytes);
