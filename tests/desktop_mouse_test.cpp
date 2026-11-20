@@ -12,6 +12,8 @@ void racit_camera_feed(uint64_t now, int dx, int dy, int capture, float sensitiv
 int racit_camera_take(double* angles, uint64_t now);
 int racit_camera_turn(const char* camera, double* angles, uint64_t now);
 int racit_camera_peek(uint64_t now);
+void racit_mouse_step(void* state, uint64_t now, int dx, int dy, int capture, float sensitivity, int invert);
+int racit_camera_follow_active(uint64_t now);
 }
 static int failures;
 #define CHECK(c) do { if (!(c)) { std::printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); failures++; } } while (0)
@@ -64,6 +66,14 @@ int main()
     /* ...and play goes on normally afterwards. */
     racit_camera_feed(t, 1, 0, 1, 100.f, 0);
     t += 16 * ms; CHECK(racit_camera_take(a, t) == 1 && near(a[0], 0.003));
+    /* 1.0.0's runtime patch calls these: they link and do nothing harmful. */
+    t += 16 * ms;
+    {
+        struct { uint64_t epoch_ns; int64_t dx, dy; float x, y; } old_state = { 5, 6, 7, 0.5f, 0.5f };
+        racit_mouse_step(&old_state, t, 10, 10, 1, 100.f, 0);
+        CHECK(old_state.x == 0.f && old_state.y == 0.f && old_state.dx == 0);
+        CHECK(racit_camera_follow_active(t) == racit_camera_active(t));
+    }
     /* The pad poll and a camera on two threads: each take gets whole moves (x and y of a
      * diagonal together), and every move is taken exactly once. */
     {

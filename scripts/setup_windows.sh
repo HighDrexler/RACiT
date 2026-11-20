@@ -24,17 +24,27 @@ tools/venv/Scripts/python.exe -m pip install -q --disable-pip-version-check \
     pycryptodome==3.24.1 tabulate==0.10.0 tqdm==4.70.1
 
 echo "== Sources"
-fresh_runtime=0
-[ -d tools/ps3recomp/.git ] || fresh_runtime=1
 pin ps3recomp      sp00nznet/ps3recomp         5244db92669b54831c6d3ebb7a96d58c4dbfa6df
 pin Vulkan-Headers KhronosGroup/Vulkan-Headers c46850864f4661461b0f6cb9922c058ffea4915e
 pin glslang-src    KhronosGroup/glslang        2fbed5e1fb43a1c480fe020e3bb686a31010989a
 pin zlib           madler/zlib                 767c4c947852e143f582c85f14cf573411df1b35
 pin SDL2-src       libsdl-org/SDL              release-2.32.10
 
+# The runtime patch, again whenever it changed: an older patch left in place builds
+# against the wrong runtime (1.0.0's cellPad.c, for one). tools/ps3recomp/.racit-patch
+# holds the hash of the patch applied; on a change the pinned runtime is reset first.
 # --ignore-whitespace: some of ps3recomp's files mix line endings.
-if [ "$fresh_runtime" = 1 ]; then
-    git -C tools/ps3recomp apply --ignore-whitespace ../../patches/ps3recomp-0001-racacit-runtime-fixes.patch
+PATCH=patches/ps3recomp-0001-racacit-runtime-fixes.patch
+STAMP=tools/ps3recomp/.racit-patch
+want="$( (sha256sum "$PATCH" 2>/dev/null || shasum -a 256 "$PATCH") | cut -c1-64)"
+if [ "$(cat "$STAMP" 2>/dev/null)" != "$want" ]; then
+    if [ -s "$STAMP" ] || [ -n "$(git -C tools/ps3recomp status --porcelain)" ]; then
+        echo "tools/ps3recomp: the runtime patch changed, resetting the runtime to $(git -C tools/ps3recomp rev-parse --short HEAD)"
+        git -C tools/ps3recomp checkout -q -- .
+        git -C tools/ps3recomp clean -fdq -e .racit-patch
+    fi
+    git -C tools/ps3recomp apply --ignore-whitespace "../../$PATCH"
+    echo "$want" > "$STAMP"
     echo "tools/ps3recomp: patched"
 fi
 

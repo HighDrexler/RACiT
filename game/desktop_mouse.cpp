@@ -95,3 +95,13 @@ extern "C" void racit_camera_trace_angle(const char* camera, double before, doub
 {
     if (tracing()) std::fprintf(stderr, "[mouse] %s angle %.5f -> %.5f\n", camera, before, after);
 }
+
+/* 1.0.0's runtime patch (cellPad.c) called these two. A tools/ps3recomp still patched
+ * with it links against these and works: the stick emulation does nothing (the camera
+ * hooks take the mouse now), and the follow camera check is the camera check. */
+struct RacitMouseState { uint64_t epoch_ns; int64_t dx, dy; float x, y; };
+extern "C" void racit_mouse_step(RacitMouseState* state, uint64_t, int, int, int, float, int)
+{
+    if (state) *state = RacitMouseState();
+}
+extern "C" int racit_camera_follow_active(uint64_t now) { return racit_camera_active(now); }
