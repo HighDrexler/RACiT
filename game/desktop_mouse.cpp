@@ -20,7 +20,16 @@ namespace {
 std::mutex motion_lock;
 bool captured = false;
 int64_t camera_x = 0, camera_y = 0;
+uint64_t feed_time = 0;   /* the last motion fed (under the lock) */
 std::atomic<uint64_t> take_time{0};
+/* Motion older than this when a camera asks for it is dropped: it was made before a
+ * pause (a menu, a cutscene) that no camera took it through. */
+constexpr uint64_t kStale = 250000000ULL;
+/* Under the lock: forget motion fed more than kStale before now. */
+void drop_stale(uint64_t now)
+{
+    if ((camera_x || camera_y) && now > feed_time && now - feed_time >= kStale) camera_x = camera_y = 0;
+}
 /* Radians per count, x 1e9, at 100% (public PR #66): 0.003 rad, ~0.17 degree. */
 constexpr double kGain = 3000000.0;
 constexpr double kNano = 1000000000.0;
@@ -50,6 +59,7 @@ extern "C" void racit_camera_feed(uint64_t now, int dx, int dy, int capture, flo
     if (!active) { camera_x = camera_y = 0; captured = capture != 0; return; }
     camera_x += x;
     camera_y += y;
+    if (x || y) feed_time = now;
     captured = true;
 }
 
@@ -64,6 +74,7 @@ extern "C" int racit_camera_take(double* angles, uint64_t now)
     {
         std::lock_guard<std::mutex> hold(motion_lock);
         if (!captured) return 0;
+        drop_stale(now);
         x = camera_x; y = camera_y;
         camera_x = camera_y = 0;
     }
@@ -78,6 +89,7 @@ extern "C" int racit_camera_peek(uint64_t now)
 {
     take_time.store(now);
     std::lock_guard<std::mutex> hold(motion_lock);
+    drop_stale(now);
     return captured && (camera_x != 0 || camera_y != 0);
 }
 

@@ -66,8 +66,16 @@ int main()
     /* ...and play goes on normally afterwards. */
     racit_camera_feed(t, 1, 0, 1, 100.f, 0);
     t += 16 * ms; CHECK(racit_camera_take(a, t) == 1 && near(a[0], 0.003));
+    /* Motion fed just before the cameras pause (no camera and no feed for 300 ms) is
+     * dropped, not used when a camera next updates; peek doesn't see it either. */
+    t += 16 * ms; racit_camera_take(a, t);
+    racit_camera_feed(t, 40, 40, 1, 100.f, 0);
+    t += 300 * ms; CHECK(racit_camera_peek(t) == 0);
+    racit_camera_feed(t, 30, 30, 1, 100.f, 0);   /* the first move after it still counts */
+    CHECK(racit_camera_take(a, t) == 1 && near(a[0], 0.09));
+    racit_camera_feed(t, 40, 40, 1, 100.f, 0);
+    t += 300 * ms; CHECK(racit_camera_take(a, t) == 0 && a[0] == 0.0 && a[1] == 0.0);
     /* 1.0.0's runtime patch calls these: they link and do nothing harmful. */
-    t += 16 * ms;
     {
         struct { uint64_t epoch_ns; int64_t dx, dy; float x, y; } old_state = { 5, 6, 7, 0.5f, 0.5f };
         racit_mouse_step(&old_state, t, 10, 10, 1, 100.f, 0);
