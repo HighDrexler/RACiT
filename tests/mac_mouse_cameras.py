@@ -65,12 +65,74 @@ def shift(a, b, most=150):
     return best, cost(best), cost(0)
 
 
+def vprofile(img):
+    """Mean brightness of each row over the left and right quarters of the picture (Ratchet
+    stays in the middle): what a pitch moves up or down."""
+    w, h, px = img
+    rows = []
+    for y in range(0, h, 2):
+        s = 0
+        for x in list(range(0, w // 4, 2)) + list(range(3 * w // 4, w, 2)):
+            i = (y * w + x) * 3
+            s += px[i] + px[i + 1] + px[i + 2]
+        rows.append(s)
+    m = sum(rows) / len(rows)
+    return [r - m for r in rows]
+
+
+def vshift(a, b, most=80):
+    """As shift(), up and down: rows (of 2 pixels) picture b moved from a, and the match there vs not moved."""
+    pa, pb = vprofile(a), vprofile(b)
+    n = len(pa)
+    def cost(s):
+        lo, hi = max(0, s), min(n, n + s)
+        return sum(abs(pa[i] - pb[i - s]) for i in range(lo, hi)) / max(1, hi - lo)
+    best = min(range(-most, most + 1), key=cost)
+    return best, cost(best), cost(0)
+
+
+MARKER = '.mac_mouse_cameras-work'   # what this script made, so it may clear it next time
+
+
+def inside(path, folder):
+    path, folder = os.path.realpath(path), os.path.realpath(folder)
+    return path == folder or path.startswith(folder.rstrip(os.sep) + os.sep)
+
+
+def check_inputs(o):
+    """Everything given exists, before anything is touched, and --work (cleared on every run)
+    holds none of it; --work is only cleared when it is empty or this script made it."""
+    work = os.path.abspath(o.work)
+    need = [(o.player, os.path.isfile, '--player'), (o.elf, os.path.isfile, '--elf'),
+            (os.path.join(o.game, 'PS3_GAME'), os.path.isdir, '--game (its PS3_GAME)'), (o.save, os.path.isdir, '--save')]
+    if o.update:
+        need += [(os.path.join(o.update, 'PARAM.SFO'), os.path.isfile, '--update (its PARAM.SFO)'),
+                 (os.path.join(o.update, 'USRDIR'), os.path.isdir, '--update (its USRDIR)')]
+    for opt, test in ((o.installed, os.path.isdir), (o.settings, os.path.isfile), (o.vk_icd, os.path.isfile)):
+        if opt:
+            need.append((opt, test, opt))
+    for path, ok, what in need:
+        if not ok(path):
+            sys.exit('%s is missing or not what it should be: %s' % (what, path))
+    for name, path in (('--player', o.player), ('--elf', o.elf), ('--game', o.game), ('--save', o.save),
+                       ('--update', o.update), ('--installed', o.installed), ('--settings', o.settings),
+                       ('--vk-icd', o.vk_icd), ('the current folder', os.getcwd())):
+        if path and inside(path, work):
+            sys.exit('--work %s holds %s (%s); it is cleared on every run, so give it a folder of its own' % (work, name, path))
+    if os.path.lexists(work):
+        if not os.path.isdir(work) or os.path.islink(work):
+            sys.exit('--work %s is not a folder' % work)
+        if os.listdir(work) and not os.path.isfile(os.path.join(work, MARKER)):
+            sys.exit('--work %s is not empty and was not made by this script; give it an empty or new folder' % work)
+
+
 class Game:
     def __init__(self, o):
         self.o, self.work = o, os.path.abspath(o.work)
         if os.path.exists(self.work):
             shutil.rmtree(self.work)
         os.makedirs(self.work)
+        open(os.path.join(self.work, MARKER), 'w').close()
         hdd0 = os.path.join(self.work, 'hdd0')
         save = os.path.join(hdd0, 'home', '00000001', 'savedata', os.path.basename(os.path.normpath(o.save)))
         shutil.copytree(o.save, save)
@@ -192,15 +254,25 @@ def turns(g, mode, cameras, key, results):
     m0 = g.capture(mode + '-mouse-0'); g.mouse(40, 0); time.sleep(0.6); m1 = g.capture(mode + '-mouse-1')
     mouse = shift(m0, m1)
     mark = len(g.text())
-    g.mouse(0, 100); time.sleep(0.6)   # pitch: the hook gets it (the picture may hit a limit)
+    # Pitch: by what the picture does (up or down), not only the hook's log line; a small move,
+    # so it stays inside the camera's limits, then back.
+    p0 = g.capture(mode + '-pitch-0'); g.mouse(0, 30); time.sleep(0.6); p1 = g.capture(mode + '-pitch-1')
+    tilt = vshift(p0, p1)
+    g.mouse(0, -30); time.sleep(0.6)
     turned = re.findall(r'\[mouse\] (\S+) turn (\S+) (\S+)', g.text()[lines_at:])
     hooked = sorted(set(c for c, _, _ in turned))
     yaw = any(c in cameras and abs(float(x)) > 0 for c, x, _ in turned)
-    pitch = any(c in cameras and abs(float(y)) > 0 for c, _, y in re.findall(r'\[mouse\] (\S+) turn (\S+) (\S+)', g.text()[mark:]))
-    ok = (yaw and pitch and abs(mouse[0]) >= max(4, 3 * abs(still[0])) and mouse[1] < mouse[2]
-          and (abs(stick[0]) < 3 or (stick[0] > 0) == (mouse[0] > 0)))
-    results.append((mode, ok, 'hook %s (yaw %s, pitch %s), shift: still %d, stick %d, mouse %d'
-                    % ('/'.join(hooked) or 'none', yaw, pitch, still[0], stick[0], mouse[0])))
+    pitch_hook = any(c in cameras and abs(float(y)) > 0 for c, _, y in re.findall(r'\[mouse\] (\S+) turn (\S+) (\S+)', g.text()[mark:]))
+    pitch_moved = abs(tilt[0]) >= 3 and tilt[1] < tilt[2]
+    moved = lambda m: abs(m[0]) >= max(4, 3 * abs(still[0])) and m[1] < m[2]
+    # The stick must turn the picture too, the same way as the mouse. With a key held the
+    # runtime counts a person at the pad and ignores the scripted stick, so it can't be
+    # checked in those modes (strafe).
+    stick_ok = True if key else moved(stick) and (stick[0] > 0) == (mouse[0] > 0)
+    ok = yaw and pitch_hook and pitch_moved and moved(mouse) and stick_ok
+    results.append((mode, ok, 'hook %s (yaw %s, pitch %s), shift: still %d, stick %s, mouse %d, pitch %d rows'
+                    % ('/'.join(hooked) or 'none', yaw, pitch_hook, still[0],
+                       'n/a (key held)' if key else '%d' % stick[0], mouse[0], tilt[0])))
     time.sleep(4)   # the mode's key is let go by now
 
 
@@ -225,6 +297,7 @@ def main():
     ap.add_argument('--settings'); ap.add_argument('--vk-icd')
     ap.add_argument('--level-wait', type=float, default=45)
     o = ap.parse_args()
+    check_inputs(o)
     for name in ('RaCACiTRecomp', 'racit-player'):
         if subprocess.run(['/usr/bin/pgrep', '-x', name], capture_output=True).returncode == 0:
             sys.exit('a game is already running; not starting another')
