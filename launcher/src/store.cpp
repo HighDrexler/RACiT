@@ -1,6 +1,7 @@
 #include "store.h"
 #include "iso.h"
 #include "platform.h"
+#include "program_magic.h"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -958,6 +959,10 @@ static bool release_part(const std::string& rel_name)
 {
     const std::string n = lower(rel_name);
     if (n == "readme.txt") return true;
+#ifdef __APPLE__
+    // The macOS launcher is a bundle: everything under RaCACiT Launcher.app/.
+    if (n.rfind(lower(narrow(RACIT_LAUNCHER_FILE)) + "/", 0) == 0) return true;
+#endif
     if (n.find('/') == std::string::npos) return n.size() > 4 && n.compare(n.size() - 4, 4, ".exe") == 0 && n.find("launcher") != std::string::npos;
     if (n.rfind("mods/", 0) == 0) return n.size() > 5 && n.find('/', 5) != std::string::npos;
     if (n.rfind("builds/v", 0) == 0) {
@@ -969,8 +974,8 @@ static bool release_part(const std::string& rel_name)
 
 static bool looks_like_program(const fs::path& p)
 {
-    const std::string h = read_text(p, 2);
-    return h.size() >= 2 && h[0] == 'M' && h[1] == 'Z';
+    const std::string h = read_text(p, 4);
+    return looks_like_program_head(reinterpret_cast<const unsigned char*>(h.data()), h.size());
 }
 
 std::string Store::install_release(const ReleaseInfo& rel, Progress* p, std::string* summary, bool* restart)
@@ -987,7 +992,14 @@ std::string Store::install_release(const ReleaseInfo& rel, Progress* p, std::str
     std::string r = zip_list(zip, &all);
     if (!r.empty()) return stop("The release could not be read: " + r + ". Nothing was changed.");
     std::string base;   // the folder everything is packed in, if any
-    auto is_main = [](const std::string& s) { return lower(s).rfind("builds/", 0) == 0 || (s.find('/') == std::string::npos && release_part(s) && lower(s) != "readme.txt"); };
+    auto is_main = [](const std::string& s) {
+        const std::string n = lower(s);
+        if (n.rfind("builds/", 0) == 0) return true;
+#ifdef __APPLE__
+        if (n.rfind(lower(narrow(RACIT_LAUNCHER_FILE)) + "/", 0) == 0) return true;
+#endif
+        return s.find('/') == std::string::npos && release_part(s) && n != "readme.txt";
+    };
     for (const auto& e : all) {
         if (is_main(e.name)) { base.clear(); break; }
         const size_t s = e.name.find('/');
