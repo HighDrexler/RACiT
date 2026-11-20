@@ -20,6 +20,13 @@
 #include <string>
 #include <vector>
 #include <zlib.h>
+#ifdef _WIN32
+#include <process.h>
+#define racit_getpid _getpid
+#else
+#include <unistd.h>
+#define racit_getpid getpid
+#endif
 
 static std::string s_menu_archive;
 static std::atomic<bool> s_menu_active{false};
@@ -317,6 +324,30 @@ Bytes movie_actions(const Bytes& original)
     return out;
 }
 
+// A readable PSARC whose header and table are sane. original_size > 0 also asks for a
+// size near the original's: the prepared archive only swaps a few menu movies.
+bool usable_archive(const std::filesystem::path& path, uint64_t original_size = 0)
+{
+    std::error_code error;
+    if (!std::filesystem::is_regular_file(path, error) || error) return false;
+    const uint64_t length = std::filesystem::file_size(path, error);
+    if (error) return false;
+    std::ifstream input(path, std::ios::binary);
+    std::array<unsigned char, 32> header{};
+    input.read(reinterpret_cast<char*>(header.data()), header.size());
+    const auto word = [&header](size_t offset) {
+        unsigned value = 0;
+        for (size_t i = offset; i < offset + 4; ++i) value = (value << 8) | header[i];
+        return value;
+    };
+    const unsigned toc = word(12), entry = word(16), count = word(20), block = word(24);
+    if (!input || std::memcmp(header.data(), "PSAR", 4) || std::memcmp(header.data() + 8, "zlib", 4) ||
+        toc < 32 || toc >= length || entry < 30 || !count || uint64_t(entry) * count > toc - 32 ||
+        !block || block > 1024 * 1024)
+        return false;
+    return !original_size || (length >= original_size / 2 && length <= original_size * 2);
+}
+
 std::string prepare(const std::filesystem::path& original)
 {
     namespace fs = std::filesystem;
@@ -330,11 +361,19 @@ std::string prepare(const std::filesystem::path& original)
     std::snprintf(name, sizeof name, "global_cached-%llu-%llx-%08lx.psarc", (unsigned long long)size,
                   (unsigned long long)stamp, (unsigned long)actions_crc);
     const fs::path destination = s_menu_cache / name;
-    if (fs::is_regular_file(destination, error)) return destination.string();
+    if (usable_archive(destination, size)) return destination.string();
+    if (fs::exists(destination, error)) {   // torn or foreign: make it again
+        std::printf("[menu-keycaps] %s isn't a usable archive; preparing it again\n", destination.string().c_str());
+        fs::remove(destination, error);
+    }
 
     fs::create_directories(s_menu_cache, error);
     require(!error, "can't create the menu-keycaps folder");
-    const fs::path temporary = s_menu_cache / (std::string(".") + name + ".tmp");
+    // One temporary per process and call, so two games starting at once never share it.
+    static std::atomic<unsigned> s_temporaries{0};
+    char unique[64];
+    std::snprintf(unique, sizeof unique, ".%ld-%u.tmp", (long)racit_getpid(), s_temporaries.fetch_add(1));
+    const fs::path temporary = s_menu_cache / (std::string(".") + name + unique);
     std::FILE* source = std::fopen(original.string().c_str(), "rb");
     require(source, "can't open the original archive");
     std::FILE* out = nullptr;
@@ -375,6 +414,10 @@ std::string prepare(const std::filesystem::path& original)
         std::fclose(source);
         source = nullptr;
         fs::rename(temporary, destination, error);
+        if (error && usable_archive(destination, size)) {   // another game published it first
+            fs::remove(temporary, error);
+            return destination.string();
+        }
         require(!error, "can't publish the prepared archive");
         std::printf("[menu-keycaps] prepared %zu menu movies in %s\n", replacements.size(), destination.string().c_str());
         return destination.string();
@@ -414,20 +457,7 @@ bool racit_menu_archive_init()
         std::fprintf(stderr, "Menu archive must be a readable prepared file\n");
         return false;
     }
-    std::ifstream input(path, std::ios::binary);
-    std::array<unsigned char, 32> header{};
-    input.read(reinterpret_cast<char*>(header.data()), header.size());
-    const auto word = [&header](size_t offset) {
-        unsigned value = 0;
-        for (size_t i = offset; i < offset + 4; ++i) value = (value << 8) | header[i];
-        return value;
-    };
-    const auto length = std::filesystem::file_size(path, error);
-    const unsigned toc = word(12), entry = word(16), count = word(20), block = word(24);
-    if (!input || error || std::memcmp(header.data(), "PSAR", 4) ||
-        std::memcmp(header.data() + 8, "zlib", 4) || toc < 32 || toc > length ||
-        entry < 30 || !count || uint64_t(entry) * count > toc - 32 ||
-        !block || block > 1024 * 1024) {
+    if (!usable_archive(path)) {
         std::fprintf(stderr, "Menu archive has an invalid PSARC header\n");
         return false;
     }
