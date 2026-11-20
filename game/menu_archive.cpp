@@ -362,10 +362,8 @@ std::string prepare(const std::filesystem::path& original)
                   (unsigned long long)stamp, (unsigned long)actions_crc);
     const fs::path destination = s_menu_cache / name;
     if (usable_archive(destination, size)) return destination.string();
-    if (fs::exists(destination, error)) {   // torn or foreign: make it again
+    if (fs::exists(destination, error))   // torn or foreign: made again, then renamed over it
         std::printf("[menu-keycaps] %s isn't a usable archive; preparing it again\n", destination.string().c_str());
-        fs::remove(destination, error);
-    }
 
     fs::create_directories(s_menu_cache, error);
     require(!error, "can't create the menu-keycaps folder");
@@ -413,6 +411,7 @@ std::string prepare(const std::filesystem::path& original)
         std::fclose(check);
         std::fclose(source);
         source = nullptr;
+        // Renamed over whatever is at the destination, in one step.
         fs::rename(temporary, destination, error);
         if (error && usable_archive(destination, size)) {   // another game published it first
             fs::remove(temporary, error);
