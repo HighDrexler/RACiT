@@ -8,7 +8,10 @@
 #include <unistd.h>
 extern char** environ;
 #endif
-#if defined(__x86_64__) || defined(__i386__)
+#if defined(_MSC_VER) && !defined(__clang__) && (defined(_M_X64) || defined(_M_IX86))
+#include <intrin.h>   // MSVC: __cpuid, __cpuidex, _xgetbv (it has no cpuid.h)
+#define RACIT_CPUID_MSVC 1
+#elif defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
 #include <cpuid.h>
 #endif
 
@@ -418,8 +421,19 @@ std::vector<fs::path> Store::find_old_installs() const
 
 bool cpu_has_avx2()
 {
-#if !defined(__x86_64__) && !defined(__i386__)
+#if !defined(__x86_64__) && !defined(__i386__) && !defined(_M_X64) && !defined(_M_IX86)
     return true;   // not an x86 processor: there is no older-processor build to pick
+#elif defined(RACIT_CPUID_MSVC)
+    int r[4];
+    __cpuid(r, 0);
+    if (r[0] < 7) return false;
+    __cpuid(r, 1);
+    const unsigned c1 = (unsigned)r[2];
+    if (!(c1 & (1u << 12)) || !(c1 & (1u << 27)) || !(c1 & (1u << 28))) return false;   /* FMA, OSXSAVE, AVX */
+    if ((_xgetbv(0) & 6u) != 6u) return false;                                       /* YMM state saved */
+    __cpuidex(r, 7, 0);
+    if (!((unsigned)r[1] & (1u << 5)) || !((unsigned)r[1] & (1u << 8))) return false;   /* AVX2, BMI2 */
+    return !GetEnvironmentVariableA("RACACIT_TEST_NO_AVX2", nullptr, 0);
 #else
     unsigned a, b, c, d;
     if (!__get_cpuid(1, &a, &b, &c, &d) || !(c & (1u << 12)) || !(c & (1u << 27)) || !(c & (1u << 28))) return false;
