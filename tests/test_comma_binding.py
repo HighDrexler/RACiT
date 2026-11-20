@@ -39,12 +39,17 @@ HARNESS = r'''
 #include <cstring>
 #include <string>
 #include <vector>
-#include <strings.h>
 enum SDL_Scancode { SDL_SCANCODE_UNKNOWN = 0, SDL_SCANCODE_A = 4, SDL_SCANCODE_B = 5, SDL_SCANCODE_COMMA = 54 };
 static SDL_Scancode SDL_GetScancodeFromName(const char* n)
 { return !strcmp(n, "A") ? SDL_SCANCODE_A : !strcmp(n, "B") ? SDL_SCANCODE_B : SDL_SCANCODE_UNKNOWN; }
+#ifdef _WIN32
+#define SDL_strcasecmp _stricmp
+#define SDL_strncasecmp _strnicmp
+#else
+#include <strings.h>
 #define SDL_strcasecmp strcasecmp
 #define SDL_strncasecmp strncasecmp
+#endif
 static std::string trim(const std::string& s)
 { size_t a = s.find_first_not_of(" \t"), b = s.find_last_not_of(" \t"); return a == std::string::npos ? "" : s.substr(a, b - a + 1); }
 static std::string lower(std::string s) { for (char& c : s) if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a'); return s; }
