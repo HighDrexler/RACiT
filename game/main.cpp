@@ -1592,6 +1592,11 @@ int main(int argc, char** argv)
     setenv("RACACIT_HLE_SPURS", "1", 0);
     setenv("RACACIT_KBM", "1", 0);
     setenv("PS3RECOMP_VK_WINDOW", "1", 0);
+    /* As on Windows and Linux: the guest's own shader programs, and the title the
+     * renderer's per-game paths key on. Without them it takes the vtable path and
+     * never uploads a texture, so the window stays black (#72). */
+    setenv("PS3RECOMP_VK_GUEST_PROGRAMS", "1", 0);
+    setenv("PS3_TITLE", "Ratchet & Clank: A Crack in Time", 0);
 #endif
 #ifdef __ANDROID__
     android_setup(&argc, &argv);
