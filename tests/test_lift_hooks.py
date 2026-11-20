@@ -124,6 +124,17 @@ class CheckLiftHooks(unittest.TestCase):
                 result = self.run_check(directory, profile)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_chunk_count_does_not_change_the_count(self):
+        # Each chunk declares and defines the hooks again: only the calls count.
+        hooks, functions = hook_list('BCUS98124-1.00')
+        for chunks in (1, 3, 8):
+            with tempfile.TemporaryDirectory() as directory:
+                self.lift(directory, hooks, functions, chunks=chunks)
+                result = self.run_check(directory, 'BCUS98124-1.00')
+                self.assertEqual(result.returncode, 0, '%d chunks: %s' % (chunks, result.stdout + result.stderr))
+                self.lift(directory, hooks, functions, chunks=chunks, leave_out=('racit_publish_menu_keyboard',))
+                self.assertNotEqual(self.run_check(directory, 'BCUS98124-1.00').returncode, 0, '%d chunks' % chunks)
+
     def test_missing_hook_stops_the_build(self):
         for profile in PROFILES:
             hooks, functions = hook_list(profile)
@@ -132,6 +143,19 @@ class CheckLiftHooks(unittest.TestCase):
                 result = self.run_check(directory, profile)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn('racit_publish_menu_keyboard', result.stdout + result.stderr)
+
+    def test_commented_out_hook_is_missing(self):
+        hooks, functions = hook_list('BCUS98124-1.00')
+        want = hooks['racit_publish_menu_keyboard']
+        for comment in ('    // racit_publish_menu_keyboard(ctx);', '    /* racit_publish_menu_keyboard(ctx); */',
+                        '    /*\n    racit_publish_menu_keyboard(ctx);\n    */',
+                        '    const char* s = "racit_publish_menu_keyboard(ctx);";'):
+            with tempfile.TemporaryDirectory() as directory:
+                extra = 'void func_00020000(ppu_context* ctx) {\n%s\n}' % '\n'.join([comment] * want)
+                self.lift(directory, hooks, functions, leave_out=('racit_publish_menu_keyboard',), extra=extra)
+                result = self.run_check(directory, 'BCUS98124-1.00')
+                self.assertNotEqual(result.returncode, 0, comment)
+                self.assertIn('racit_publish_menu_keyboard (0 of', result.stdout + result.stderr)
 
     def test_verify_only_never_patches(self):
         hooks, functions = hook_list('BCUS98124-1.00')

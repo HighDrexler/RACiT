@@ -7,7 +7,8 @@ A lift (game/src/recomp, out/<profile>/recomp) is generated once and patched
 by scripts/patch_lift.py. A lift patched before a hook was added builds
 without it, silently. Every hook listed in versions/<profile>-hook-symbols.txt
 must be called in the lifted sources at least as often as listed, or this stops
-with the list of missing hooks.
+with the list of missing hooks. Calls are counted in code only: comments,
+declarations and definitions don't count, so a commented-out hook is missing.
 
 --patch (game/CMakeLists.txt runs it at configure time): first, when
 patch_lift.py, one of its inputs or the lift itself is newer than the stamp (or
@@ -59,6 +60,55 @@ def check_identity(sources, profile, functions):
              % (os.path.dirname(sources[0]), profile, ', '.join(sorted(w[5:w.index('(')] for w in wanted))))
 
 
+def code_only(text):
+    """text with its comments and string and character literals blanked out (newlines kept)."""
+    out, i, n = [], 0, len(text)
+    while i < n:
+        c = text[i]
+        if text.startswith('/*', i):
+            j = text.find('*/', i + 2)
+            j = n if j < 0 else j + 2
+            out.append(''.join(ch if ch == '\n' else ' ' for ch in text[i:j])); i = j
+        elif text.startswith('//', i):
+            j = text.find('\n', i)
+            j = n if j < 0 else j
+            out.append(' ' * (j - i)); i = j
+        elif c in '"\'':
+            j = i + 1
+            while j < n and text[j] != c and text[j] != '\n':
+                j += 2 if text[j] == '\\' else 1
+            out.append(c + ' ' * (min(j, n) - i - 1) + (c if j < n else '')); i = j + 1
+        else:
+            out.append(c); i += 1
+    return ''.join(out)
+
+
+# A name after one of these is a call ("return racit_x(...)"); after any other word, a
+# type ("int racit_x(...)"), so a declaration or a definition.
+CALL_KEYWORDS = {'return', 'else', 'do', 'case', 'throw', 'co_return'}
+
+
+def count_calls(sources, hooks):
+    """How often each hook is called in the lifted sources: real calls only."""
+    counts = dict.fromkeys(hooks, 0)
+    if not hooks:
+        return counts
+    call = re.compile(r'\b(' + '|'.join(map(re.escape, hooks)) + r')\s*\(')
+    before = re.compile(r'([A-Za-z_][A-Za-z0-9_]*|[*&])\s*$')
+    for path in sources:
+        with open(path, encoding='utf-8', errors='replace') as f:
+            code = code_only(f.read())
+        for line in code.split('\n'):
+            if line.lstrip().startswith('#'):
+                continue
+            for match in call.finditer(line):
+                prior = before.search(line, 0, match.start())
+                if prior and prior.group(1) not in CALL_KEYWORDS:
+                    continue   # "int name(" / "void* name(": a declaration or a definition
+                counts[match.group(1)] += 1
+    return counts
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('recomp')
@@ -89,15 +139,7 @@ def main():
         print('check_lift_hooks: re-running patch_lift.py on %s' % options.recomp, flush=True)
         subprocess.run(command, check=True)
 
-    counts = dict.fromkeys(hooks, 0)
-    call = re.compile(r'\b(' + '|'.join(map(re.escape, hooks)) + r')\(')
-    for path in sources:
-        with open(path, encoding='utf-8', errors='replace') as f:
-            for line in f:
-                if line.startswith(('extern ', '#', 'typedef ')):
-                    continue
-                for match in call.finditer(line):
-                    counts[match.group(1)] += 1
+    counts = count_calls(sources, hooks)
     missing = ['%s (%d of %d)' % (n, counts[n], want) for n, want in hooks.items() if counts[n] < want]
     if missing:
         sys.exit('check_lift_hooks: the %s lift in %s lacks hooks that %s expects:\n  %s\n'
