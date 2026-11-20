@@ -28,7 +28,7 @@ constexpr uint64_t kStale = 250000000ULL;
 /* Under the lock: forget motion fed more than kStale before now. */
 void drop_stale(uint64_t now)
 {
-    if ((camera_x || camera_y) && now > feed_time && now - feed_time >= kStale) camera_x = camera_y = 0;
+    if (now > feed_time && now - feed_time >= kStale) { camera_x = camera_y = 0; feed_time = now; }
 }
 /* Radians per count, x 1e9, at 100% (public PR #66): 0.003 rad, ~0.17 degree. */
 constexpr double kGain = 3000000.0;
@@ -57,6 +57,7 @@ extern "C" void racit_camera_feed(uint64_t now, int dx, int dy, int capture, flo
     const int64_t x = active ? (int64_t)(dx * gain) : 0, y = active ? (int64_t)(dy * gain * (invert ? -1 : 1)) : 0;
     std::lock_guard<std::mutex> hold(motion_lock);
     if (!active) { camera_x = camera_y = 0; captured = capture != 0; return; }
+    drop_stale(now);   /* a new move never joins motion that expired in a pause */
     camera_x += x;
     camera_y += y;
     if (x || y) feed_time = now;
@@ -68,13 +69,16 @@ extern "C" void racit_camera_feed(uint64_t now, int dx, int dy, int capture, flo
  * the game's own (stick) turn alone. */
 extern "C" int racit_camera_take(double* angles, uint64_t now)
 {
-    take_time.store(now);
     angles[0] = angles[1] = 0.0;
     int64_t x, y;
     {
+        /* Expired motion goes first, then the camera says it's active again, both under
+         * the lock: a move the poll feeds right as play resumes can't revive motion from
+         * before the pause. */
         std::lock_guard<std::mutex> hold(motion_lock);
-        if (!captured) return 0;
         drop_stale(now);
+        take_time.store(now);
+        if (!captured) return 0;
         x = camera_x; y = camera_y;
         camera_x = camera_y = 0;
     }
@@ -87,9 +91,9 @@ extern "C" int racit_camera_take(double* angles, uint64_t now)
  * moved, without using the motion (the camera it hands to takes it). */
 extern "C" int racit_camera_peek(uint64_t now)
 {
-    take_time.store(now);
     std::lock_guard<std::mutex> hold(motion_lock);
     drop_stale(now);
+    take_time.store(now);
     return captured && (camera_x != 0 || camera_y != 0);
 }
 

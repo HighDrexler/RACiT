@@ -75,6 +75,15 @@ int main()
     CHECK(racit_camera_take(a, t) == 1 && near(a[0], 0.09));
     racit_camera_feed(t, 40, 40, 1, 100.f, 0);
     t += 300 * ms; CHECK(racit_camera_take(a, t) == 0 && a[0] == 0.0 && a[1] == 0.0);
+    /* A pause, then play resumes with a move fed right as the first camera updates: the
+     * old motion stays dropped, only the new move counts. */
+    t += 16 * ms; racit_camera_take(a, t);
+    racit_camera_feed(t, 50, 50, 1, 100.f, 0);
+    t += 400 * ms;
+    racit_camera_feed(t, 50, 50, 1, 100.f, 0);   /* not active yet: nothing */
+    CHECK(racit_camera_take(a, t) == 0);
+    racit_camera_feed(t, 10, 0, 1, 100.f, 0);    /* the resume move */
+    t += 16 * ms; CHECK(racit_camera_take(a, t) == 1 && near(a[0], 0.03) && near(a[1], 0.0));
     /* 1.0.0's runtime patch calls these: they link and do nothing harmful. */
     {
         struct { uint64_t epoch_ns; int64_t dx, dy; float x, y; } old_state = { 5, 6, 7, 0.5f, 0.5f };
