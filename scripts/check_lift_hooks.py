@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
-"""Bring a lift's hooks up to date and check that every expected hook is there.
+"""Bring a lift's hooks up to date, and check that every expected hook is there.
 
-    check_lift_hooks.py RECOMP --profile PROFILE [--elf EBOOT.ELF] [--stamp FILE]
+    check_lift_hooks.py RECOMP --profile PROFILE [--elf EBOOT.ELF] [--patch] [--stamp FILE]
 
 A lift (game/src/recomp, out/<profile>/recomp) is generated once and patched
 by scripts/patch_lift.py. A lift patched before a hook was added builds
-without it, silently. So, when patch_lift.py, one of its inputs or the lift itself is
-newer than the stamp (or there is no stamp), this re-runs patch_lift.py on the lift
-(it is idempotent: hooks already in place are left alone). Then every hook
-listed in versions/<profile>-hook-symbols.txt must be called in the lifted
-sources at least as often as listed, or the build stops with the list of
-missing hooks. The stamp is written only when the check passes.
+without it, silently. Every hook listed in versions/<profile>-hook-symbols.txt
+must be called in the lifted sources at least as often as listed, or this stops
+with the list of missing hooks.
+
+--patch (game/CMakeLists.txt runs it at configure time): first, when
+patch_lift.py, one of its inputs or the lift itself is newer than the stamp (or
+there is no stamp), re-run patch_lift.py on the lift (it is idempotent: hooks
+already in place are left alone). Without --patch (the build step) it only
+checks, and never writes a source. The stamp is written only when the check passes.
 """
 import argparse
 import glob
@@ -62,6 +65,7 @@ def main():
     parser.add_argument('--profile', required=True)
     parser.add_argument('--elf', default='')
     parser.add_argument('--stamp', default='')
+    parser.add_argument('--patch', action='store_true', help='re-patch a stale lift first (configure time)')
     options = parser.parse_args()
     sources = sorted(glob.glob(os.path.join(options.recomp, 'ppu_recomp_*.cpp')))
     if not sources:
@@ -73,7 +77,7 @@ def main():
     newest = max(os.path.getmtime(p) for p in inputs if os.path.exists(p))
     # A regenerated lift (sources newer than the stamp) is patched again too.
     newest = max([newest] + [os.path.getmtime(p) for p in sources])
-    stale = not options.stamp or not os.path.exists(options.stamp) or os.path.getmtime(options.stamp) < newest
+    stale = options.patch and (not options.stamp or not os.path.exists(options.stamp) or os.path.getmtime(options.stamp) < newest)
     if stale:
         check_identity(sources, options.profile, functions)
         command = [sys.executable, '-I', os.path.join(ROOT, 'scripts', 'patch_lift.py'), options.recomp]
