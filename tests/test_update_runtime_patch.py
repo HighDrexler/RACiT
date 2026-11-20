@@ -105,13 +105,15 @@ class Cases:
 
 @unittest.skipUnless(shutil.which('git') and shutil.which('bash'), 'needs git and bash')
 class FakeRuntime(Cases, unittest.TestCase):
+    # The fixture files are written with LF on every platform (write_text would make CRLF on
+    # Windows), so a CR in them afterwards can only come from git.
     def setUp(self):
         self.dir = Path(tempfile.mkdtemp())
         self.rt = self.dir / 'runtime'
         self.rt.mkdir()
         git(self.rt, 'init', '-q')
         for name, text in BASE.items():
-            (self.rt / name).write_text(text)
+            (self.rt / name).write_text(text, newline="\n")
         git(self.rt, 'add', '.')
         git(self.rt, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'pinned')
         self.created, self.edited = 'new/made.c', 'a.c'
@@ -125,13 +127,13 @@ class FakeRuntime(Cases, unittest.TestCase):
     def patch(self, name, files):
         for f, text in files.items():
             (self.rt / f).parent.mkdir(parents=True, exist_ok=True)
-            (self.rt / f).write_text(text)
+            (self.rt / f).write_text(text, newline="\n")
         git(self.rt, 'add', '-N', '.')
         out = git(self.rt, 'diff')
         git(self.rt, 'reset', '-q', '--hard')
         git(self.rt, 'clean', '-fdq')
         path = self.dir / (name + '.patch')
-        path.write_text(out)
+        path.write_text(out, newline="\n")
         return path
 
 
