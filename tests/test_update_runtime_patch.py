@@ -21,6 +21,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / 'scripts' / 'update_runtime_patch.sh'
+# The bash on PATH (Git Bash on Windows). A bare 'bash' to subprocess would be looked up by
+# CreateProcess, which tries System32 before PATH and so starts WSL's bash.exe there.
+BASH = shutil.which('bash')
 REAL_PATCH = ROOT / 'patches' / 'ps3recomp-0001-racacit-runtime-fixes.patch'
 PIN = '5244db92669b54831c6d3ebb7a96d58c4dbfa6df'
 BASE = {'a.c': 'one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\n', 'b.c': 'alpha\nbeta\ngamma\ndelta\n'}
@@ -38,7 +41,7 @@ class Cases:
     cwd = None
 
     def run_script(self, patch, *extra):
-        return subprocess.run(['bash', str(SCRIPT), str(self.rt), str(patch), *extra], capture_output=True, text=True,
+        return subprocess.run([BASH, str(SCRIPT), str(self.rt), str(patch), *extra], capture_output=True, text=True,
                               env=self.env, cwd=self.cwd)
 
     def status(self):
