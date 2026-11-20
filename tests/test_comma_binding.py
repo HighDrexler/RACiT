@@ -93,8 +93,10 @@ class CommaBinding(unittest.TestCase):
     def test_menu_label_shows_the_comma_key(self):
         menu = (ROOT / 'game' / 'menu_keycaps.h').read_text(encoding='utf-8')
         label = function(menu, 'static void racit_menu_key_label(')
-        src = ('#include <cstdio>\n#include <cstdlib>\n#include <cstring>\n' + label +
-               'int main(int argc, char** argv) { for (int i = 1; i < argc; i++) { setenv("RACACIT_BIND_X", argv[i], 1);'
+        src = ('#include <cstdio>\n#include <cstdlib>\n#include <cstring>\n'
+               '#ifdef _WIN32\nstatic void set(const char* v) { _putenv_s("RACACIT_BIND_X", v); }\n'
+               '#else\nstatic void set(const char* v) { setenv("RACACIT_BIND_X", v, 1); }\n#endif\n' + label +
+               'int main(int argc, char** argv) { for (int i = 1; i < argc; i++) { set(argv[i]);'
                ' char l[16]; racit_menu_key_label("X", "Q", l); printf("%s\\n", l); } }\n')
         with tempfile.TemporaryDirectory() as d:
             (Path(d) / 'm.cpp').write_text(src)
