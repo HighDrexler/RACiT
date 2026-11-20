@@ -20,8 +20,8 @@ if [ ! -e "$RUNTIME/.git" ]; then
   git -C "$RUNTIME" remote add origin https://github.com/sp00nznet/ps3recomp.git
 fi
 if ! git -C "$RUNTIME" rev-parse --verify HEAD >/dev/null 2>&1; then
-  git -C "$RUNTIME" -c core.autocrlf=false fetch --depth 1 origin "$COMMIT"
-  git -C "$RUNTIME" -c core.autocrlf=false checkout -q --detach FETCH_HEAD
+  git -C "$RUNTIME" -c core.autocrlf=false -c core.eol=lf fetch --depth 1 origin "$COMMIT"
+  git -C "$RUNTIME" -c core.autocrlf=false -c core.eol=lf checkout -q --detach FETCH_HEAD
 fi
 [ "$(git -C "$RUNTIME" rev-parse HEAD)" = "$COMMIT" ] || {
   echo "Runtime revision differs. Use the pinned runtime in a separate checkout."

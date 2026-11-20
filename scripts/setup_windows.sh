@@ -13,8 +13,8 @@ pin() {
     [ -d "tools/$1/.git" ] && return 0
     git init -q "tools/$1"
     git -C "tools/$1" remote add origin "https://github.com/$2"
-    git -C "tools/$1" -c core.autocrlf=false fetch -q --depth 1 origin "$3"
-    git -C "tools/$1" -c core.autocrlf=false checkout -q FETCH_HEAD
+    git -C "tools/$1" -c core.autocrlf=false -c core.eol=lf fetch -q --depth 1 origin "$3"
+    git -C "tools/$1" -c core.autocrlf=false -c core.eol=lf checkout -q FETCH_HEAD
     echo "tools/$1: $2 at $3"
 }
 

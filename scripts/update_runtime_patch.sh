@@ -18,13 +18,17 @@ RESET="${3:-}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 REL=patches/ps3recomp-0001-racacit-runtime-fixes.patch
 KEPT="$RUNTIME/.git/racit-patch.applied"
-PIN="$(git -C "$RUNTIME" rev-parse HEAD)"
-rt() { git -C "$RUNTIME" "$@"; }
+# Every git here runs with LF line endings whatever the user's settings (Git for Windows
+# defaults core.autocrlf to true), so a reset or a show gives the bytes the patch is made
+# against, and from the runtime or the repository root, never the caller's directory.
+g() { git -c core.autocrlf=false -c core.eol=lf "$@"; }
+PIN="$(g -C "$RUNTIME" rev-parse HEAD)"
+rt() { g -C "$RUNTIME" "$@"; }
 # Earlier setups kept their stamp in the runtime's tree: never count those as changes.
 rm -f "$RUNTIME/.racit-patch" "$RUNTIME/.racit-patch.applied"
 
 # The files patch $1 touches, one per line.
-paths() { git apply --numstat "$1" | cut -f3; }
+paths() { rt apply --numstat "$1" | cut -f3; }
 # Whether the runtime is exactly the pin plus patch $1: nothing staged, no change outside the
 # patch's files, and each of them as the patch makes it from the pin.
 holds() {
@@ -38,9 +42,10 @@ holds() {
         if rt cat-file -e "$PIN:$p" 2>/dev/null; then mkdir -p "$t/$(dirname "$p")"; rt show "$PIN:$p" > "$t/$p"; fi
     done < <(paths "$1")
     if ( cd "$t" && export GIT_CEILING_DIRECTORIES="$(dirname "$t")" &&
-         git apply --ignore-whitespace --whitespace=nowarn "$1" 2>/dev/null ); then
+         g apply --ignore-whitespace --whitespace=nowarn "$1" 2>/dev/null ); then
         while IFS= read -r p; do
-            if [ -e "$t/$p" ]; then cmp -s "$t/$p" "$RUNTIME/$p" || { ok=1; break; }
+            # Line endings aside: a checkout made before with core.autocrlf=true has CRLF.
+            if [ -e "$t/$p" ]; then cmp -s <(tr -d '\r' < "$t/$p") <(tr -d '\r' < "$RUNTIME/$p") || { ok=1; break; }
             elif [ -e "$RUNTIME/$p" ]; then ok=1; break; fi
         done < <(paths "$1")
     else
@@ -79,9 +84,9 @@ if [ -f "$KEPT" ] && holds "$KEPT"; then
 else
     tmp="$(mktemp)"
     trap 'rm -f "$tmp"' EXIT
-    for c in $(git -C "$ROOT" log --format=%H -n 60 -- "$REL" 2>/dev/null); do
-        git -C "$ROOT" show "$c:$REL" > "$tmp" 2>/dev/null || continue
-        if holds "$tmp"; then old="$tmp"; echo "The runtime has the patch of $(git -C "$ROOT" log -1 --format='%h (%cs)' "$c")."; break; fi
+    for c in $(g -C "$ROOT" log --format=%H -n 60 -- "$REL" 2>/dev/null); do
+        g -C "$ROOT" show "$c:$REL" > "$tmp" 2>/dev/null || continue
+        if holds "$tmp"; then old="$tmp"; echo "The runtime has the patch of $(g -C "$ROOT" log -1 --format='%h (%cs)' "$c")."; break; fi
     done
 fi
 if [ -z "$old" ]; then

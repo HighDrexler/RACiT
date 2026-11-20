@@ -34,8 +34,12 @@ class Cases:
     """The cases, for a runtime self.rt, patches self.p1 (older) and self.p2 (current),
     self.created (a file p1 creates) and self.edited (a file both change)."""
 
+    env = None
+    cwd = None
+
     def run_script(self, patch, *extra):
-        return subprocess.run(['bash', str(SCRIPT), str(self.rt), str(patch), *extra], capture_output=True, text=True)
+        return subprocess.run(['bash', str(SCRIPT), str(self.rt), str(patch), *extra], capture_output=True, text=True,
+                              env=self.env, cwd=self.cwd)
 
     def status(self):
         return git(self.rt, 'status', '--porcelain', '--untracked-files=all')
@@ -126,6 +130,25 @@ class FakeRuntime(Cases, unittest.TestCase):
         path = self.dir / (name + '.patch')
         path.write_text(out)
         return path
+
+
+class WindowsGitSettings(FakeRuntime):
+    """The same with Git for Windows' default core.autocrlf=true, run from mac/ (inside
+    this repository, so git commands must not take the caller's directory)."""
+
+    def setUp(self):
+        super().setUp()
+        config = self.dir / 'gitconfig'
+        config.write_text('[core]\n\tautocrlf = true\n[user]\n\tname = t\n\temail = t@t\n')
+        self.env = dict(os.environ, GIT_CONFIG_GLOBAL=str(config))
+        self.cwd = str(ROOT / 'mac')
+
+    def test_files_stay_lf(self):
+        self.assertEqual(self.run_script(self.p2).returncode, 0)
+        r = self.run_script(self.p2, '--reset')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn(b'\r', (self.rt / 'b.c').read_bytes())
+        self.assert_holds(self.p2)
 
 
 CLONE = os.environ.get('RACIT_RUNTIME_CLONE')
