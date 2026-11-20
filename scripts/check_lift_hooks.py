@@ -195,7 +195,7 @@ def main():
                  % (options.profile, options.recomp, os.path.relpath(hook_list, ROOT), '\n  '.join(missing)))
     print('check_lift_hooks: %s: all %d expected hooks present in %s' % (options.profile, len(hooks), options.recomp))
     if options.stamp:
-        with open(options.stamp, 'w') as f:
+        with open(options.stamp, 'w', encoding='utf-8') as f:
             f.write('ok\n')
 
 
