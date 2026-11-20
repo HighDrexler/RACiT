@@ -19,7 +19,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CHECK = ROOT / 'scripts' / 'check_lift_hooks.py'
-PROFILES = ('BCUS98124-1.00', 'BCUS98124-1.20')
+PROFILES = ('BCUS98124-1.00', 'BCUS98124-1.20', 'BCES00511-1.00')
 HOOK = re.compile(r'\b((?:racacit|racit)_[a-z0-9_]+)\(')
 
 
@@ -50,6 +50,17 @@ def inserted_by_patch_lift():
     return names
 
 
+def usa_only_hooks():
+    """Hooks patch_lift.py puts in only when BUILD_TITLE == 'BCUS98124'."""
+    source = (ROOT / 'scripts' / 'patch_lift.py').read_text(encoding='utf-8')
+    names = set()
+    blocks = re.split(r'\n    sp = |\n    for fname in ', source)
+    for block in blocks:
+        if "if BUILD_TITLE == 'BCUS98124'" in block.split('\n', 1)[0]:
+            names.update(n for n in HOOK.findall(block) if 'ctx' in block)
+    return names - {'racacit_jb_push', 'racacit_longjmp'}
+
+
 def inserted_by_update120_recipe():
     recipe = json.loads((ROOT / 'versions' / 'BCUS98124-1.20-hooks.json').read_text(encoding='utf-8'))
     names = set()
@@ -69,6 +80,21 @@ class HookLists(unittest.TestCase):
         hooks, _ = hook_list('BCUS98124-1.20')
         missing = sorted(inserted_by_update120_recipe() - set(hooks))
         self.assertEqual(missing, [], 'add these to versions/BCUS98124-1.20-hook-symbols.txt')
+
+    def test_european_list_is_the_usa_one_converted(self):
+        us, us_functions = hook_list('BCUS98124-1.00')
+        eu, eu_functions = hook_list('BCES00511-1.00')
+        address = {}
+        for line in (ROOT / 'versions' / 'BCES00511' / 'addr_map.tsv').read_text(encoding='utf-8').splitlines():
+            if line and not line.startswith('#'):
+                usa, europe = line.split()[:2]
+                address[usa] = europe
+        self.assertEqual(eu_functions, [address[f] for f in us_functions])
+        self.assertTrue(set(eu) <= set(us), sorted(set(eu) - set(us)))
+        for name, count in eu.items():
+            self.assertEqual(count, us[name], name)
+        # What it leaves out is what patch_lift.py only puts into the USA disc.
+        self.assertEqual(sorted(set(us) - set(eu)), sorted(usa_only_hooks()))
 
     def test_menu_and_camera_hooks_are_checked_on_every_version(self):
         for profile in PROFILES:
@@ -186,6 +212,13 @@ class CheckLiftHooks(unittest.TestCase):
             self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
             self.assertNotIn('re-running', again.stdout)
 
+    def test_wrong_version_lift_is_not_patched(self):
+        us, us_functions = hook_list('BCUS98124-1.00')
+        with tempfile.TemporaryDirectory() as directory:
+            self.lift(directory, us, us_functions)
+            result = self.run_check(directory, 'BCES00511-1.00', '--patch', '--elf', 'none.elf')
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('is not a BCES00511-1.00 lift', result.stdout + result.stderr)
 
 
 if __name__ == '__main__':
