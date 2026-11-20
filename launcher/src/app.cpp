@@ -139,6 +139,14 @@ static void capture_done(const std::string& name)
     if (fn) fn(name);
 }
 
+// The name a binding is saved under: SDL's, except the comma key, whose name ","
+// is the separator of the key list; the game reads "Comma" back (cellPad.c).
+static std::string bind_name(SDL_Scancode s)
+{
+    if (s == SDL_SCANCODE_UNKNOWN) return std::string();
+    return s == SDL_SCANCODE_COMMA ? std::string("Comma") : std::string(SDL_GetScancodeName(s));
+}
+
 // A key's SDL name from its hardware scan code (WM_KEYDOWN's lParam), the way SDL
 // itself reads the keyboard on Windows: by position, so the game sees the same key.
 static std::string key_name_from_scan(LPARAM l)
@@ -146,7 +154,7 @@ static std::string key_name_from_scan(LPARAM l)
 #ifdef __APPLE__
     // The Mac loop sends SDL's own scan code (a USB HID position, as above) in bits 16-25.
     const SDL_Scancode mac_sc = (SDL_Scancode)((l >> 16) & 0x3FF);
-    return mac_sc == SDL_SCANCODE_UNKNOWN ? std::string() : std::string(SDL_GetScancodeName(mac_sc));
+    return bind_name(mac_sc);
 #endif
     const unsigned sc = (unsigned)(l >> 16) & 0xFF; const bool ext = (l >> 24) & 1;
     static const SDL_Scancode base[0x59] = {
@@ -179,7 +187,7 @@ static std::string key_name_from_scan(LPARAM l)
         case 0x5D: s = SDL_SCANCODE_APPLICATION; break;
         }
     } else if (sc < 0x59) s = base[sc];
-    return s == SDL_SCANCODE_UNKNOWN ? std::string() : std::string(SDL_GetScancodeName(s));
+    return bind_name(s);
 }
 
 static void run_task(const std::string& title, std::function<std::string(Progress*)> fn, std::function<void(const std::string&)> done)
@@ -588,8 +596,12 @@ static std::vector<std::string> split_keys(const std::string& v)
 {
     std::vector<std::string> out; size_t a = 0;
     for (;;) {
-        const size_t c = v.find(',', a);
-        const std::string t = trim(v.substr(a, c == std::string::npos ? std::string::npos : c - a));
+        // Settings saved before "Comma" have the comma key as itself: a "," that
+        // starts an entry and is followed by another "," or the end.
+        const bool old_comma = a < v.size() && v[a] == ',' && (a + 1 == v.size() || v[a + 1] == ',');
+        const size_t c = v.find(',', old_comma ? a + 1 : a);
+        std::string t = trim(v.substr(a, c == std::string::npos ? std::string::npos : c - a));
+        if (t == ",") t = "Comma";
         if (!t.empty() && lower(t) != "none") out.push_back(t);
         if (c == std::string::npos) break;
         a = c + 1;
@@ -617,7 +629,7 @@ static std::string input_label(const std::string& k)
 {
     static const std::pair<const char*, const char*> m[] = { { "mouse1", "Left click" }, { "mouse2", "Middle click" },
         { "mouse3", "Right click" }, { "mouse4", "Mouse back" }, { "mouse5", "Mouse forward" }, { "wheelup", "Wheel up" },
-        { "wheeldown", "Wheel down" } };
+        { "wheeldown", "Wheel down" }, { "comma", "," } };
     for (auto& e : m) if (lower(k) == e.first) return e.second;
     return k;
 }
