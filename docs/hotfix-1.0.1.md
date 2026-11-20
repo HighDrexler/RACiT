@@ -18,6 +18,8 @@ The quick select badges show the keys that actually page rings while the ring is
 
 Review round 2 added a few more. Each HUD picture write now checks again, right before copying, that the table entry still points at the same address and the bytes are still what the scan saw (the only window left is between that compare and the copy, since the guest runs on its own threads). The Kinetic Tether picture gets resolved on every scan, so it follows the texture when it moves. Before, it was found during the level load before its pixels were in, got refused, and never looked at again, so it kept showing R2 + square. `RACACIT_PROMPT_CHECK` now counts a tether still showing the controller's art as wrong. Keys bound to punctuation (`[ ] ; ' , . / \ - = \``) get their own letters, and anything else shows its SDL name shortened (KP5, RALT, PGDN) instead of a "?". #76 also only reuses a cached archive with a `.ok` marker it wrote itself after checking it, and makes a new one by renaming over the old one in one step.
 
+Round 3 tightened that more. Each HUD picture is now copied once up front, and finding it, telling which button it is and making the key all work from that copy, so the compare right before the write is against what was actually identified. Before it read the live memory again in between, so a new occupant arriving in that window could still get a key. The tether check also compares against the font's R1/R2 art saved from before the keycaps went in. When you start on a keyboard the keycaps are already in the font page before the tether is first checked, so it compared the picture with keys and never matched. On rename failure #76 now only falls back to an archive it checked itself, and otherwise plays that session from its checked temporary and clears leftover temporaries on the next start.
+
 It also fixes a crash in those HUD keycaps. A level's HUD textures sit in main memory for a bit and then move, and the game reuses the old memory. The keycap code kept drawing into it, and on the Mac the game crashed after saving or loading from the pause menu. Now it checks the picture is still where the table says and still looks like itself before writing anything.
 
 For tests there's `RACACIT_PROMPT_CHECK=1`, which logs every 5 s whether any button picture still shows the other input's art, and `tests/test_menu_keycaps.py`, which builds a fake global_cached.psarc and checks the script and the game's own C++ make the same archive byte for byte, that it's on by default and off with 0, and that the actions file is actually in the repo.
@@ -27,6 +29,16 @@ Tested: RESULTS_KEYCAPS
 Not tested: Windows, Android, a real controller plugged in (the headless runs force the switch back to controller glyphs instead), the EU disc (no EU EBOOT here).
 
 Still showing controller buttons: the L1/R1 tab badges at the top of the inventory (and probably other tabbed menus). Those are `btn_L1`/`btn_R1` clips in pausemenu.swf with "L1" text, not ButtonPrompts or font glyphs, so they need a change to menu_keycaps.as and recompiled actions. That's a follow-up.
+
+## The comma key can't be bound (`fix/comma-binding`)
+
+A binding is a list of SDL key names split at commas, and SDL calls the comma key ",", so binding it saved something that read back as nothing. The launcher now saves it as "Comma", the game and the keycap prompts read that, and settings saved before (`,` or `A,,`) still read as the comma key. `tests/test_comma_binding.py` builds the launcher's and the game's list readers and checks both read the same keys.
+
+Tested: RESULTS_COMMA
+
+## Version 1.0.1 (`release/1.0.1-version`)
+
+Just the version bump, merged last so it's easy to drop if you number it differently: kLauncherVersion (which the Mac zip name and the release lookup use), the Windows resource, the game version the launcher shows, and the launcher README. mac/package_macos.sh's `file_format_version` is the manifest format, so it stays 1.0.0.
 
 ## Update 1.20 doesn't build (`fix/u120-build`)
 
@@ -43,6 +55,8 @@ Not tested: Windows, 1.20 on anything but the Zolar Forest route.
 The lift is generated once and patch_lift.py patches it, so a lift patched before a hook was added builds fine without it. That already shipped a Mac build with no mouse camera and no menu keycaps once. Now CMake re-runs patch_lift.py at configure time when it, its inputs, a hook list or the lift changed (a change to the patcher or a list configures again), and the build step only checks, so it never rewrites a source Ninja already decided was up to date. If a hook is still missing the build stops with the list.
 
 versions/*-hook-symbols.txt list every hook for 1.00, 1.20 and the EU disc. Only real calls count, so comments, strings, declarations and the helper each chunk defines don't, and a commented-out hook shows up as missing. The counts are the real call counts of freshly patched 1.00 and 1.20 lifts, and the 1.00 list now has the cheat menu's three hooks too. The EU list is the USA one with its @function lines converted through versions/BCES00511/addr_map.tsv and without the hooks patch_lift.py only puts into the USA disc, and scripts/build_version.sh now passes the EU profile and EBOOT so the EU build checks against it instead of the USA list. I don't have an EU EBOOT, so the EU build and its counts aren't checked here. Also fixes 1.20 chunks patched by an older recipe getting two preambles. `RACACIT_CHECK_HOOKS=OFF` skips it.
+
+Round 3 made `#if`/`#elif`/`#else` work as a proper stack, so only the live branch of nested blocks counts.
 
 Round 2 made the check run on every build (not only when re-patching), so a USA lift doesn't pass as the EU one, and calls only count inside lifted function bodies and outside `#if 0`.
 
@@ -72,7 +86,7 @@ Not tested: Windows or MSVC (no Windows machine here, the MSVC path is only read
 
 ## macOS freezes when Qwark kicks down a wall (`fix/rsx-retire-no-writewatch`)
 
-On the Mac the picture froze in Zolar Forest when Qwark kicks down one of the walls (audio kept going). Without the write watch, which is always off outside Windows, eng_surface_retire wrote retired render targets back into main memory over whatever the game keeps there now, SPU job code included. This skips that write-back to main memory when the write watch is off. Local memory works like before, and Windows with the write watch doesn't change. It's the same hunk as #71, which is on the v0.19 runtime, ported to main's runtime patch.
+On the Mac the picture froze in Zolar Forest when Qwark kicks down one of the walls (audio kept going). Without the write watch, which is always off outside Windows, eng_surface_retire wrote retired render targets back into main memory over whatever the game keeps there now, SPU job code included. This skips that write-back to main memory when the write watch is off, and from round 3 such a target isn't evicted at all then (the GPU has the only copy of its pixels), so eviction picks another one, and if every target is like that it logs the one it drops. Local memory works like before, and Windows with the write watch doesn't change. It's the same hunk as #71, which is on the v0.19 runtime, ported to main's runtime patch.
 
 Tested: RESULTS_RETIRE
 
@@ -82,7 +96,9 @@ Not tested: Windows and Linux.
 
 Branch: `fix/mouse-direct-all-cameras`, see its own PR. Merged here so it gets tested with the rest. From review it got two fixes too. Re-patching a lift that 1.0.0 already patched put a second mouse_angles into the follow camera, so the lift didn't compile, now the old patch comes out first (`tests/test_mouse_repatch.py` re-patches a small lift with either 1.0.0 patch). And X and Y of a mouse move now change together under one lock, so a camera never gets half a diagonal move (`tests/desktop_mouse_test.cpp` has a two-thread check).
 
-Round 2 also fixed two upgrade problems. The setups only patched a fresh tools/ps3recomp, so a 1.0.0 checkout kept the old cellPad.c, which calls racit_mouse_step and racit_camera_follow_active and doesn't link anymore. Now scripts/setup_windows.sh and mac/setup_macos.sh keep the hash of the applied patch in tools/ps3recomp/.racit-patch and reset and re-apply when it changes, and desktop_mouse.cpp keeps tiny versions of those two old calls anyway. And motion fed right before the cameras pause (a menu, a cutscene) is dropped after 250 ms instead of turning the camera when play resumes.
+Round 2 also fixed two upgrade problems. The setups only patched a fresh tools/ps3recomp, so a 1.0.0 checkout kept the old cellPad.c, which calls racit_mouse_step and racit_camera_follow_active and doesn't link anymore. Now scripts/setup_windows.sh and mac/setup_macos.sh keep the hash of the applied patch in tools/ps3recomp/.racit-patch and reset and re-apply when it changes, and desktop_mouse.cpp keeps tiny versions of those two old calls anyway. Round 3 made the setups stop wiping local changes. scripts/update_runtime_patch.sh reverse-applies the patch that was applied before and then applies the new one, and if that doesn't work it stops and says to commit or stash, or to pass `--reset`. The stale-motion check and its timestamp now both happen under the lock, and feeding new motion resets it.
+
+And motion fed right before the cameras pause (a menu, a cutscene) is dropped after 250 ms instead of turning the camera when play resumes.
 
 Whichever of this and `fix/hook-check` goes in second needs the small change the hotfix merge has: the hook lists expect racit_camera_turn (17), racit_camera_peek (1) and racit_mouse_now (18) instead of racit_camera_take, and the `--patch` test lift needs the ten camera functions.
 
