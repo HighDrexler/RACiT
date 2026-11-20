@@ -1,57 +1,84 @@
 /* Desktop mouse runtime for RACiT. C ABI and C++11 atomics.
- * Camera displacement is consumed once per follow-camera update. */
+ *
+ * The mouse turns every camera the right stick turns, directly. Each camera's update
+ * carries a hook (scripts/patch_lift.py, MOUSE_CAMERAS) that takes the mouse motion since
+ * the last camera update, in radians, and adds it once to that camera's own yaw and pitch
+ * step. The right stick keeps working alongside it: the hooks add to the stick's turn.
+ *
+ * Motion only counts while some hooked camera is updating: in menus, cutscenes and loading
+ * screens no camera takes it, and it is dropped instead of turning the camera when play
+ * resumes. tests/desktop_mouse_test.cpp checks this file without the game. */
 #include <atomic>
-#include <cmath>
 #include <cstdint>
-#include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 namespace {
 std::atomic<bool> captured{false};
 std::atomic<int64_t> camera_x{0}, camera_y{0};
-std::atomic<uint64_t> follow_time{0};
-}
-extern "C" int racit_camera_follow_active(uint64_t now)
+std::atomic<uint64_t> take_time{0};
+/* Radians per count, x 1e9, at 100% (public PR #66): 0.003 rad, ~0.17 degree. */
+constexpr double kGain = 3000000.0;
+constexpr double kNano = 1000000000.0;
+bool tracing()
 {
-    const uint64_t last = follow_time.load();
-    /* 250 ms (public PR #66): longer than a slow frame, short enough that motion made in a
-     * menu or another camera is dropped instead of turning the camera when play resumes. */
+    static const int on = [] { const char* v = std::getenv("RACACIT_MOUSE_TRACE"); return v && *v == '1'; }();
+    return on != 0;
+}
+}
+
+/* A hooked camera updated in the last 250 ms (public PR #66): longer than a slow frame,
+ * short enough that motion made in a menu or a cutscene is dropped. */
+extern "C" int racit_camera_active(uint64_t now)
+{
+    const uint64_t last = take_time.load();
     return last > 0 && (now < last || now - last < 250000000ULL);
 }
+
+/* The runtime's pad poll (cellPad.c): the captured mouse's motion since the last poll,
+ * the Settings > Controls mouse speed (percent) and Invert mouse Y. */
 extern "C" void racit_camera_feed(uint64_t now, int dx, int dy, int capture, float sensitivity, int invert)
 {
-    if (!capture) {
-        captured.store(false); camera_x.store(0); camera_y.store(0); return;
+    if (!capture || !racit_camera_active(now)) {
+        camera_x.store(0); camera_y.store(0); captured.store(capture != 0); return;
     }
-    if (!racit_camera_follow_active(now)) {
-        camera_x.store(0); camera_y.store(0); captured.store(true); return;
-    }
-    const double gain = 3000000.0 * sensitivity / 100.0;
+    const double gain = kGain * sensitivity / 100.0;
     camera_x.fetch_add((int64_t)(dx * gain));
     camera_y.fetch_add((int64_t)(dy * gain * (invert ? -1 : 1)));
     captured.store(true);
 }
+
+/* A camera hook: the motion since the last take, yaw (right positive) and pitch (down
+ * positive) in radians, each used once. Returns 0 when there is none, so the hook leaves
+ * the game's own (stick) turn alone. */
 extern "C" int racit_camera_take(double* angles, uint64_t now)
 {
-    follow_time.store(now);
+    take_time.store(now);
+    angles[0] = angles[1] = 0.0;
     if (!captured.load()) return 0;
-    angles[0] = (double)camera_x.exchange(0) / 1000000000.0;
-    angles[1] = (double)camera_y.exchange(0) / 1000000000.0;
+    angles[0] = (double)camera_x.exchange(0) / kNano;
+    angles[1] = (double)camera_y.exchange(0) / kNano;
     return angles[0] != 0.0 || angles[1] != 0.0;
 }
-struct RacitMouseState { uint64_t epoch_ns; int64_t dx, dy; float x, y; };
-extern "C" void racit_mouse_step(RacitMouseState* state, uint64_t now, int dx, int dy, int capture, float sensitivity, int invert)
+
+/* The camera that hands back to the default one when the stick moves: whether the mouse
+ * moved, without using the motion (the camera it hands to takes it). */
+extern "C" int racit_camera_peek(uint64_t now)
 {
-    if (!capture) { *state = {}; return; }
-    if (!state->epoch_ns) state->epoch_ns = now;
-    state->dx += dx; state->dy += dy;
-    const uint64_t elapsed = now - state->epoch_ns;
-    if (elapsed < 8000000) return;
-    const float gain = .11f * sensitivity / 100.f;
-    const auto convert = [elapsed, gain](int64_t distance) {
-        if (!distance) return 0.f;
-        const float speed = std::fabs((float)distance) / ((float)elapsed / 1000000.f) * gain;
-        const float value = .22f + .78f * std::min(speed, 1.f);
-        return distance < 0 ? -value : value;
-    };
-    state->x = convert(state->dx); state->y = convert(state->dy) * (invert ? -1.f : 1.f);
-    state->dx = state->dy = 0; state->epoch_ns = now;
+    take_time.store(now);
+    return captured.load() && (camera_x.load() != 0 || camera_y.load() != 0);
+}
+
+/* The hooks call this one: racit_camera_take, plus a line per turn with
+ * RACACIT_MOUSE_TRACE=1 (tests/mac_mouse_cameras.py reads them). */
+extern "C" int racit_camera_turn(const char* camera, double* angles, uint64_t now)
+{
+    const int r = racit_camera_take(angles, now);
+    if (r && tracing()) std::fprintf(stderr, "[mouse] %s turn %.5f %.5f\n", camera, angles[0], angles[1]);
+    return r;
+}
+
+/* A hook's view of the result: what its camera angle became (RACACIT_MOUSE_TRACE=1). */
+extern "C" void racit_camera_trace_angle(const char* camera, double before, double after)
+{
+    if (tracing()) std::fprintf(stderr, "[mouse] %s angle %.5f -> %.5f\n", camera, before, after);
 }

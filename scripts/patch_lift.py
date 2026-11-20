@@ -30,11 +30,163 @@
 
 Usage: scripts/patch_lift.py [game/src/recomp]
 """
-import glob, os, re, sys
+import glob, json, os, re, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, 'scripts'))
 from game_version import identify_profile
+
+
+def func_span(src, name):
+    m = re.search(r'void %s\(ppu_context\* ctx\) \{\n' % name, src)
+    if not m:
+        return None
+    end = src.index('\n}\n', m.end())
+    return m.start(), m.end(), end
+
+
+# 22. The mouse turns every camera the right stick turns, directly (game/desktop_mouse.cpp;
+#     public PRs #34 and #66, petralithic). Each camera's update takes the mouse motion since
+#     the last camera update (radians, used once) and adds it to that camera's own yaw and
+#     pitch step, after the stick's: a controller keeps working with the mouse captured. The
+#     pad runtime no longer turns the mouse into a right-stick push.
+#
+#     MOUSE_CAMERAS is the recipe per camera, with places given relative to the function's
+#     start so one recipe serves every executable; MOUSE_CAMERA_FUNCS says where each camera's
+#     update is in each profile (scripts/retarget.py converts the disc names for BCES00511).
+#     An edit is ('before', offset, code): before the call returning to start+offset;
+#     ('after', offset, code): after it; ('text', line, code): before that line. Signs follow
+#     "the mouse is the right stick with the game's invert settings off" (mouse right and down
+#     positive). The build stops if any camera of the profile is missing a hook.
+MOUSE_CAMERAS = {
+    # Follow camera (the default third-person one). f1 is the yaw step into the rotation;
+    # f31 the pitch target, kept within the game's own limits ([r30-0x7F24], [r30-0x7F1C]).
+    'follow': (('before', 0x398, 'ctx->fpr[1] -= mouse_angles[0];'),
+               ('text', 'ctx->fpr[3] = ppu_fp_single(ppu_fsub(ctx->fpr[31], ctx->fpr[1]));',
+                '{ uint32_t lb = vm_read32(ctx->gpr[30] - 0x7F24), hb = vm_read32(ctx->gpr[30] - 0x7F1C);\n'
+                '          float lo, hi; memcpy(&lo, &lb, 4); memcpy(&hi, &hb, 4);\n'
+                '          const double target = ctx->fpr[31] + mouse_angles[1] - ctx->fpr[1];\n'
+                '          ctx->fpr[31] = fmin(fmax(target, lo), hi) + ctx->fpr[1]; }')),
+    # Two free-look cameras: yaw then pitch step, each into its own rotation.
+    'look': (('before', 0x264, 'ctx->fpr[1] -= mouse_angles[0];'),
+             ('before', 0x280, 'ctx->fpr[1] += mouse_angles[1];')),
+    'look2': (('before', 0x270, 'ctx->fpr[1] -= mouse_angles[0];'),
+              ('before', 0x294, 'ctx->fpr[1] += mouse_angles[1];')),
+    # An orbit camera: the step returned for the yaw and the pitch angle, which the game then
+    # wraps or clamps to its own limits.
+    'orbit': (('after', 0x270, 'ctx->fpr[1] -= mouse_angles[0];'),
+              ('after', 0x2D4, 'ctx->fpr[1] -= mouse_angles[1];')),
+
+    # A camera that reads the stick with its axes swapped: pitch first, then yaw.
+    'free': (('before', 0x3D8, 'ctx->fpr[1] -= mouse_angles[1];'),
+             ('before', 0x3F8, 'ctx->fpr[1] += mouse_angles[0];')),
+    # Strafe (L2, over the shoulder): yaw and pitch steps, which the game then limits.
+    'strafe': (('after', 0x300, 'ctx->fpr[1] -= mouse_angles[0];'),
+               ('after', 0x3A4, 'ctx->fpr[1] += mouse_angles[1];')),
+    # The lock camera (class 0xC239BC): the yaw step. Its pitch is a tilt that springs back to
+    # level with the stick, not an angle the player holds, so the mouse leaves it alone.
+    'lock': (('before', 0x4C8, 'ctx->fpr[1] -= mouse_angles[0];'),),
+    # First-person look (hero state): the yaw step, and the pitch before the game clamps it.
+    'hero_look': (('before', 0x228, 'ctx->fpr[1] -= mouse_angles[0];'),
+                  ('text', 'ctx->fpr[6] = ppu_fp_single(ppu_fadd(ctx->fpr[31], ctx->fpr[8]));',
+                   'ctx->fpr[31] += mouse_angles[1];')),
+    # Turrets: yaw and pitch steps into the turret's own limited turns.
+    'turret': (('before', 0x110, 'ctx->fpr[1] -= mouse_angles[0];'),
+               ('before', 0x11C, 'ctx->fpr[1] += mouse_angles[1];')),
+    # The camera that hands back to the default one when the stick moves: a mouse move
+    # counts as that push. It only looks; the camera it hands to takes the motion.
+    'handback': (('after', 0x9C, 'peek'),),
+}
+_DISC_CAMERAS = {
+    'follow': 'func_000459D4', 'look': 'func_0003DD98', 'look2': 'func_00044050',
+    'orbit': 'func_00047104', 'strafe': 'func_0004833C', 'free': 'func_00048B38',
+    'lock': 'func_00041E34', 'hero_look': 'func_001AFF7C', 'turret': 'func_0037F18C',
+    'handback': 'func_00049450',
+}
+MOUSE_CAMERA_FUNCS = {
+    'BCUS98124-1.00': _DISC_CAMERAS,
+    'BCES00511-1.00': _DISC_CAMERAS,
+    # Update 1.20 (tools/racit_update120_fndiff.py): written as numbers so retarget leaves them.
+    'BCUS98124-1.20': {name: 'func_%08X' % a for name, a in (
+        ('follow', 0x459d4), ('look', 0x3dd98), ('look2', 0x44050), ('orbit', 0x47104),
+        ('strafe', 0x4833c), ('free', 0x48b38), ('lock', 0x41e34), ('hero_look', 0x1aff80),
+        ('turret', 0x37f4c4), ('handback', 0x49450))},
+}
+MOUSE_DECLS = ('extern "C" int racit_camera_turn(const char*, double*, unsigned long long);\n'
+               'extern "C" int racit_camera_peek(unsigned long long);\n'
+               'extern "C" unsigned long long SDL_GetPerformanceCounter(void);\n'
+               'extern "C" unsigned long long SDL_GetPerformanceFrequency(void);\n'
+               'static inline unsigned long long racit_mouse_now(void) { return (unsigned long long)'
+               '((double)SDL_GetPerformanceCounter() * 1000000000.0 / (double)SDL_GetPerformanceFrequency()); }\n')
+
+
+def mouse_camera_edit(fn, start, name, edit):
+    """fn with one edit of camera name applied, or None when its place is not there once."""
+    kind, where, code = edit
+    if code == 'peek':
+        code = 'if (racit_camera_peek(racit_mouse_now())) ctx->fpr[1] = 1.0;   /* racacit mouse: %s */\n' % name
+    else:
+        code = ('if (!mouse_taken) { mouse_taken = 1; mouse_direct = racit_camera_turn("%s", mouse_angles, racit_mouse_now()); }\n'
+                '        if (mouse_direct) %s   /* racacit mouse: %s */\n' % (name, code, name))
+    if kind == 'text':
+        lines = [m.start() for m in re.finditer(r'(?m)^ *' + re.escape(where) + r'\n', fn)]
+    else:
+        pat = r'(?m)^ *ctx->lr = 0x%08X; func_[0-9A-F]{8}\(ctx\); DRAIN_TRAMPOLINE\(ctx\);\n' % (start + where)
+        lines = [m.start() if kind == 'before' else m.end() for m in re.finditer(pat, fn)]
+    if len(lines) != 1:
+        return None
+    return fn[:lines[0]] + '        ' + code + fn[lines[0]:]
+
+
+def apply_mouse_cameras(recomp, profile_id):
+    """Puts every camera's mouse hook into the lift; stops the build if one is missing."""
+    funcs = MOUSE_CAMERA_FUNCS.get(profile_id)
+    if funcs is None or set(funcs) != set(MOUSE_CAMERAS):
+        sys.exit('patch_lift #22: no complete mouse camera table for ' + profile_id)
+    done, failed = set(), []
+    for path in sorted(glob.glob(os.path.join(recomp, 'ppu_recomp_*.cpp'))):
+        src = open(path).read()
+        changed = False
+        for name, func in sorted(funcs.items()):
+            sp = func_span(src, func)
+            if not sp:
+                continue
+            fn = src[sp[0]:sp[2]]
+            if '/* racacit mouse: %s */' % name in fn:
+                done.add(name); continue
+            start = int(func[5:], 16)
+            for edit in MOUSE_CAMERAS[name]:
+                fn = mouse_camera_edit(fn, start, name, edit)
+                if fn is None:
+                    break
+            if fn is None:
+                failed.append('%s (%s)' % (name, func)); continue
+            if any(e[2] != 'peek' for e in MOUSE_CAMERAS[name]):
+                head = 'void %s(ppu_context* ctx) {\n' % func
+                fn = fn.replace(head, head + '        double mouse_angles[2] = {0, 0}; int mouse_taken = 0, mouse_direct = 0;   /* racacit */\n', 1)
+            src = src[:sp[0]] + fn + src[sp[2]:]
+            done.add(name); changed = True
+        if changed:
+            if 'racit_mouse_now(void)' not in src:
+                i = src.index('\n', src.index('#include')) + 1
+                src = src[:i] + MOUSE_DECLS + src[i:]
+            open(path, 'w').write(src)
+    missing = sorted(set(MOUSE_CAMERAS) - done)
+    if failed or missing:
+        sys.exit('patch_lift #22: mouse camera hooks missing for %s: %s'
+                 % (profile_id, ', '.join(failed + ['%s (%s not found)' % (m, funcs[m]) for m in missing if not any(f.startswith(m + ' ') for f in failed)])))
+    print('patch_lift #22: mouse hooks in all %d cameras (%s)' % (len(done), profile_id))
+
+
+
+def check_mouse_camera_tables():
+    """Every known profile (versions/profiles.json) has a place for every mouse camera."""
+    with open(os.path.join(ROOT, 'versions', 'profiles.json'), encoding='utf-8') as f:
+        ids = [p['id'] for p in json.load(f)['profiles']]
+    bad = [i for i in ids if set(MOUSE_CAMERA_FUNCS.get(i, ())) != set(MOUSE_CAMERAS)]
+    if bad:
+        sys.exit('patch_lift #22: mouse camera table incomplete for ' + ', '.join(bad))
+
 
 # An update of the same title can have a different code and data layout.
 # Check the decrypted executable before any generated source is touched.
@@ -84,6 +236,8 @@ if options.elf:
         sys.path.insert(0, os.path.join(ROOT, 'scripts'))
         from update120_hooks import apply_update120_hooks
         apply_update120_hooks(RECOMP, options.elf)
+        check_mouse_camera_tables()
+        apply_mouse_cameras(RECOMP, profile['id'])
         import subprocess
         subprocess.run([sys.executable, os.path.join(ROOT, 'scripts', 'fix_vmx_alias.py'), RECOMP],
                        check=True)
@@ -137,14 +291,6 @@ LUA_CTRACE = (
     ('func_00291444', 'on_audio_end'), ('func_0051CF70', 'play_explicit_dialog_spec'),
     ('func_0051D078', 'play_explicit_sound_spec'), ('func_0051C4D8', 'stop_vo'),
 )
-
-
-def func_span(src, name):
-    m = re.search(r'void %s\(ppu_context\* ctx\) \{\n' % name, src)
-    if not m:
-        return None
-    end = src.index('\n}\n', m.end())
-    return m.start(), m.end(), end
 
 
 def patch_file(path):
@@ -659,46 +805,6 @@ def patch_file(path):
         else:
             print('patch_lift #21: func_004C8898: Init call not found once (%d)' % len(hits))
 
-    # 22. The mouse turns the follow camera directly (game/desktop_mouse.cpp; public PR #34,
-    #     petralithic). In func_000459D4, f1 before func_00633C34 is the game's yaw step and
-    #     f31 before the pitch subtraction its pitch target; while the mouse moved since the
-    #     last update, the mouse adds to them (public PR #66), the pitch clamped to the game's own
-    #     limits ([r30-0x7F24], [r30-0x7F1C]). A still mouse returns 0, so a controller's
-    #     right stick keeps turning the camera with the mouse captured.
-    sp = func_span(src, 'func_000459D4')
-    if sp and 'racit_camera_take' not in src[sp[0]:sp[2]]:
-        a_, body_, end_ = sp
-        fn = src[a_:end_]
-        changes = (
-            ('void func_000459D4(ppu_context* ctx) {\n',
-             'void func_000459D4(ppu_context* ctx) {\n'
-             '        double mouse_angles[2] = {};   /* racacit */\n'
-             '        const int mouse_direct = racit_camera_take(mouse_angles, (uint64_t)((double)SDL_GetPerformanceCounter() * 1000000000.0 / (double)SDL_GetPerformanceFrequency()));\n'),
-            ('        ctx->lr = 0x00045D6C; func_00633C34(ctx); DRAIN_TRAMPOLINE(ctx);\n',
-             '        if (mouse_direct) ctx->fpr[1] -= mouse_angles[0];   /* racacit: added to the stick turn (PR #66) */\n'
-             '        ctx->lr = 0x00045D6C; func_00633C34(ctx); DRAIN_TRAMPOLINE(ctx);\n'),
-            ('        ctx->fpr[3] = ppu_fp_single(ppu_fsub(ctx->fpr[31], ctx->fpr[1]));\n',
-             '        if (mouse_direct) {   /* racacit */\n'
-             '            uint32_t lb = vm_read32(ctx->gpr[30] - 0x7F24), hb = vm_read32(ctx->gpr[30] - 0x7F1C);\n'
-             '            float lo, hi; memcpy(&lo, &lb, 4); memcpy(&hi, &hb, 4);\n'
-             '            const double target = ctx->fpr[31] + mouse_angles[1] - ctx->fpr[1];\n'
-             '            ctx->fpr[31] = fmin(fmax(target, lo), hi) + ctx->fpr[1];\n'
-             '        }\n'
-             '        ctx->fpr[3] = ppu_fp_single(ppu_fsub(ctx->fpr[31], ctx->fpr[1]));\n'),
-        )
-        counts = [fn.count(old) for old, new in changes]
-        if counts != [1, 1, 1]:
-            print('patch_lift #22: func_000459D4: anchors not found once %s' % counts)
-        else:
-            for old, new in changes:
-                fn = fn.replace(old, new, 1)
-            src = src[:a_] + fn + src[end_:]
-            i = src.index('\n', src.index('#include')) + 1
-            src = src[:i] + ('extern "C" int racit_camera_take(double*, unsigned long long);\n'
-                             'extern "C" unsigned long long SDL_GetPerformanceCounter(void);\n'
-                             'extern "C" unsigned long long SDL_GetPerformanceFrequency(void);\n') + src[i:]
-            changed = True
-
     # 23. Keyboard keycaps in the menus (game/menu_keycaps.h, game/menu_archive.cpp; public
     #     PR #46, petralithic): the menu movies have two frame paths in BCUS98124 disc 1.00,
     #     func_004C6F6C and func_004ADB3C. Before each frame the bound key labels and the
@@ -925,6 +1031,10 @@ for p in sorted(glob.glob(os.path.join(RECOMP, 'ppu_recomp_*.cpp'))):
     if patch_file(p):
         print('patched', os.path.basename(p)); n += 1
 print(f'{n} file(s) patched')
+
+# 22. The mouse cameras (MOUSE_CAMERAS above), checked for every profile.
+check_mouse_camera_tables()
+apply_mouse_cameras(RECOMP, profile['id'] if options.elf else BUILD_TITLE + '-1.00')
 
 # 13. v42-v62 hooked the SCREAM synth (nextsynth, EBOOT 0xBFD480: the lifts
 #     sub_BFD480_04000 and spu_0001_at_00BED400) to copy the controller's
