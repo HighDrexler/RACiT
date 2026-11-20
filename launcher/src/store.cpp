@@ -1200,7 +1200,18 @@ std::string Store::install_release(const ReleaseInfo& rel, Progress* p, std::str
     if (ok && !new_launcher.empty()) {
         // A running exe can be renamed but not deleted: this one goes aside beside itself, and the next
         // start deletes it. The new launcher takes its name, whatever the player calls it.
-        { std::error_code gone; fs::remove_all(self_old, gone); }
+        // Only what an earlier update set aside: a file (Windows), or on macOS the old .app
+        // bundle. A folder of any other kind that happens to have that name is left alone,
+        // and the update then stops at the rename instead of deleting it.
+        {
+            std::error_code gone;
+#ifdef __APPLE__
+            if (fs::is_directory(self_old, gone) && fs::is_regular_file(program_of(self_old), gone))
+                fs::remove_all(self_old, gone);
+            else
+#endif
+                fs::remove(self_old, gone);
+        }
         ok = put(new_launcher, self, self_old);
     }
     if (!ok) {
