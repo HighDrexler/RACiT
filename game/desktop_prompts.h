@@ -38,10 +38,23 @@ static uint8_t desktop_letter(char ch, int row)
         {'0',{14,17,19,21,25,17,14}}, {'5',{31,16,16,30,1,1,30}},
         {'6',{14,16,16,30,17,17,14}}, {'7',{31,1,2,4,8,8,8}},
         {'8',{14,17,17,14,17,17,14}}, {'9',{14,17,17,15,1,1,14}},
+        /* The punctuation keys (SDL names them by the character). */
+        {'[',{14,8,8,8,8,8,14}}, {']',{14,2,2,2,2,2,14}},
+        {';',{0,4,4,0,4,4,8}}, {'\'',{4,4,8,0,0,0,0}},
+        {',',{0,0,0,0,4,4,8}}, {'.',{0,0,0,0,0,12,12}},
+        {'/',{1,1,2,4,8,16,16}}, {'\\',{16,16,8,4,2,1,1}},
+        {'-',{0,0,0,31,0,0,0}}, {'=',{0,0,31,0,31,0,0}},
+        {'`',{8,4,2,0,0,0,0}}, {'+',{0,4,4,31,4,4,0}},
+        {'*',{0,21,14,31,14,21,0}},
     };
     for (const auto& letter : font) if (letter.ch == ch) return letter.rows[row];
     static const uint8_t unknown[7]={14,17,1,2,4,0,4};
     return unknown[row];
+}
+static bool desktop_has_letter(char ch)
+{
+    if ((ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9')) return true;
+    return ch && strchr("[];',./\\-=`+*", ch) != nullptr;
 }
 static void desktop_blocks(const DesktopGlyph& g, uint8_t* blocks, bool write)
 {
@@ -162,11 +175,28 @@ static void desktop_binding_label(const char* name, const char* fallback, char l
         else if (!strncmp(custom,"Left Ctrl",9)) snprintf(label,8,"CTRL");
         else if (!strncmp(custom,"Left Shift",10)) snprintf(label,8,"SHIFT");
         else {
+            /* The first key's SDL name, shortened to five characters that have a letter. */
+            static const struct { const char* name; const char* label; } shorter[] = {
+                {"Escape","ESC"}, {"Backspace","BKSP"}, {"Delete","DEL"}, {"Insert","INS"},
+                {"Page Up","PGUP"}, {"PageUp","PGUP"}, {"Page Down","PGDN"}, {"PageDown","PGDN"},
+                {"CapsLock","CAPS"}, {"Caps Lock","CAPS"}, {"Right Ctrl","RCTRL"}, {"Right Shift","RSHFT"},
+                {"Left Alt","ALT"}, {"Right Alt","RALT"}, {"Left GUI","CMD"}, {"Right GUI","RCMD"},
+                {"Keypad Enter","KPENT"}, {"WheelUp","WHUP"}, {"WheelDown","WHDN"},
+            };
+            char name[48]; unsigned n = 0;
+            while (n + 1 < sizeof name && custom[n] && custom[n] != ',') { name[n] = custom[n]; n++; }
+            name[n] = 0;
+            const char* use = name;
+            for (const auto& s : shorter) if (!strcmp(name, s.name)) { use = s.label; break; }
+            char tmp[48];
+            if (use == name && !strncmp(name, "Keypad ", 7)) { snprintf(tmp, sizeof tmp, "KP%s", name + 7); use = tmp; }
             unsigned i = 0;
-            while (i < 5 && custom[i] && custom[i] != ',') {
-                const char c = custom[i]; label[i++] = c >= 'a' && c <= 'z' ? c - 'a' + 'A' : c;
+            for (const char* c = use; *c && i < 5; c++) {
+                const char u = *c >= 'a' && *c <= 'z' ? *c - 'a' + 'A' : *c;
+                if (desktop_has_letter(u)) label[i++] = u;   /* spaces and the like are left out */
             }
             label[i] = 0;
+            if (!i) snprintf(label, 8, "%s", fallback);   /* nothing drawable: the default key */
         }
     }
 }
