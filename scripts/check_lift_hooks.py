@@ -94,24 +94,38 @@ LIFTED_FUNCTION = re.compile(r'void func_[0-9A-F]{8}\(ppu_context\* ctx\) \{$')
 def lifted_body_lines(code):
     """The lines inside lifted function bodies ("void func_XXXXXXXX(ppu_context* ctx) {"
     to the "}" that closes it at the start of a line), without preprocessor lines and
-    what an "#if 0" leaves out."""
+    what a constant-false #if / #elif leaves out. A condition that isn't a plain 0 or 1
+    counts as true (the lifted code only uses #if 0 to switch code off)."""
+    def value(expr):
+        expr = expr.split('//', 1)[0].strip()
+        return False if expr == '0' else True
+    # One entry per open #if: [code here is live, a branch was taken, the enclosing was live]
+    stack = []
+    live = True
     inside = False
-    skipping = 0   # depth inside an #if 0 (nested #if lines count)
     for line in code.split('\n'):
         stripped = line.strip()
         if stripped.startswith('#'):
             word = stripped[1:].strip()
-            if skipping:
-                if word.startswith('if'):
-                    skipping += 1
-                elif word.startswith('endif'):
-                    skipping -= 1
-                elif skipping == 1 and (word.startswith('else') or word.startswith('elif')):
-                    skipping = 0   # the #else of an #if 0 is code
-            elif re.match(r'if\s+0\b', word):
-                skipping = 1
+            name = re.match(r'[a-z]*', word).group(0)
+            rest = word[len(name):]
+            if name in ('if', 'ifdef', 'ifndef'):
+                cond = value(rest) if name == 'if' else True
+                stack.append([live and cond, cond, live])
+            elif name == 'elif' and stack:
+                top = stack[-1]
+                cond = not top[1] and value(rest)
+                top[0] = top[2] and cond
+                top[1] = top[1] or cond
+            elif name == 'else' and stack:
+                top = stack[-1]
+                top[0] = top[2] and not top[1]
+                top[1] = True
+            elif name == 'endif' and stack:
+                stack.pop()
+            live = stack[-1][0] if stack else True
             continue
-        if skipping:
+        if not live:
             continue
         if not inside:
             inside = bool(LIFTED_FUNCTION.match(line))

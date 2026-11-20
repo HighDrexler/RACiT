@@ -195,6 +195,22 @@ class CheckLiftHooks(unittest.TestCase):
                 result = self.run_check(directory, 'BCUS98124-1.00')
                 self.assertNotEqual(result.returncode, 0, extra)
                 self.assertIn('racit_publish_menu_keyboard (0 of', result.stdout + result.stderr)
+        # #elif and #else of an #if 0, nested too: only the branch that is live counts.
+        for extra, counted in (
+                ('void func_00020000(ppu_context* ctx) {\n#if 0\n%s\n#elif 1\n%s\n#else\n%s\n#endif\n}', (0, 1, 0)),
+                ('void func_00020000(ppu_context* ctx) {\n#if 1\n#if 0\n%s\n#else\n%s\n#endif\n#else\n%s\n#endif\n}', (0, 1, 0)),
+                ('void func_00020000(ppu_context* ctx) {\n#if 0\n#if 1\n%s\n#else\n%s\n#endif\n#elif 0\n%s\n#endif\n}', (0, 0, 0))):
+            blocks = [calls if c else '    nothing();' for c in counted]
+            with tempfile.TemporaryDirectory() as directory:
+                self.lift(directory, hooks, functions, leave_out=('racit_publish_menu_keyboard',), extra=extra % tuple(blocks))
+                result = self.run_check(directory, 'BCUS98124-1.00')
+                self.assertEqual(result.returncode == 0, any(counted), extra + result.stdout + result.stderr)
+            # The same with calls in every branch: the dead ones must not add up.
+            with tempfile.TemporaryDirectory() as directory:
+                one = '    racit_publish_menu_keyboard(ctx);'
+                self.lift(directory, hooks, functions, leave_out=('racit_publish_menu_keyboard',),
+                          extra=extra % tuple('\n'.join([one] * (want - 1)) for _ in counted))
+                self.assertNotEqual(self.run_check(directory, 'BCUS98124-1.00').returncode, 0, extra)
         # The #else of an #if 0 is code.
         with tempfile.TemporaryDirectory() as directory:
             extra = 'void func_00020000(ppu_context* ctx) {\n#if 0\n    nothing();\n#else\n%s\n#endif\n}' % calls
