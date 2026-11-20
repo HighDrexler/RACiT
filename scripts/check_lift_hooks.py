@@ -88,6 +88,40 @@ def code_only(text):
 CALL_KEYWORDS = {'return', 'else', 'do', 'case', 'throw', 'co_return'}
 
 
+LIFTED_FUNCTION = re.compile(r'void func_[0-9A-F]{8}\(ppu_context\* ctx\) \{$')
+
+
+def lifted_body_lines(code):
+    """The lines inside lifted function bodies ("void func_XXXXXXXX(ppu_context* ctx) {"
+    to the "}" that closes it at the start of a line), without preprocessor lines and
+    what an "#if 0" leaves out."""
+    inside = False
+    skipping = 0   # depth inside an #if 0 (nested #if lines count)
+    for line in code.split('\n'):
+        stripped = line.strip()
+        if stripped.startswith('#'):
+            word = stripped[1:].strip()
+            if skipping:
+                if word.startswith('if'):
+                    skipping += 1
+                elif word.startswith('endif'):
+                    skipping -= 1
+                elif skipping == 1 and (word.startswith('else') or word.startswith('elif')):
+                    skipping = 0   # the #else of an #if 0 is code
+            elif re.match(r'if\s+0\b', word):
+                skipping = 1
+            continue
+        if skipping:
+            continue
+        if not inside:
+            inside = bool(LIFTED_FUNCTION.match(line))
+            continue
+        if line.startswith('}'):
+            inside = False
+            continue
+        yield line
+
+
 def count_calls(sources, hooks):
     """How often each hook is called in the lifted sources: real calls only."""
     counts = dict.fromkeys(hooks, 0)
@@ -98,9 +132,7 @@ def count_calls(sources, hooks):
     for path in sources:
         with open(path, encoding='utf-8', errors='replace') as f:
             code = code_only(f.read())
-        for line in code.split('\n'):
-            if line.lstrip().startswith('#'):
-                continue
+        for line in lifted_body_lines(code):
             for match in call.finditer(line):
                 prior = before.search(line, 0, match.start())
                 if prior and prior.group(1) not in CALL_KEYWORDS:

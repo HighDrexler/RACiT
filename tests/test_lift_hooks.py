@@ -183,6 +183,25 @@ class CheckLiftHooks(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0, comment)
                 self.assertIn('racit_publish_menu_keyboard (0 of', result.stdout + result.stderr)
 
+    def test_calls_outside_lifted_functions_or_in_if_0_are_missing(self):
+        hooks, functions = hook_list('BCUS98124-1.00')
+        want = hooks['racit_publish_menu_keyboard']
+        calls = '\n'.join(['    racit_publish_menu_keyboard(ctx);'] * want)
+        for extra in ('static void helper(ppu_context* ctx) {\n%s\n}' % calls,
+                      'void func_00020000(ppu_context* ctx) {\n#if 0\n%s\n#endif\n}' % calls,
+                      'void func_00020000(ppu_context* ctx) {\n#if 0\n#if 1\n%s\n#endif\n#endif\n}' % calls):
+            with tempfile.TemporaryDirectory() as directory:
+                self.lift(directory, hooks, functions, leave_out=('racit_publish_menu_keyboard',), extra=extra)
+                result = self.run_check(directory, 'BCUS98124-1.00')
+                self.assertNotEqual(result.returncode, 0, extra)
+                self.assertIn('racit_publish_menu_keyboard (0 of', result.stdout + result.stderr)
+        # The #else of an #if 0 is code.
+        with tempfile.TemporaryDirectory() as directory:
+            extra = 'void func_00020000(ppu_context* ctx) {\n#if 0\n    nothing();\n#else\n%s\n#endif\n}' % calls
+            self.lift(directory, hooks, functions, leave_out=('racit_publish_menu_keyboard',), extra=extra)
+            result = self.run_check(directory, 'BCUS98124-1.00')
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_verify_only_never_patches(self):
         hooks, functions = hook_list('BCUS98124-1.00')
         with tempfile.TemporaryDirectory() as directory:
