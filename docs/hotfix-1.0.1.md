@@ -90,6 +90,8 @@ Branch: `fix/macos-launcher-build`. On 1.0.0 the Mac launcher didn't build, laun
 
 Round 7 fixed updates on macOS. The update checked a release's game build and launcher for Windows' "MZ", so on a Mac every update got turned down as having no game program. Now it checks for a Mach-O header there (thin or universal, launcher/src/program_magic.h, with `tests/test_program_magic.py`). The .app also never got unpacked from a release, since only a top-level launcher .exe counted, so now everything under `RaCACiT Launcher.app/` does.
 
+It also builds with MSVC again. windows.h's min/max macros broke std::min/std::max in the launcher, so `NOMINMAX` now goes before every windows.h include in launcher/src (checked with clang-cl against the MSVC headers, the zig/MinGW build wasn't affected).
+
 Tested: RESULTS_LAUNCHER
 
 Not tested: Windows or MSVC (no Windows machine here, the MSVC path is only read, not compiled), an actual launcher update.
