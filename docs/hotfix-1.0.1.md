@@ -24,6 +24,8 @@ Round 4 gave the controller side's R1 swap in the tether picture the same one-co
 
 Round 7 made `RACACIT_PROMPT_CHECK` check the tether and quick select badges with the controller too. Before it only counted them there, so one still showing keys after switching back passed. Now each has to show the game's own picture or the controller art hud_sync draws for the other layout.
 
+Round 8 made that tether check compare the whole prompt: with the shoulder button redrawn for the other layout, the "+" and the square still have to be the game's own blocks, so a key left on the square side counts as wrong.
+
 It also fixes a crash in those HUD keycaps. A level's HUD textures sit in main memory for a bit and then move, and the game reuses the old memory. The keycap code kept drawing into it, and on the Mac the game crashed after saving or loading from the pause menu. Now it checks the picture is still where the table says and still looks like itself before writing anything.
 
 For tests there's `RACACIT_PROMPT_CHECK=1`, which logs every 5 s whether any button picture still shows the other input's art, and `tests/test_menu_keycaps.py`, which builds a fake global_cached.psarc and checks the script and the game's own C++ make the same archive byte for byte, that it's on by default and off with 0, and that the actions file is actually in the repo.
@@ -72,6 +74,8 @@ Tested: RESULTS_HOOKS
 
 Not tested: Windows (it runs Python from CMake there too, with the venv's interpreter).
 
+Round 8: on a cp1252 Windows console the check stopped a valid build with UnicodeEncodeError when the checkout path had other characters (C:\Users\李). It writes UTF-8 now and CMake runs it with `-X utf8` (`tests/test_lift_hooks.py` runs it on such a path with a cp1252 console).
+
 ## Mac build needs macOS 27 (`fix/macos-14`)
 
 The 1.0.0 Mac zip (RACiT-0.1.0-macos.zip) only starts on macOS 27.2 or newer: the game and the bundled SDL, Vulkan loader, glslang and SPIRV-Tools all have minos 27, because nothing set a deployment target and Homebrew's libraries are built for the build machine. The game now targets macOS 14 (with a build error for any unguarded newer API), mac/build_macos_libs.sh builds the bundled libraries for 14 from their hash-checked source tarballs, and packaging fails if anything in the zip needs a newer macOS.
@@ -89,6 +93,8 @@ Not tested: actually running on a macOS 14 machine (only checked with vtool), Wi
 Branch: `fix/macos-launcher-build`. On 1.0.0 the Mac launcher didn't build, launcher/src/store.cpp used Windows APIs outside `_WIN32` and launch_mac() was missing its closing brace. From review it also got two more fixes. The updater cleared `<launcher>.old` with remove_all, so a folder with that name got deleted with everything in it, now it only removes a file (or on macOS the old .app it set aside itself). And the AVX2 check skipped MSVC x86 builds and always said yes, now it uses `__cpuid`/`_xgetbv` from intrin.h there.
 
 Round 7 fixed updates on macOS. The update checked a release's game build and launcher for Windows' "MZ", so on a Mac every update got turned down as having no game program. Now it checks for a Mach-O header there (thin or universal, launcher/src/program_magic.h, with `tests/test_program_magic.py`). The .app also never got unpacked from a release, since only a top-level launcher .exe counted, so now everything under `RaCACiT Launcher.app/` does.
+
+Round 8 fixed which release file a Mac updates from. It only took files with "launcher" in the name, so it never found `RACiT-<version>-macos.zip` (what mac/package_macos.sh makes) and took the Windows zip from a release that has both. Now a Mac takes only the -macos.zip and Windows only the launcher zip, and a release with only the other platform's counts as none (`tests/test_release_asset.py`).
 
 It also builds with MSVC again. windows.h's min/max macros broke std::min/std::max in the launcher, so `NOMINMAX` now goes before every windows.h include in launcher/src (checked with clang-cl against the MSVC headers, the zig/MinGW build wasn't affected).
 
@@ -114,11 +120,13 @@ And motion fed right before the cameras pause (a menu, a cutscene) is dropped af
 
 Whichever of this and `fix/hook-check` goes in second needs the small change the hotfix merge has: the hook lists expect racit_camera_turn (17), racit_camera_peek (1) and racit_mouse_now (18) instead of racit_camera_take, and the `--patch` test lift needs the ten camera functions.
 
+Round 8 tightened the mouse regression (tests/mac_mouse_cameras.py): pitch is checked by the picture moving up or down instead of the hook's log line, the stick has to turn the picture the same way as the mouse (where a held key doesn't mask the scripted pad), and like mac_user_launch it checks its inputs first and won't clear a --work folder that isn't its own.
+
 Round 7 added two more. The lock camera only took the mouse's yaw, now the mouse's pitch tilts it too. Its tilt isn't an angle you hold, it follows the stick's vertical axis and springs back to level, so the mouse goes into that axis right after the stick read, clamped to the stick's range, on 1.00 and 1.20. A lift patched with the older yaw-only lock hook gets it taken out and both put in (`tests/test_mouse_repatch.py`). And scripts/update_runtime_patch.sh and the setups run git with `core.autocrlf=false` and `core.eol=lf`, so a Windows git that defaults autocrlf to true doesn't make every runtime look edited. The test covers that with a global autocrlf=true config.
 
 ## Black window with sound on the Mac (#72, `fix/macos-guest-programs`)
 
-On 1.0.0 the Mac game started from the .app showed a black window with sound. Windows and Linux turn on the guest's own shader programs (`PS3RECOMP_VK_GUEST_PROGRAMS=1`) and set `PS3_TITLE` before starting, the Mac start didn't, so the renderer took the vtable path and never uploaded a texture. Our test runs set both in the environment, which is why we never saw it. The Mac start now sets them too (the environment or settings.txt still win), and `tests/mac_user_launch.py` starts the packaged game the way a player does, without them, and checks the log for the register-file draw path and uploaded textures. The macOS 14 VM boot test now starts the game without them too.
+On 1.0.0 the Mac game started from the .app showed a black window with sound. Windows and Linux turn on the guest's own shader programs (`PS3RECOMP_VK_GUEST_PROGRAMS=1`) and set `PS3_TITLE` before starting, the Mac start didn't, so the renderer took the vtable path and never uploaded a texture. Our test runs set both in the environment, which is why we never saw it. The Mac start now sets them too (the environment or settings.txt still win), and `tests/mac_user_launch.py` starts the packaged game the way a player does, without them, and checks the log for the register-file draw path and uploaded textures. The macOS 14 VM boot test now starts the game without them too. Round 8: the test checks its inputs before anything, only clears a --work folder that's empty or its own, and fails a game that stops by itself during the run.
 
 Tested: RESULTS_GUEST
 
