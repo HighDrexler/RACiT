@@ -24,6 +24,46 @@ import sys
 import time
 
 
+MARKER = '.mac_user_launch-work'   # what this script made, so it may clear it next time
+
+
+def inside(path, folder):
+    path, folder = os.path.realpath(path), os.path.realpath(folder)
+    return path == folder or path.startswith(folder.rstrip(os.sep) + os.sep)
+
+
+def check_inputs(o, build, work):
+    """Everything given exists and is what it should be, before anything is touched; and the
+    work folder (cleared each run) holds none of it."""
+    need = [(os.path.join(build, 'RaCACiT'), os.path.isfile, '--build has no RaCACiT program'),
+            (o.elf, os.path.isfile, '--elf is not a file'),
+            (os.path.join(o.game, 'PS3_GAME'), os.path.isdir, '--game has no PS3_GAME folder')]
+    if o.update:
+        need += [(os.path.join(o.update, 'PARAM.SFO'), os.path.isfile, '--update has no PARAM.SFO'),
+                 (os.path.join(o.update, 'USRDIR'), os.path.isdir, '--update has no USRDIR')]
+    if o.installed:
+        need.append((o.installed, os.path.isdir, '--installed is not a folder'))
+    for path, ok, why in need:
+        if not ok(path):
+            sys.exit('%s: %s' % (why, path))
+    for name, path in (('--build', build), ('--elf', o.elf), ('--game', o.game), ('--update', o.update),
+                       ('--installed', o.installed), ('the current folder', os.getcwd())):
+        if path and inside(path, work):
+            sys.exit('--work %s holds %s (%s); it is cleared on every run, so give it a folder of its own' % (work, name, path))
+
+
+def clear_work(work):
+    """Clears --work only if it is empty or this script made it (its marker file is there)."""
+    if os.path.lexists(work):
+        if not os.path.isdir(work) or os.path.islink(work):
+            sys.exit('--work %s is not a folder' % work)
+        if os.listdir(work) and not os.path.isfile(os.path.join(work, MARKER)):
+            sys.exit('--work %s is not empty and was not made by this script; give it an empty or new folder' % work)
+        shutil.rmtree(work)
+    os.makedirs(work)
+    open(os.path.join(work, MARKER), 'w').close()
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--build', required=True, help="a release's builds/vNN folder (RaCACiT and lib/)")
@@ -32,10 +72,11 @@ def main():
     ap.add_argument('--installed', help="the game's HDD install (hdd0/game/BCUS98124 of a profile that has played)")
     ap.add_argument('--seconds', type=float, default=150)
     o = ap.parse_args()
+    build, work = os.path.abspath(o.build), os.path.abspath(o.work)
+    check_inputs(o, build, work)
     if subprocess.run(['/usr/bin/pgrep', '-x', 'RaCACiT'], capture_output=True).returncode == 0:
         sys.exit('a game is already running; not starting another')
-    build, work = os.path.abspath(o.build), os.path.abspath(o.work)
-    shutil.rmtree(work, ignore_errors=True)
+    clear_work(work)
     hdd0 = os.path.join(work, 'hdd0'); os.makedirs(os.path.join(hdd0, 'game'))
     if o.installed:
         subprocess.run(['/bin/cp', '-c', '-R', o.installed, os.path.join(hdd0, 'game', 'BCUS98124')], check=True)
@@ -87,9 +128,11 @@ def main():
     print('register-file draw path: %s' % ('yes' if path else 'NO'))
     print('texture uploads (max texups): %s' % (tex if tex >= 0 else 'no [rsx-stats] line'))
     if exited is not None:
-        print('game exited by itself after %.0f s: %d' % (o.seconds - (end - time.time()), exited))
+        print('game stopped by itself after %.0f s: %s' % (o.seconds - (end - time.time()),
+              'signal %d' % -exited if exited < 0 else 'exit %d' % exited))
     print('log: ' + log)
-    ok = path and tex > 0
+    # A game that stops by itself (an error, a crash) during the run fails, whatever it drew.
+    ok = path and tex > 0 and exited is None
     print('PASS' if ok else 'FAIL')
     return 0 if ok else 1
 
