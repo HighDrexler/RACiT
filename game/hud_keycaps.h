@@ -137,6 +137,24 @@ static int face_key(const uint8_t* rgba, int w, int h)
     return per >= 0 && per <= 150 ? hue : -1;
 }
 
+/* Write `put` over a HUD picture only if, right now, its table entry still
+ * points at `ea` (cellGcmResolveLocated(`location`, ...)) and the bytes there
+ * still equal `expect`, what this scan saw. Making a key takes a while, and
+ * the game may have freed and reused the memory meanwhile. What's left is the
+ * window between this last compare and the copy (a few hundred nanoseconds):
+ * the guest runs on its own threads and nothing stops it, so a write landing
+ * exactly then can still be overwritten. */
+static bool hud_write_checked(uint32_t entry, int location, uint32_t ea, const uint8_t* expect,
+                              const uint8_t* put, uint32_t bytes)
+{
+    if (!readable(entry, 32) || !readable(ea, bytes)) return false;
+    if (cellGcmResolveLocated(location, be32(vm_base + entry)) != ea) return false;
+    uint8_t* tex = vm_base + ea;
+    if (memcmp(tex, expect, bytes)) return false;
+    memcpy(tex, put, bytes);
+    return true;
+}
+
 const int kFaceW = 52, kFaceCols = 13, kFacePitch = 208, kFaceBytes = 13 * kFacePitch;
 struct HudFace {
     uint32_t entry, ea;
@@ -204,7 +222,10 @@ static void hud_faces_sync(bool keyboard)
         }
         const uint8_t* put = keyboard && is_orig ? f.mine : !keyboard && is_mine ? f.orig : nullptr;
         if (!put) continue;
-        memcpy(tex, put, kFaceBytes);
+        if (!hud_write_checked(f.entry, 0, f.ea, put == f.mine ? f.orig : f.mine, put, kFaceBytes)) {
+            fprintf(stderr, "[prompts] HUD face picture at %08X: changed while the key was made, left alone%c", f.ea, 10);
+            f.ea = 0; f.have = 0; continue;
+        }
         fprintf(stderr, "[prompts] HUD face picture at %08X: %s%c", f.ea, keyboard ? "keycap drawn in" : "put back", 10);
     }
 }
@@ -253,8 +274,8 @@ static void hud_keys_sync(bool keyboard)
     uint8_t* tex = vm_base + s_hud.ea;
     const bool is_keys = s_hudkb.have && !memcmp(tex, s_hudkb.keys, bytes);
     if (!keyboard) {
-        if (is_keys) { memcpy(tex, s_hudkb.before, bytes);
-                       fprintf(stderr, "[prompts] HUD picture \"R2 + square\" at %08X: put back%c", s_hud.ea, 10); }
+        if (is_keys && hud_write_checked(s_hud.entry, 0, s_hud.ea, s_hudkb.keys, s_hudkb.before, bytes))
+            fprintf(stderr, "[prompts] HUD picture \"R2 + square\" at %08X: put back%c", s_hud.ea, 10);
         return;
     }
     if (is_keys) return;
@@ -292,7 +313,10 @@ static void hud_keys_sync(bool keyboard)
         hudkey_dump(s_hud.ea, a, b, w, kHudRows * 4);
     }
     s_hudkb.have = 1;
-    memcpy(tex, s_hudkb.keys, bytes);
+    if (!hud_write_checked(s_hud.entry, 0, s_hud.ea, s_hudkb.before, s_hudkb.keys, bytes)) {
+        fprintf(stderr, "[prompts] HUD picture at %08X: changed while the keys were made, left alone%c", s_hud.ea, 10);
+        s_hudkb.have = 0; return;
+    }
     fprintf(stderr, "[prompts] HUD picture \"R2 + square\" at %08X: keys drawn in%c", s_hud.ea, 10);
 }
 
@@ -320,8 +344,8 @@ static void badge_keys_sync(bool keyboard)
             bd.ea = 0; bd.have = 0; k.have = 0; continue;
         }
         if (!keyboard) {
-            if (is_keys) { memcpy(tex, k.before, kBadgeBytes);
-                           fprintf(stderr, "[prompts] quick select badge at %08X: put back%c", bd.ea, 10); }
+            if (is_keys && hud_write_checked(bd.entry, 1, bd.ea, k.keys, k.before, kBadgeBytes))
+                fprintf(stderr, "[prompts] quick select badge at %08X: put back%c", bd.ea, 10);
             continue;
         }
         if (is_keys) continue;
@@ -354,6 +378,9 @@ static void badge_keys_sync(bool keyboard)
             fprintf(stderr, "[prompts] quick select badge at %08X: %s, key %s%c", bd.ea, key == 10 ? "R1" : "L1", label, 10);
         }
         k.have = 1;
-        memcpy(tex, k.keys, kBadgeBytes);
+        if (!hud_write_checked(bd.entry, 1, bd.ea, k.before, k.keys, kBadgeBytes)) {
+            fprintf(stderr, "[prompts] quick select badge at %08X: changed while the key was made, left alone%c", bd.ea, 10);
+            bd.ea = 0; bd.have = 0; k.have = 0;
+        }
     }
 }
