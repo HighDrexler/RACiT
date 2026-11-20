@@ -148,7 +148,10 @@ def func_span(src, name):
 
 
 def patch_file(path):
-    src = open(path).read()
+    # Lifted sources are UTF-8 whatever the locale (Windows defaults to cp1252),
+    # and bytes that aren't UTF-8 are written back unchanged.
+    with open(path, encoding='utf-8', errors='surrogateescape') as f:
+        src = f.read()
     changed = False
 
     # Each half is tested on its own function: the lifter may put the setjmp
@@ -916,7 +919,8 @@ def patch_file(path):
         src = src[:i] + DECLS + src[i:]
         changed = True
     if changed:
-        open(path, 'w').write(src)
+        with open(path, 'w', encoding='utf-8', errors='surrogateescape') as f:
+            f.write(src)
     return changed
 
 

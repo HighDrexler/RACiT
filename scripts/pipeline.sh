@@ -15,7 +15,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PS3R="$ROOT/tools/ps3recomp"
 ELF="${1:-$ROOT/input/EBOOT.ELF}"
-PY="${PY:-python3 -I}"
+# UTF-8 mode: the lifter and the patchers read and write the lifted sources as UTF-8,
+# not in the locale's encoding (cp1252 on Windows), so every platform gets the same bytes.
+PY="${PY:-python3 -I} -X utf8"
 JOBS="${JOBS:-${CMAKE_BUILD_PARALLEL_LEVEL:-}}"
 
 # The same explicit count bounds both lifters and the native compiler.
