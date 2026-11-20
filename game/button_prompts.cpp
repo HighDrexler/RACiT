@@ -247,8 +247,13 @@ void hud_sync(int want)
     const uint8_t* t = vm_base + s_hud.entry;
     if (be16(t + 0x18) != kHudW || be16(t + 0x1A) != kKeyH || t[6] != 0xA8) { s_hud.ea = 0; return; }   /* memory reused */
     uint8_t* tex = vm_base + s_hud.ea;
+    /* Identify and redraw from one copy taken now, and write only while the
+     * entry still points here and the memory still holds that copy's blocks:
+     * the game may free the picture and reuse its memory meanwhile. */
+    static uint8_t snap[kHudRows * kHudPitch];
+    memcpy(snap, tex, sizeof snap);
     uint8_t cur[kKeyBytes];
-    hud_blocks(tex, cur);
+    hud_blocks(snap, cur);
     const bool is_mine = s_hud.have && !memcmp(cur, s_hud.mine, sizeof cur);
     bool is_orig = s_hud.have && !memcmp(cur, s_hud.orig, sizeof cur);
     if (!is_mine && !is_orig) {         /* first sight, or loaded again: is it the R2 key? */
@@ -260,7 +265,7 @@ void hud_sync(int want)
             for (int x = 0; x < kKeyW - 3; x++) {
                 uint8_t a[4], b[4];
                 dxt5_pixel(pg, pitch, kR2x + x, kRowY + y, a);
-                dxt5_pixel(tex, kHudPitch, x, y, b);
+                dxt5_pixel(snap, kHudPitch, x, y, b);
                 for (int k = 0; k < 4; k++) err += abs(a[k] - b[k]);
             }
         if (err > 40L * kKeyH * (kKeyW - 3)) {
@@ -274,7 +279,7 @@ void hud_sync(int want)
                 for (int i = 0; i < 16; i++) {
                     const int x = c * 4 + (i & 3), y = r * 4 + (i >> 2);
                     if (x < kKeyW && y < kKeyH) dxt5_pixel(pg, pitch, kR1x + x, kRowY + y, px[i]);
-                    else dxt5_pixel(tex, kHudPitch, x, y, px[i]);
+                    else dxt5_pixel(snap, kHudPitch, x, y, px[i]);
                 }
                 dxt5_encode(px, s_hud.mine + (r * kKeyCols + c) * 16);
             }
@@ -282,6 +287,12 @@ void hud_sync(int want)
     }
     const uint8_t* put = want && is_orig ? s_hud.mine : !want && is_mine ? s_hud.orig : nullptr;
     if (!put) return;
+    uint8_t now[kKeyBytes];
+    hud_blocks(tex, now);
+    if (cellGcmResolveLocated(0, be32(vm_base + s_hud.entry)) != s_hud.ea || memcmp(now, cur, sizeof now)) {
+        fprintf(stderr, "[prompts] HUD picture at %08X: changed while the R1 key was made, left alone%c", s_hud.ea, 10);
+        s_hud.ea = 0; s_hud.have = 0; return;
+    }
     for (int r = 0; r < kHudRows; r++) memcpy(tex + r * kHudPitch, put + r * kKeyCols * 16, kKeyCols * 16);
     fprintf(stderr, "[prompts] HUD picture \"R2 + square\" at %08X: %s%c", s_hud.ea, want ? "R1 drawn in" : "R2 put back", 10);
 }
