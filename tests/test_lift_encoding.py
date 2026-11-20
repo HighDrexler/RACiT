@@ -20,7 +20,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPTS = ['patch_lift.py', 'update120_hooks.py', 'update120_unlock_hooks.py', 'check_lift_hooks.py', 'retarget.py']
+SCRIPTS = ['patch_lift.py', 'update120_hooks.py', 'update120_unlock_hooks.py', 'check_lift_hooks.py', 'retarget.py', 'fix_vmx_alias.py']
 
 # Run a script with cp1252 as the default text encoding, as on Windows.
 SHIM = r'''
@@ -42,6 +42,14 @@ module.apply_update120_hooks(sys.argv[3], sys.argv[4])
 
 
 class TextOpensNameTheirEncoding(unittest.TestCase):
+    def test_helpers_run_in_utf8_mode(self):
+        # patch_lift.py runs fix_vmx_alias.py itself: in UTF-8 mode too.
+        text = (ROOT / 'scripts' / 'patch_lift.py').read_text(encoding='utf-8')
+        calls = [l for l in text.splitlines() if 'subprocess.run([sys.executable' in l]
+        self.assertTrue(calls)
+        for line in calls:
+            self.assertIn("'-X', 'utf8'", line)
+
     def test_every_text_open_has_an_encoding(self):
         missing = []
         for name in SCRIPTS:
