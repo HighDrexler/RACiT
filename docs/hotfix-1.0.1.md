@@ -12,6 +12,10 @@ Branches: `fix/menu-keycaps-actions` (#70) and `feat/menu-keycaps-auto` (#76), w
 
 In 1.0.0 the menus kept the PS3 buttons with a keyboard for a few reasons. The compiled menu actions file got dropped by the `*.BIN` rule in .gitignore (#70), and even with it the keyboard menus needed a Python step players never run, so the game now makes the menu archive itself (#76). This branch turns that on by default on Windows, macOS and Linux (`RACACIT_MENU_KEYCAPS=0` turns it off, Android stays opt-in) and adds the rest of the keycaps: the HUD's face button pictures, the Kinetic Tether picture, the quick select L1/R1 badges, the d-pad glyphs, and the font's smaller mip levels, which is what the small hint text in vendors and quick select uses.
 
+The quick select badges show the keys that actually page rings while the ring is open, R and T by default (QS_PREV_RING / QS_NEXT_RING, or whatever settings.txt binds them to). Before they showed the gameplay L1/R1 keys, and with the ring open left click is the previous ring and the R1 key does nothing.
+
+#76 also got two fixes from review. Two games starting at once used to write the same .tmp file, and a later start trusted any file at the cache path, so now the temporary is per process and a cached archive is only reused when its PSARC header and size check out (otherwise it's made again). And a failed fclose no longer closes the stream a second time.
+
 It also fixes a crash in those HUD keycaps. A level's HUD textures sit in main memory for a bit and then move, and the game reuses the old memory. The keycap code kept drawing into it, and on the Mac the game crashed after saving or loading from the pause menu. Now it checks the picture is still where the table says and still looks like itself before writing anything.
 
 For tests there's `RACACIT_PROMPT_CHECK=1`, which logs every 5 s whether any button picture still shows the other input's art, and `tests/test_menu_keycaps.py`, which builds a fake global_cached.psarc and checks the script and the game's own C++ make the same archive byte for byte, that it's on by default and off with 0, and that the actions file is actually in the repo.
@@ -34,9 +38,11 @@ Not tested: Windows, 1.20 on anything but the Zolar Forest route.
 
 ## Builds that silently miss hooks (`fix/hook-check`)
 
-The lift is generated once and patch_lift.py patches it, so a lift patched before a hook was added builds fine without it. That already shipped a Mac build with no mouse camera and no menu keycaps once. Now the build re-runs patch_lift.py when it, its inputs or the lift changed, and stops with the list of missing hooks if any are still missing. versions/*-hook-symbols.txt list every hook for 1.00 and 1.20. I checked both lists call for call against freshly patched 1.00 and 1.20 lifts, and the 1.00 one now has the cheat menu's three hooks too. Also fixes 1.20 chunks patched by an older recipe getting two preambles. `RACACIT_CHECK_HOOKS=OFF` skips it.
+The lift is generated once and patch_lift.py patches it, so a lift patched before a hook was added builds fine without it. That already shipped a Mac build with no mouse camera and no menu keycaps once. Now CMake re-runs patch_lift.py at configure time when it, its inputs, a hook list or the lift changed (a change to the patcher or a list configures again), and the build step only checks, so it never rewrites a source Ninja already decided was up to date. If a hook is still missing the build stops with the list.
 
-`tests/test_lift_hooks.py` checks the lists cover everything patch_lift.py and the 1.20 recipe insert, and that the check passes a complete fake lift and fails one missing racit_publish_menu_keyboard.
+versions/*-hook-symbols.txt list every hook for 1.00, 1.20 and the EU disc. Only real calls count, so comments, strings, declarations and the helper each chunk defines don't, and a commented-out hook shows up as missing. The counts are the real call counts of freshly patched 1.00 and 1.20 lifts, and the 1.00 list now has the cheat menu's three hooks too. The EU list is the USA one with its @function lines converted through versions/BCES00511/addr_map.tsv and without the hooks patch_lift.py only puts into the USA disc, and scripts/build_version.sh now passes the EU profile and EBOOT so the EU build checks against it instead of the USA list. I don't have an EU EBOOT, so the EU build and its counts aren't checked here. Also fixes 1.20 chunks patched by an older recipe getting two preambles. `RACACIT_CHECK_HOOKS=OFF` skips it.
+
+`tests/test_lift_hooks.py` checks the lists cover everything patch_lift.py and the 1.20 recipe insert, that the EU list matches the USA one converted, and runs the checker on small fake lifts: complete ones pass, one missing or commented-out hook fails, the count doesn't change with 1, 3 or 8 chunk files, `--patch` with no stamp puts a missing hook into a stale lift, and the check alone never touches a file.
 
 Tested: RESULTS_HOOKS
 
@@ -52,9 +58,19 @@ Tested: RESULTS_MAC14
 
 Not tested: actually running on a macOS 14 machine (only checked with vtool), Windows (no change there).
 
+## macOS launcher doesn't compile (#77)
+
+Branch: `fix/macos-launcher-build`. On 1.0.0 the Mac launcher didn't build, launcher/src/store.cpp used Windows APIs outside `_WIN32` and launch_mac() was missing its closing brace. From review it also got two more fixes. The updater cleared `<launcher>.old` with remove_all, so a folder with that name got deleted with everything in it, now it only removes a file (or on macOS the old .app it set aside itself). And the AVX2 check skipped MSVC x86 builds and always said yes, now it uses `__cpuid`/`_xgetbv` from intrin.h there.
+
+Tested: RESULTS_LAUNCHER
+
+Not tested: Windows or MSVC (no Windows machine here, the MSVC path is only read, not compiled), an actual launcher update.
+
 ## Mouse feels like a thumbstick outside the follow camera (#68)
 
-Branch: `fix/mouse-direct-all-cameras`, see its own PR. Merged here so it gets tested with the rest.
+Branch: `fix/mouse-direct-all-cameras`, see its own PR. Merged here so it gets tested with the rest. From review it got two fixes too. Re-patching a lift that 1.0.0 already patched put a second mouse_angles into the follow camera, so the lift didn't compile, now the old patch comes out first (`tests/test_mouse_repatch.py` re-patches a small lift with either 1.0.0 patch). And X and Y of a mouse move now change together under one lock, so a camera never gets half a diagonal move (`tests/desktop_mouse_test.cpp` has a two-thread check).
+
+Whichever of this and `fix/hook-check` goes in second needs the small change the hotfix merge has: the hook lists expect racit_camera_turn (17), racit_camera_peek (1) and racit_mouse_now (18) instead of racit_camera_take, and the `--patch` test lift needs the ten camera functions.
 
 ## hotfix/1.0.1 all together
 
