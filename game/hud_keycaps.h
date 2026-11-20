@@ -296,7 +296,7 @@ static void hud_keys_sync(bool keyboard)
     fprintf(stderr, "[prompts] HUD picture \"R2 + square\" at %08X: keys drawn in%c", s_hud.ea, 10);
 }
 
-/* The quick select badges with keys: "L1" -> the L1 key, "R1" -> the R1 key.
+/* The quick select badges with keys: "L1" -> the previous-ring key, "R1" -> the next-ring key.
  * The badge's letter tells which: an "R" has ink in the upper right of its
  * box, an "L" none. */
 struct { uint32_t ea; uint8_t before[kBadgeBytes], keys[kBadgeBytes]; int have; } s_badgekb[2];
@@ -338,8 +338,13 @@ static void badge_keys_sync(bool keyboard)
         if (x1 - x0 < 3 || y1 - y0 < 5) { fprintf(stderr, "[prompts] quick select badge at %08X: no letter found, left alone%c", bd.ea, 10); continue; }
         int ur = 0;   /* ink in the right half of the letter's top third, away from its stem */
         for (int y = y0; y < y0 + (y1 - y0) / 3; y++) for (int x = x0 + (x1 - x0) * 2 / 3; x < x1; x++) ur += ink(x, y);
+        /* The ring's L1 / R1 page rings. While it's open the game's L1 / R1 keys
+         * don't (left click is the previous ring), so the badge shows the keys
+         * that do: QS_PREV_RING / QS_NEXT_RING, R / T by default. */
         const unsigned key = ur > 0 ? 10 : 6;   /* E00B R1 / E007 L1 */
-        char label[8]; desktop_label(key, label);
+        char label[8];
+        if (key == 10) desktop_binding_label("QS_NEXT_RING", "T", label);
+        else desktop_binding_label("QS_PREV_RING", "R", label);
         keycap_rgba(kBadgeW, kBadgeH, label, b);
         memcpy(k.before, tex, kBadgeBytes);
         rgba_to_dxt5(b, kBadgeW / 4, kBadgeH / 4, kBadgePitch, 0, kBadgeW / 4, k.before, k.keys);

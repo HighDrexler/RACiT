@@ -144,21 +144,13 @@ static void desktop_make(DesktopGlyph& g, const char* label)
         dxt5_encode(pixels, block);
     }
 }
-/* The key bound to button glyph E001 + `key` (0..13), as a short label. */
-static void desktop_label(unsigned key, char label[8])
+/* A RACACIT_BIND_<name> setting's first key as a short label; `fallback` when unset. */
+static void desktop_binding_label(const char* name, const char* fallback, char label[8])
 {
-    static const char* const labels[20] = {
-        "E", "F", "SPC", "Q", "TAB", "ESC", "CTRL", "RMB", "V", "WASD",
-        "LMB", "SHIFT", "B", "IJKL", "UP", "DOWN", "LEFT", "RIGHT", "", "ARROW"
-    };
-    static const char* const bindings[20] = {
-        "CIRCLE", "SQUARE", "CROSS", "TRIANGLE", "SELECT", "START", "L1", "L2", "L3", "LS_UP",
-        "R1", "R2", "R3", "RS_UP", "UP", "DOWN", "LEFT", "RIGHT", "", ""
-    };
     char environment[48];
-    snprintf(environment, sizeof environment, "RACACIT_BIND_%s", bindings[key]);
-    const char* custom = *bindings[key] ? getenv(environment) : nullptr;
-    snprintf(label, 8, "%s", labels[key]);
+    snprintf(environment, sizeof environment, "RACACIT_BIND_%s", name);
+    const char* custom = *name ? getenv(environment) : nullptr;
+    snprintf(label, 8, "%s", fallback);
     if (custom && *custom) {
         if (!strncmp(custom,"Mouse1",6)) snprintf(label,8,"LMB");
         else if (!strncmp(custom,"Mouse2",6)) snprintf(label,8,"MMB");
@@ -177,6 +169,19 @@ static void desktop_label(unsigned key, char label[8])
             label[i] = 0;
         }
     }
+}
+/* The key bound to button glyph E001 + `key` (0..13), as a short label. */
+static void desktop_label(unsigned key, char label[8])
+{
+    static const char* const labels[20] = {
+        "E", "F", "SPC", "Q", "TAB", "ESC", "CTRL", "RMB", "V", "WASD",
+        "LMB", "SHIFT", "B", "IJKL", "UP", "DOWN", "LEFT", "RIGHT", "", "ARROW"
+    };
+    static const char* const bindings[20] = {
+        "CIRCLE", "SQUARE", "CROSS", "TRIANGLE", "SELECT", "START", "L1", "L2", "L3", "LS_UP",
+        "R1", "R2", "R3", "RS_UP", "UP", "DOWN", "LEFT", "RIGHT", "", ""
+    };
+    desktop_binding_label(bindings[key], labels[key], label);
 }
 static void desktop_prompts(bool keyboard)
 {
