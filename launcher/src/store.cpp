@@ -2,6 +2,7 @@
 #include "iso.h"
 #include "platform.h"
 #include "program_magic.h"
+#include "release_asset.h"
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -950,8 +951,9 @@ std::string Store::fetch_latest_release(ReleaseInfo* out)
     }
     Json all; std::string err;
     if (!json_parse(body, &all, &err) || (all.type != Json::Obj && all.type != Json::Arr)) return "GitHub's answer could not be read. Try again later.";
-    // The newest published Windows release: not a draft or pre-release, not tagged for Android, and
-    // with a launcher .zip among its files. (The test server may answer with one object.)
+    // The newest published release for this platform: not a draft or pre-release, not tagged for
+    // Android, and with this platform's .zip among its files (release_asset.h). (The test server
+    // may answer with one object.)
     const Json* pick = all.type == Json::Obj ? &all : nullptr;
     if (!pick)
         for (const Json& r : all.a) {
@@ -960,11 +962,15 @@ std::string Store::fetch_latest_release(ReleaseInfo* out)
             bool has = false;
             for (const Json& a : r["assets"].a) {
                 const std::string low = lower(a.str("name"));
-                if (low.size() > 4 && low.compare(low.size() - 4, 4, ".zip") == 0 && low.find("launcher") != std::string::npos) has = true;
+                if (release_asset_here(low)) has = true;
             }
             if (has) { pick = &r; break; }
         }
+#ifdef __APPLE__
+    if (!pick) return "There is no macOS release on GitHub yet.";
+#else
     if (!pick) return "There is no Windows release on GitHub yet.";
+#endif
     const Json& j = *pick;
     out->tag = trim(j.str("tag_name"));
     if (out->tag.empty()) return "GitHub's answer has no release in it. Try again later.";
@@ -973,11 +979,10 @@ std::string Store::fetch_latest_release(ReleaseInfo* out)
     out->notes = plain_notes(j.str("body"));
     const std::string page = j.str("html_url");
     if (under(page, kReleasePages) || !test.empty()) out->page = page;
-    // The asset: a .zip with "launcher" in its name. A .7z is listed for the message only.
+    // The asset: this platform's .zip (release_asset.h). Anything else is listed for the message only.
     for (const Json& a : j["assets"].a) {
         const std::string n = a.str("name"), low = lower(n), url = a.str("browser_download_url");
-        const bool zip = low.size() > 4 && low.compare(low.size() - 4, 4, ".zip") == 0;
-        if (out->asset.empty() && zip && low.find("launcher") != std::string::npos && release_download_ok(url)) {
+        if (out->asset.empty() && release_asset_here(low) && release_download_ok(url)) {
             out->asset = n; out->url = url; out->size = (uint64_t)a.num("size");
             const std::string d = lower(a.str("digest"));
             if (d.rfind("sha256:", 0) == 0) out->sha256 = d.substr(7);
