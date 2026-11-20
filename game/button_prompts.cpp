@@ -738,10 +738,18 @@ void prompt_check(bool keyboard)
     if (s_hudkb.have && s_hud.ea == s_hudkb.ea && readable(s_hudkb.ea, kHudRows * kHudPitch)) {
         pictures++;
         const uint8_t* tex = vm_base + s_hudkb.ea;
-        /* With the controller: the picture as the game left it, or the controller's own art
-         * (hud_sync redraws it with R1 for the other layout), never the keys. */
-        if (keyboard ? memcmp(tex, s_hudkb.keys, kHudRows * kHudPitch) != 0
-                     : memcmp(tex, s_hudkb.before, kHudRows * kHudPitch) && !tether_is_picture(tex)) { wrong++; note("hud-tether", 0, s_hudkb.ea); }
+        /* With the controller: the picture as the game left it, or with the shoulder button
+         * on the left redrawn for the other layout (hud_sync's R1): then that part must be the
+         * font's R1 or R2 art and everything right of it (the "+" and the square) the game's
+         * own blocks, never a key anywhere. */
+        bool controller_art = !memcmp(tex, s_hudkb.before, kHudRows * kHudPitch);
+        if (!controller_art && tether_is_picture(tex)) {
+            controller_art = true;
+            for (int r = 0; r < kHudRows && controller_art; r++)
+                for (int c = (kKeyW + 3) / 4; c < (kHudW + 3) / 4; c++)
+                    if (memcmp(tex + r * kHudPitch + c * 16, s_hudkb.before + r * kHudPitch + c * 16, 16)) { controller_art = false; break; }
+        }
+        if (keyboard ? memcmp(tex, s_hudkb.keys, kHudRows * kHudPitch) != 0 : !controller_art) { wrong++; note("hud-tether", 0, s_hudkb.ea); }
     } else if (keyboard && s_hud.entry && readable(s_hud.entry, 32)) {
         /* The tether picture without keys yet (moved, or never prepared): wrong while it
          * still shows the controller's R2 + square where its entry points, at two checks
