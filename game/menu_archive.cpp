@@ -23,8 +23,17 @@
 #include <zlib.h>
 #ifdef _WIN32
 #include <process.h>
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
 #define racit_getpid _getpid
 #else
+#include <csignal>
+#include <cerrno>
 #include <unistd.h>
 #define racit_getpid getpid
 #endif
@@ -394,6 +403,38 @@ void write_marker(const std::filesystem::path& archive, const std::filesystem::p
     if (error) std::filesystem::remove(temporary, error);
 }
 
+// Whether process `pid` is still running (a game whose temporary may be in use).
+bool process_alive(long pid)
+{
+    if (pid <= 0) return false;
+    if (pid == (long)racit_getpid()) return true;
+#ifdef _WIN32
+    HANDLE h = OpenProcess(SYNCHRONIZE, FALSE, (DWORD)pid);
+    if (!h) return GetLastError() == ERROR_ACCESS_DENIED;
+    const bool running = WaitForSingleObject(h, 0) == WAIT_TIMEOUT;
+    CloseHandle(h);
+    return running;
+#else
+    return kill((pid_t)pid, 0) == 0 || errno == EPERM;
+#endif
+}
+
+// Temporaries ".<archive>.<pid>-<n>.tmp" (and their .ok) left by games that have exited: one
+// that couldn't publish its archive used it for its session.
+void remove_old_temporaries(const std::filesystem::path& folder)
+{
+    std::error_code error;
+    for (const auto& entry : std::filesystem::directory_iterator(folder, error)) {
+        const std::string n = entry.path().filename().string();
+        if (n.empty() || n[0] != '.' || n.find(".tmp") == std::string::npos) continue;
+        const size_t dash = n.rfind('-', n.find(".tmp"));
+        const size_t dot = dash == std::string::npos ? std::string::npos : n.rfind('.', dash);
+        if (dot == std::string::npos) continue;
+        const long pid = std::strtol(n.c_str() + dot + 1, nullptr, 10);
+        if (!process_alive(pid)) std::filesystem::remove(entry.path(), error);
+    }
+}
+
 std::string prepare(const std::filesystem::path& original)
 {
     namespace fs = std::filesystem;
@@ -413,6 +454,7 @@ std::string prepare(const std::filesystem::path& original)
 
     fs::create_directories(s_menu_cache, error);
     require(!error, "can't create the menu-keycaps folder");
+    remove_old_temporaries(s_menu_cache);
     // One temporary per process and call, so two games starting at once never share it.
     static std::atomic<unsigned> s_temporaries{0};
     char unique[64];
@@ -459,11 +501,16 @@ std::string prepare(const std::filesystem::path& original)
         source = nullptr;
         // Renamed over whatever is at the destination, in one step.
         fs::rename(temporary, destination, error);
-        if (error && usable_archive(destination, size)) {   // another game published it first
-            fs::remove(temporary, error);
-            return destination.string();
+        if (error) {
+            if (trusted_archive(destination, size)) {   // another game published and checked it first
+                fs::remove(temporary, error);
+                return destination.string();
+            }
+            // The checked temporary serves this session; the next start removes it.
+            std::printf("[menu-keycaps] can't publish %s (%s); this session uses %s\n", destination.string().c_str(),
+                        error.message().c_str(), temporary.string().c_str());
+            return temporary.string();
         }
-        require(!error, "can't publish the prepared archive");
         fs::path marker_temporary = temporary;
         marker_temporary += ".ok";
         write_marker(destination, marker_temporary);
