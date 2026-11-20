@@ -22,6 +22,8 @@ Round 3 tightened that more. Each HUD picture is now copied once up front, and f
 
 Round 4 gave the controller side's R1 swap in the tether picture the same one-copy-then-check as the keys. The tether also keeps its keys when the game moves it (it stages HUD textures in main memory and copies them to video memory, keys and all), and a tether left alone gets looked at again every second instead of at the next scan, so after loading a save it gets its keys within a second. And `NOMINMAX` goes before anything that brings in windows.h, since its min/max macros break std::min/std::max with MSVC (checked with clang and a stand-in header defining those macros, not with MSVC itself). The test for the rename fallback now covers the actual case, a plausible archive with no marker and a failing rename (a locked file on macOS, so it's skipped elsewhere).
 
+Round 7 made `RACACIT_PROMPT_CHECK` check the tether and quick select badges with the controller too. Before it only counted them there, so one still showing keys after switching back passed. Now each has to show the game's own picture or the controller art hud_sync draws for the other layout.
+
 It also fixes a crash in those HUD keycaps. A level's HUD textures sit in main memory for a bit and then move, and the game reuses the old memory. The keycap code kept drawing into it, and on the Mac the game crashed after saving or loading from the pause menu. Now it checks the picture is still where the table says and still looks like itself before writing anything.
 
 For tests there's `RACACIT_PROMPT_CHECK=1`, which logs every 5 s whether any button picture still shows the other input's art, and `tests/test_menu_keycaps.py`, which builds a fake global_cached.psarc and checks the script and the game's own C++ make the same archive byte for byte, that it's on by default and off with 0, and that the actions file is actually in the repo.
@@ -86,6 +88,8 @@ Not tested: actually running on a macOS 14 machine (only checked with vtool), Wi
 
 Branch: `fix/macos-launcher-build`. On 1.0.0 the Mac launcher didn't build, launcher/src/store.cpp used Windows APIs outside `_WIN32` and launch_mac() was missing its closing brace. From review it also got two more fixes. The updater cleared `<launcher>.old` with remove_all, so a folder with that name got deleted with everything in it, now it only removes a file (or on macOS the old .app it set aside itself). And the AVX2 check skipped MSVC x86 builds and always said yes, now it uses `__cpuid`/`_xgetbv` from intrin.h there.
 
+Round 7 fixed updates on macOS. The update checked a release's game build and launcher for Windows' "MZ", so on a Mac every update got turned down as having no game program. Now it checks for a Mach-O header there (thin or universal, launcher/src/program_magic.h, with `tests/test_program_magic.py`). The .app also never got unpacked from a release, since only a top-level launcher .exe counted, so now everything under `RaCACiT Launcher.app/` does.
+
 Tested: RESULTS_LAUNCHER
 
 Not tested: Windows or MSVC (no Windows machine here, the MSVC path is only read, not compiled), an actual launcher update.
@@ -107,6 +111,8 @@ Round 2 also fixed two upgrade problems. The setups only patched a fresh tools/p
 And motion fed right before the cameras pause (a menu, a cutscene) is dropped after 250 ms instead of turning the camera when play resumes.
 
 Whichever of this and `fix/hook-check` goes in second needs the small change the hotfix merge has: the hook lists expect racit_camera_turn (17), racit_camera_peek (1) and racit_mouse_now (18) instead of racit_camera_take, and the `--patch` test lift needs the ten camera functions.
+
+Round 7 added two more. The lock camera only took the mouse's yaw, now the mouse's pitch tilts it too. Its tilt isn't an angle you hold, it follows the stick's vertical axis and springs back to level, so the mouse goes into that axis right after the stick read, clamped to the stick's range, on 1.00 and 1.20. A lift patched with the older yaw-only lock hook gets it taken out and both put in (`tests/test_mouse_repatch.py`). And scripts/update_runtime_patch.sh and the setups run git with `core.autocrlf=false` and `core.eol=lf`, so a Windows git that defaults autocrlf to true doesn't make every runtime look edited. The test covers that with a global autocrlf=true config.
 
 ## hotfix/1.0.1 all together
 
