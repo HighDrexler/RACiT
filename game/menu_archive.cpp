@@ -360,8 +360,9 @@ std::string prepare(const std::filesystem::path& original)
         out = std::fopen(temporary.string().c_str(), "wb");
         require(out, "can't write the menu-keycaps folder");
         archive.write(out, replacements);
-        require(std::fclose(out) == 0, "write failed");
-        out = nullptr;
+        const int closed = std::fclose(out);
+        out = nullptr;   // closed even when fclose fails: never close it again
+        require(closed == 0, "write failed");
         std::FILE* check = std::fopen(temporary.string().c_str(), "rb");
         require(check, "can't reopen the prepared archive");
         try {
