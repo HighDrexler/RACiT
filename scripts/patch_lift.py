@@ -188,7 +188,8 @@ def apply_mouse_cameras(recomp, profile_id):
         sys.exit('patch_lift #22: no complete mouse camera table for ' + profile_id)
     done, failed = set(), []
     for path in sorted(glob.glob(os.path.join(recomp, 'ppu_recomp_*.cpp'))):
-        src = open(path).read()
+        with open(path, encoding='utf-8', errors='surrogateescape') as f:   # UTF-8 whatever the locale
+            src = f.read()
         changed = False
         for name, func in sorted(funcs.items()):
             sp = func_span(src, func)
@@ -220,7 +221,8 @@ def apply_mouse_cameras(recomp, profile_id):
             if 'racit_mouse_now(void)' not in src:
                 i = src.index('\n', src.index('#include')) + 1
                 src = src[:i] + MOUSE_DECLS + src[i:]
-            open(path, 'w').write(src)
+            with open(path, 'w', encoding='utf-8', errors='surrogateescape') as f:
+                f.write(src)
     missing = sorted(set(MOUSE_CAMERAS) - done)
     if failed or missing:
         sys.exit('patch_lift #22: mouse camera hooks missing for %s: %s'
