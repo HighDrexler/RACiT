@@ -212,6 +212,15 @@ class CheckLiftHooks(unittest.TestCase):
             self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
             self.assertNotIn('re-running', again.stdout)
 
+    def test_wrong_version_lift_fails_the_check_too(self):
+        # Without --patch as well: a USA lift doesn't pass as the European one.
+        us, us_functions = hook_list('BCUS98124-1.00')
+        with tempfile.TemporaryDirectory() as directory:
+            self.lift(directory, us, us_functions)
+            result = self.run_check(directory, 'BCES00511-1.00')
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('is not a BCES00511-1.00 lift', result.stdout + result.stderr)
+
     def test_wrong_version_lift_is_not_patched(self):
         us, us_functions = hook_list('BCUS98124-1.00')
         with tempfile.TemporaryDirectory() as directory:

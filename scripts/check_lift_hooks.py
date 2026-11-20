@@ -127,9 +127,10 @@ def main():
     newest = max(os.path.getmtime(p) for p in inputs if os.path.exists(p))
     # A regenerated lift (sources newer than the stamp) is patched again too.
     newest = max([newest] + [os.path.getmtime(p) for p in sources])
+    # Every run, patching or not: another version's lift must not pass as this one.
+    check_identity(sources, options.profile, functions)
     stale = options.patch and (not options.stamp or not os.path.exists(options.stamp) or os.path.getmtime(options.stamp) < newest)
     if stale:
-        check_identity(sources, options.profile, functions)
         command = [sys.executable, '-I', os.path.join(ROOT, 'scripts', 'patch_lift.py'), options.recomp]
         if options.elf:
             command += ['--elf', options.elf, '--profile', options.profile]
