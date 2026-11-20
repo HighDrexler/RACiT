@@ -83,9 +83,15 @@ MOUSE_CAMERAS = {
     # Strafe (L2, over the shoulder): yaw and pitch steps, which the game then limits.
     'strafe': (('after', 0x300, 'ctx->fpr[1] -= mouse_angles[0];'),
                ('after', 0x3A4, 'ctx->fpr[1] += mouse_angles[1];')),
-    # The lock camera (class 0xC239BC): the yaw step. Its pitch is a tilt that springs back to
-    # level with the stick, not an angle the player holds, so the mouse leaves it alone.
-    'lock': (('before', 0x4C8, 'ctx->fpr[1] -= mouse_angles[0];'),),
+    # The lock camera (class 0xC239BC): the yaw step, and its tilt. The tilt isn't an angle the
+    # player holds: it follows the stick's vertical axis and springs back to level when the
+    # stick does. The mouse's pitch goes into that axis (the stick's value after its dead zone,
+    # at [r1+0x78]), about full deflection for 0.05 rad in one update and kept within the
+    # stick's range, so it tilts and springs back as the stick does.
+    'lock': (('after', 0x104, '{ uint32_t yb = vm_read32(ctx->gpr[1] + 0x78); float y; memcpy(&y, &yb, 4);\n'
+                              '          y = (float)fmin(fmax(y + mouse_angles[1] * 20.0, -1.0), 1.0);\n'
+                              '          memcpy(&yb, &y, 4); vm_write32(ctx->gpr[1] + 0x78, yb); }'),
+             ('before', 0x4C8, 'ctx->fpr[1] -= mouse_angles[0];')),
     # First-person look (hero state): the yaw step, and the pitch before the game clamps it.
     'hero_look': (('before', 0x228, 'ctx->fpr[1] -= mouse_angles[0];'),
                   ('text', 'ctx->fpr[6] = ppu_fp_single(ppu_fadd(ctx->fpr[31], ctx->fpr[8]));',
@@ -196,8 +202,16 @@ def apply_mouse_cameras(recomp, profile_id):
             if not sp:
                 continue
             fn = src[sp[0]:sp[2]]
-            if '/* racacit mouse: %s */' % name in fn:
+            edits = MOUSE_CAMERAS[name]
+            marks = fn.count('/* racacit mouse: %s */' % name)
+            if marks == len(edits):
                 done.add(name); continue
+            if marks:   # patched by an earlier recipe with fewer edits (the lock camera's yaw only)
+                fn = re.sub(r'(?m)^        if \(!mouse_taken\) \{[^\n]*\n        if \(mouse_direct\) [^\n]*/\* racacit mouse: %s \*/\n'
+                            % re.escape(name), '', fn)
+                if '/* racacit mouse: %s */' % name in fn:
+                    failed.append('%s (%s: an earlier patch this script cannot take out)' % (name, func)); continue
+                print('patch_lift #22: %s: the earlier %s camera patch taken out' % (func, name))
             stripped = strip_old_follow_mouse(fn, func)
             if stripped is not fn:
                 src = src[:sp[0]] + stripped + src[sp[2]:]
@@ -211,7 +225,7 @@ def apply_mouse_cameras(recomp, profile_id):
                     break
             if fn is None:
                 failed.append('%s (%s)' % (name, func)); continue
-            if any(e[2] != 'peek' for e in MOUSE_CAMERAS[name]):
+            if any(e[2] != 'peek' for e in MOUSE_CAMERAS[name]) and 'double mouse_angles[2]' not in fn:
                 head = 'void %s(ppu_context* ctx) {\n' % func
                 fn = fn.replace(head, head + '        double mouse_angles[2] = {0, 0}; int mouse_taken = 0, mouse_direct = 0;   /* racacit */\n', 1)
             src = src[:sp[0]] + fn + src[sp[2]:]
