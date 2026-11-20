@@ -1,9 +1,11 @@
 /* Unit test for game/desktop_mouse.cpp: needs no game data.
  *   cmake -S tests -B build/tests && cmake --build build/tests && ctest --test-dir build/tests
- * or: c++ -std=c++11 tests/desktop_mouse_test.cpp game/desktop_mouse.cpp -o mouse_test && ./mouse_test */
+ * or: c++ -std=c++11 -pthread tests/desktop_mouse_test.cpp game/desktop_mouse.cpp -o mouse_test && ./mouse_test */
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <thread>
 extern "C" {
 int racit_camera_active(uint64_t now);
 void racit_camera_feed(uint64_t now, int dx, int dy, int capture, float sensitivity, int invert);
@@ -62,6 +64,27 @@ int main()
     /* ...and play goes on normally afterwards. */
     racit_camera_feed(t, 1, 0, 1, 100.f, 0);
     t += 16 * ms; CHECK(racit_camera_take(a, t) == 1 && near(a[0], 0.003));
+    /* The pad poll and a camera on two threads: each take gets whole moves (x and y of a
+     * diagonal together), and every move is taken exactly once. */
+    {
+        const int moves = 200000;
+        t += 16 * ms; racit_camera_take(a, t);
+        std::atomic<bool> fed{false};
+        std::thread feeder([&] {
+            for (int i = 0; i < moves; i++) racit_camera_feed(t, 1, 1, 1, 100.f, 0);
+            fed.store(true);
+        });
+        double sum_x = 0, sum_y = 0; int split = 0;
+        for (;;) {
+            const bool last = fed.load();
+            if (racit_camera_take(a, t)) { sum_x += a[0]; sum_y += a[1]; if (a[0] != a[1]) split++; }
+            if (last) break;
+        }
+        feeder.join();
+        if (racit_camera_take(a, t)) { sum_x += a[0]; sum_y += a[1]; if (a[0] != a[1]) split++; }
+        CHECK(split == 0);
+        CHECK(std::fabs(sum_x - moves * 0.003) < 1e-6 && std::fabs(sum_y - moves * 0.003) < 1e-6);
+    }
     std::printf(failures ? "desktop_mouse_test: %d failure(s)\n" : "desktop_mouse_test: all passed\n", failures);
     return failures ? 1 : 0;
 }

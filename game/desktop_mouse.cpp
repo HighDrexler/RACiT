@@ -1,4 +1,4 @@
-/* Desktop mouse runtime for RACiT. C ABI and C++11 atomics.
+/* Desktop mouse runtime for RACiT. C ABI, C++11.
  *
  * The mouse turns every camera the right stick turns, directly. Each camera's update
  * carries a hook (scripts/patch_lift.py, MOUSE_CAMERAS) that takes the mouse motion since
@@ -12,9 +12,14 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <mutex>
 namespace {
-std::atomic<bool> captured{false};
-std::atomic<int64_t> camera_x{0}, camera_y{0};
+/* The pad poll feeds and the camera hooks take on other threads. X and Y (and whether
+ * the mouse is captured) change together under one lock, so a take never gets half of
+ * a diagonal move and leaves the rest to the next frame or camera. */
+std::mutex motion_lock;
+bool captured = false;
+int64_t camera_x = 0, camera_y = 0;
 std::atomic<uint64_t> take_time{0};
 /* Radians per count, x 1e9, at 100% (public PR #66): 0.003 rad, ~0.17 degree. */
 constexpr double kGain = 3000000.0;
@@ -38,13 +43,14 @@ extern "C" int racit_camera_active(uint64_t now)
  * the Settings > Controls mouse speed (percent) and Invert mouse Y. */
 extern "C" void racit_camera_feed(uint64_t now, int dx, int dy, int capture, float sensitivity, int invert)
 {
-    if (!capture || !racit_camera_active(now)) {
-        camera_x.store(0); camera_y.store(0); captured.store(capture != 0); return;
-    }
+    const bool active = capture && racit_camera_active(now);
     const double gain = kGain * sensitivity / 100.0;
-    camera_x.fetch_add((int64_t)(dx * gain));
-    camera_y.fetch_add((int64_t)(dy * gain * (invert ? -1 : 1)));
-    captured.store(true);
+    const int64_t x = active ? (int64_t)(dx * gain) : 0, y = active ? (int64_t)(dy * gain * (invert ? -1 : 1)) : 0;
+    std::lock_guard<std::mutex> hold(motion_lock);
+    if (!active) { camera_x = camera_y = 0; captured = capture != 0; return; }
+    camera_x += x;
+    camera_y += y;
+    captured = true;
 }
 
 /* A camera hook: the motion since the last take, yaw (right positive) and pitch (down
@@ -54,9 +60,15 @@ extern "C" int racit_camera_take(double* angles, uint64_t now)
 {
     take_time.store(now);
     angles[0] = angles[1] = 0.0;
-    if (!captured.load()) return 0;
-    angles[0] = (double)camera_x.exchange(0) / kNano;
-    angles[1] = (double)camera_y.exchange(0) / kNano;
+    int64_t x, y;
+    {
+        std::lock_guard<std::mutex> hold(motion_lock);
+        if (!captured) return 0;
+        x = camera_x; y = camera_y;
+        camera_x = camera_y = 0;
+    }
+    angles[0] = (double)x / kNano;
+    angles[1] = (double)y / kNano;
     return angles[0] != 0.0 || angles[1] != 0.0;
 }
 
@@ -65,7 +77,8 @@ extern "C" int racit_camera_take(double* angles, uint64_t now)
 extern "C" int racit_camera_peek(uint64_t now)
 {
     take_time.store(now);
-    return captured.load() && (camera_x.load() != 0 || camera_y.load() != 0);
+    std::lock_guard<std::mutex> hold(motion_lock);
+    return captured && (camera_x != 0 || camera_y != 0);
 }
 
 /* The hooks call this one: racit_camera_take, plus a line per turn with
