@@ -207,13 +207,17 @@ static void hud_faces_sync(bool keyboard)
         }
         if (!is_mine && !is_orig) {
             if (!keyboard) continue;    /* made on first need, from the game's own picture */
+            /* Work from a copy taken now: hud_write_checked then writes only if
+             * the memory still holds exactly what was identified and keyed. */
+            static uint8_t snap[kFaceBytes];
+            memcpy(snap, tex, kFaceBytes);
             static uint8_t a[kFaceW * kFaceW * 4], b[kFaceW * kFaceW * 4];
-            dxt5_to_rgba(tex, kFacePitch, kFaceCols, kFaceCols, a);
+            dxt5_to_rgba(snap, kFacePitch, kFaceCols, kFaceCols, a);
             const int key = face_key(a, kFaceW, kFaceW);
             if (key < 0) { fprintf(stderr, "[prompts] HUD face picture at %08X: not a face button, left alone%c", f.ea, 10); f.ea = 0; continue; }
             char label[8]; desktop_label((unsigned)key, label);
             keycap_rgba(kFaceW, kFaceW, label, b);
-            memcpy(f.orig, tex, kFaceBytes);
+            memcpy(f.orig, snap, kFaceBytes);
             rgba_to_dxt5(b, kFaceCols, kFaceCols, kFacePitch, 0, kFaceCols, f.orig, f.mine);
             dxt5_to_rgba(f.mine, kFacePitch, kFaceCols, kFaceCols, b);
             hudkey_dump(f.ea, a, b, kFaceW, kFaceW);
@@ -286,22 +290,26 @@ static void hud_keys_sync(bool keyboard)
         return;
     }
     if (is_keys) return;
+    /* Identify, key and check against one copy taken now, so a new occupant
+     * that arrives meanwhile fails hud_write_checked's compare. */
+    static uint8_t snap[kHudRows * kHudPitch];
+    memcpy(snap, tex, bytes);
     /* Only the picture itself gets keys: as the game left it before (with the
      * R2 key, or the R1 one hud_sync draws), never memory the game has since
      * freed and reused for something else. */
-    if (!(s_hudkb.have && !memcmp(tex, s_hudkb.before, bytes))) {
+    if (!(s_hudkb.have && !memcmp(snap, s_hudkb.before, bytes))) {
         uint8_t cur[kKeyBytes];
-        hud_blocks(tex, cur);
+        hud_blocks(snap, cur);
         const bool known = s_hud.have && (!memcmp(cur, s_hud.orig, sizeof cur) || !memcmp(cur, s_hud.mine, sizeof cur));
-        if (!known && !tether_is_picture(tex)) {
+        if (!known && !tether_is_picture(snap)) {
             fprintf(stderr, "[prompts] HUD picture at %08X: not the \"R2 + square\" picture now, left alone until the next scan%c", s_hud.ea, 10);
             s_hud.ea = 0; s_hudkb.have = 0; return;
         }
     }
     const int cols = kHudPitch / 16, w = cols * 4;
     static uint8_t a[(kHudPitch / 16 * 4) * kHudRows * 4 * 4], b[sizeof a];
-    memcpy(s_hudkb.before, tex, bytes);
-    dxt5_to_rgba(tex, kHudPitch, cols, kHudRows, a);
+    memcpy(s_hudkb.before, snap, bytes);
+    dxt5_to_rgba(snap, kHudPitch, cols, kHudRows, a);
     memcpy(b, a, sizeof b);
     static uint8_t key[kKeyW * kKeyH * 4];
     char label[8];
@@ -356,8 +364,10 @@ static void badge_keys_sync(bool keyboard)
             continue;
         }
         if (is_keys) continue;
+        static uint8_t snap[kBadgeBytes];   /* identified, keyed and checked as one copy */
+        memcpy(snap, tex, kBadgeBytes);
         static uint8_t a[kBadgeW * kBadgeH * 4], b[kBadgeW * kBadgeH * 4];
-        dxt5_to_rgba(tex, kBadgePitch, kBadgeW / 4, kBadgeH / 4, a);
+        dxt5_to_rgba(snap, kBadgePitch, kBadgeW / 4, kBadgeH / 4, a);
         auto ink = [&](int x, int y) { const uint8_t* q = a + 4 * (y * kBadgeW + x); return q[3] > 128 && q[0] + q[1] + q[2] > 3 * 170; };
         int col[kBadgeW] = {};
         for (int x = 0; x < kBadgeW; x++) for (int y = 0; y < kBadgeH; y++) col[x] += ink(x, y);
@@ -377,7 +387,7 @@ static void badge_keys_sync(bool keyboard)
         if (key == 10) desktop_binding_label("QS_NEXT_RING", "T", label);
         else desktop_binding_label("QS_PREV_RING", "R", label);
         keycap_rgba(kBadgeW, kBadgeH, label, b);
-        memcpy(k.before, tex, kBadgeBytes);
+        memcpy(k.before, snap, kBadgeBytes);
         rgba_to_dxt5(b, kBadgeW / 4, kBadgeH / 4, kBadgePitch, 0, kBadgeW / 4, k.before, k.keys);
         if (!k.have) {
             dxt5_to_rgba(k.keys, kBadgePitch, kBadgeW / 4, kBadgeH / 4, b);
