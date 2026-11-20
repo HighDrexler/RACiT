@@ -12,6 +12,9 @@
 #include <stdlib.h>
 #include <string.h>
 #ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX   /* keep std::min / std::max usable in the lifted code that includes this */
+#endif
 #include <windows.h>
 #endif
 #include "ppu_stack_read.h"

@@ -40,6 +40,11 @@
  * memory -- the page the glyph records name, from the font's IGHW texture
  * header -- and encoded again), and put back for the PS3 layout.
  */
+/* Before any header that can bring in <windows.h>: its min / max macros
+ * break std::min / std::max (here and in the headers included below). */
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <algorithm>
 #include <map>
 #include <vector>
