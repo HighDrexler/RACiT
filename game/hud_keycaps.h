@@ -236,6 +236,26 @@ static void hud_faces_sync(bool keyboard)
 
 /* Whether the "R2 + square" picture's left key is the font's R2 or R1 (the
  * R1 swap), as hud_sync checks it: the picture is still there. */
+/* A pixel of the font page as the game drew it. With keycaps in (a
+ * keyboard start draws them before the tether picture is ever checked), the
+ * page holds keys where the R1 / R2 glyphs were: those pixels come from the
+ * blocks saved before the keys went in. The first glyph saved holds a block
+ * as the game left it; later neighbours saved it with earlier keys in. */
+static void font_art_pixel(const uint8_t* pg, uint32_t pitch, int x, int y, uint8_t out[4])
+{
+    const uint32_t ea = (uint32_t)(pg - vm_base);
+    const int bx = x / 4, by = y / 4;
+    for (unsigned i = 0; i < desktop_count; i++) {
+        const DesktopGlyph& g = desktop_glyphs[i];
+        if (g.page != ea || g.pitch != pitch || bx < g.bx || by < g.by || bx >= g.bx + g.cols || by >= g.by + g.rows) continue;
+        uint8_t px[16][4];
+        dxt5_decode(g.original + ((by - g.by) * g.cols + (bx - g.bx)) * 16, px);
+        memcpy(out, px[(y & 3) * 4 + (x & 3)], 4);
+        return;
+    }
+    dxt5_pixel(pg, pitch, x, y, out);
+}
+
 static bool tether_is_picture(const uint8_t* tex)
 {
     if (!s_nfont) return false;
@@ -247,7 +267,7 @@ static bool tether_is_picture(const uint8_t* tex)
         for (int y = 0; y < kKeyH; y++)
             for (int x = 0; x < kKeyW - 3; x++) {
                 uint8_t a[4], b[4];
-                dxt5_pixel(pg, pitch, fx + x, kRowY + y, a);
+                font_art_pixel(pg, pitch, fx + x, kRowY + y, a);
                 dxt5_pixel(tex, kHudPitch, x, y, b);
                 for (int k = 0; k < 4; k++) err += abs(a[k] - b[k]);
             }
