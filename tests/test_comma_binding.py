@@ -13,6 +13,7 @@ compiler.
 """
 import re
 import shutil
+import sys
 import subprocess
 import tempfile
 import unittest
@@ -20,6 +21,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CXX = shutil.which('clang++') or shutil.which('g++')
+# Windows runs a program by its .exe name, and clang for MSVC writes -o's name as given.
+EXE = '.exe' if sys.platform == 'win32' else ''
 
 
 def function(text, head):
@@ -88,9 +91,9 @@ class CommaBinding(unittest.TestCase):
         src = HARNESS.replace('SPLIT', split).replace('PARSE', parse).replace('LOOP', loop)
         with tempfile.TemporaryDirectory() as d:
             (Path(d) / 't.cpp').write_text(src)
-            subprocess.run([CXX, '-std=c++17', '-o', str(Path(d) / 't'), str(Path(d) / 't.cpp')], check=True)
+            subprocess.run([CXX, '-std=c++17', '-o', str(Path(d) / ('t' + EXE)), str(Path(d) / 't.cpp')], check=True)
             cases = ['Comma', 'A,Comma', ',', 'A,,', ',,B', 'A,,,B', 'A, B', 'none']
-            out = subprocess.run([str(Path(d) / 't')] + cases, check=True, capture_output=True, text=True).stdout.splitlines()
+            out = subprocess.run([str(Path(d) / ('t' + EXE))] + cases, check=True, capture_output=True, text=True).stdout.splitlines()
         self.assertEqual(out, [
             '[Comma]|[54]', '[A][Comma]|[4][54]', '[Comma]|[54]', '[A][Comma]|[4][54]',
             '[Comma][B]|[54][5]', '[A][Comma][B]|[4][54][5]', '[A][B]|[4][5]', '|'])
@@ -105,8 +108,8 @@ class CommaBinding(unittest.TestCase):
                ' char l[16]; racit_menu_key_label("X", "Q", l); printf("%s\\n", l); } }\n')
         with tempfile.TemporaryDirectory() as d:
             (Path(d) / 'm.cpp').write_text(src)
-            subprocess.run([CXX, '-std=c++17', '-o', str(Path(d) / 'm'), str(Path(d) / 'm.cpp')], check=True)
-            out = subprocess.run([str(Path(d) / 'm'), 'Comma', 'Comma,A', ',', ',,A', 'A,,', 'Space'],
+            subprocess.run([CXX, '-std=c++17', '-o', str(Path(d) / ('m' + EXE)), str(Path(d) / 'm.cpp')], check=True)
+            out = subprocess.run([str(Path(d) / ('m' + EXE)), 'Comma', 'Comma,A', ',', ',,A', 'A,,', 'Space'],
                                  check=True, capture_output=True, text=True).stdout.split()
         self.assertEqual(out, [',', ',', ',', ',', 'A', 'SPC'])
 
