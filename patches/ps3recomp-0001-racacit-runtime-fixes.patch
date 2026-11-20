@@ -10081,7 +10081,7 @@ index dab4380..6132681 100644
  /* ---- decoded state getters -------------------------------------------- */
  
 diff --git a/libs/video/rsx_draw_engine.c b/libs/video/rsx_draw_engine.c
-index 5c50e4a..36522b9 100644
+index 5c50e4a..45d4c97 100644
 --- a/libs/video/rsx_draw_engine.c
 +++ b/libs/video/rsx_draw_engine.c
 @@ -11,6 +11,7 @@
@@ -10105,7 +10105,7 @@ index 5c50e4a..36522b9 100644
  
  /* Guest memory and the RSX offset resolvers, declared the way every backend
   * that reads guest data declares them (rsx_vertex_fetch.h). */
-@@ -35,12 +42,24 @@ extern u32 ppu_vm_size;
+@@ -35,12 +42,30 @@ extern u32 ppu_vm_size;
  
  /* ------------------------------------------------------------------------- */
  
@@ -10122,6 +10122,12 @@ index 5c50e4a..36522b9 100644
 + * the game still sampled came back as raw VRAM: neon noise over scenery and
 + * Ratchet. */
 +#define ENG_MAX_SURFACES   1024
++/* Past ENG_MAX_SURFACES a full list gives up a target whose pixels are safe
++ * (eng_surface_victim). Without the write watch a main-memory target's only
++ * copy is on the GPU and can't be given up, so when every target is like that
++ * the list grows into this spare room instead of losing one. */
++#define ENG_SURFACE_SPARE  (ENG_MAX_SURFACES / 4)
++#define ENG_SURFACE_SLOTS  (ENG_MAX_SURFACES + ENG_SURFACE_SPARE)
 +#define ENG_MAX_ZDEPTHS    512
 +#define ENG_ADDR_BUCKETS   2048u     /* power of two: the address index below */
  #define ENG_MAX_TEXTURES   RSX_DRAW_ENGINE_TEXTURE_CACHE
@@ -10133,7 +10139,7 @@ index 5c50e4a..36522b9 100644
  #define ENG_VERT_STRIDE    (RSX_DSP_NUM_VERTEX_ATTR * 16u)
  #define ENG_INVALID        0xFFFFFFFFu
  /* Guest textures larger than this are a misdecoded register, not an image;
-@@ -51,7 +70,61 @@ extern u32 ppu_vm_size;
+@@ -51,7 +76,61 @@ extern u32 ppu_vm_size;
   * target rather than destroying a live one. */
  #define ENG_MAX_SURFACE_DIM 8192u
  
@@ -10195,7 +10201,7 @@ index 5c50e4a..36522b9 100644
  #define ENG_FP_MAX_BYTES   0x10000u
  
  #define M_ALPHA_TEST_ENABLE   0x0304
-@@ -60,6 +133,7 @@ extern u32 ppu_vm_size;
+@@ -60,6 +139,7 @@ extern u32 ppu_vm_size;
  #define M_BLEND_ENABLE        0x0310
  #define M_BLEND_SFACTOR       0x0314
  #define M_BLEND_DFACTOR       0x0318
@@ -10203,7 +10209,7 @@ index 5c50e4a..36522b9 100644
  #define M_BLEND_EQUATION      0x0320
  #define M_COLOR_MASK          0x0324
  #define M_STENCIL_TEST_ENABLE 0x0328
-@@ -89,6 +163,22 @@ typedef struct {
+@@ -89,6 +169,22 @@ typedef struct {
      u32 w, h;
      rsx_be_format fmt;
      u32 handle;
@@ -10226,7 +10232,7 @@ index 5c50e4a..36522b9 100644
  } eng_surface;
  
  typedef struct {
-@@ -99,17 +189,36 @@ typedef struct {
+@@ -99,17 +195,36 @@ typedef struct {
      int cleared;
      int had_write;
      int snapshot_valid;
@@ -10264,7 +10270,12 @@ index 5c50e4a..36522b9 100644
  
  typedef struct { u32 first, count; } eng_batch;
  
-@@ -130,9 +239,25 @@ static struct {
+@@ -126,13 +241,29 @@ static struct {
+ 
+     rsx_dispatch rsx;
+ 
+-    eng_surface surfaces[ENG_MAX_SURFACES];
++    eng_surface surfaces[ENG_SURFACE_SLOTS];
      u32 n_surfaces;
      eng_zdepth zdepths[ENG_MAX_ZDEPTHS];
      u32 n_zdepths;
@@ -10272,7 +10283,7 @@ index 5c50e4a..36522b9 100644
 +     * draw asks "which target / depth buffer is at this address" once per
 +     * texture unit, and scanning both lists for it was most of the draw's
 +     * cost once they held a few hundred entries. Rebuilt when addr_dirty. */
-+    u16 surf_head[ENG_ADDR_BUCKETS], surf_next[ENG_MAX_SURFACES];
++    u16 surf_head[ENG_ADDR_BUCKETS], surf_next[ENG_SURFACE_SLOTS];
 +    u16 z_head[ENG_ADDR_BUCKETS], z_next[ENG_MAX_ZDEPTHS];
 +    int addr_dirty;
 +    /* Bumped whenever what a texture unit resolves to could change other
@@ -10290,7 +10301,7 @@ index 5c50e4a..36522b9 100644
      u32 n_pipelines;
      eng_display_buffer display_buffers[8];
  
-@@ -141,6 +266,7 @@ static struct {
+@@ -141,6 +272,7 @@ static struct {
      u32 guest_draws;
      u32 last_guest_draws;
      u32 last_present_surface;
@@ -10298,7 +10309,7 @@ index 5c50e4a..36522b9 100644
      u32 last_flip_buffer;
  
      /* staging: decoded texture levels, the constant blocks, the index list */
-@@ -161,10 +287,13 @@ static char s_ps_hlsl[256 * 1024];
+@@ -161,10 +293,13 @@ static char s_ps_hlsl[256 * 1024];
  
  /* The draw accumulator: one BEGIN_END group's batches, references and cuts. */
  static struct {
@@ -10316,7 +10327,7 @@ index 5c50e4a..36522b9 100644
      u32 n_packets;
  
      rsx_vertex_ref* refs;
-@@ -216,13 +345,147 @@ static const u8* eng_guest_ptr(void* user, u32 location, u32 offset,
+@@ -216,13 +351,147 @@ static const u8* eng_guest_ptr(void* user, u32 location, u32 offset,
      return vm_base + ea;
  }
  
@@ -10465,7 +10476,7 @@ index 5c50e4a..36522b9 100644
  /* ---- render state -------------------------------------------------------- */
  
  void rsx_draw_engine_decode_render_state(const rsx_dispatch* rsx,
-@@ -231,6 +494,13 @@ void rsx_draw_engine_decode_render_state(const rsx_dispatch* rsx,
+@@ -231,6 +500,13 @@ void rsx_draw_engine_decode_render_state(const rsx_dispatch* rsx,
      memset(rs, 0, sizeof(*rs));
      rs->alpha_test_enable = rsx_dsp_reg(rsx, M_ALPHA_TEST_ENABLE) & 1;
      rs->alpha_func   = rsx_dsp_reg(rsx, M_ALPHA_FUNC);
@@ -10479,7 +10490,7 @@ index 5c50e4a..36522b9 100644
      rs->alpha_ref_raw = rsx_dsp_reg(rsx, M_ALPHA_REF);
      rsx_dsp_surface sf;
      rsx_dsp_get_surface(rsx, &sf);
-@@ -265,6 +535,30 @@ void rsx_draw_engine_decode_render_state(const rsx_dispatch* rsx,
+@@ -265,6 +541,30 @@ void rsx_draw_engine_decode_render_state(const rsx_dispatch* rsx,
      rs->bs_fail      = rsx_dsp_reg(rsx, M_BACK_STENCIL_OP_FAIL);
      rs->bs_zfail     = rsx_dsp_reg(rsx, M_BACK_STENCIL_OP_ZFAIL);
      rs->bs_zpass     = rsx_dsp_reg(rsx, M_BACK_STENCIL_OP_ZPASS);
@@ -10510,7 +10521,7 @@ index 5c50e4a..36522b9 100644
  }
  
  u64 rsx_draw_engine_hash_render_state(const rsx_be_render_state* rs, u64 hash)
-@@ -304,6 +598,7 @@ u64 rsx_draw_engine_hash_render_state(const rsx_be_render_state* rs, u64 hash)
+@@ -304,6 +604,7 @@ u64 rsx_draw_engine_hash_render_state(const rsx_be_render_state* rs, u64 hash)
      ENG_HASH_FIELD(bs_fail);
      ENG_HASH_FIELD(bs_zfail);
      ENG_HASH_FIELD(bs_zpass);
@@ -10518,7 +10529,7 @@ index 5c50e4a..36522b9 100644
  #undef ENG_HASH_FIELD
      return hash;
  }
-@@ -509,8 +804,261 @@ static const void* eng_surface_seed(u32 location, u32 offset, u32 w, u32 h,
+@@ -509,8 +810,284 @@ static const void* eng_surface_seed(u32 location, u32 offset, u32 w, u32 h,
      return g.tex_staging;
  }
  
@@ -10738,6 +10749,12 @@ index 5c50e4a..36522b9 100644
 + * among the oldest, superseded or never drawn first, then colour that writes
 + * back, then the oldest of the rest -- and never one whose pixels could not
 + * be read back. ENG_INVALID: none qualifies (the caller keeps the old LRU). */
++typedef struct { u64 key; u32 idx; } eng_victim_ent;
++static int eng_victim_cmp(const void* a, const void* b)
++{
++    const u64 x = ((const eng_victim_ent*)a)->key, y = ((const eng_victim_ent*)b)->key;
++    return x < y ? -1 : x > y;
++}
 +static u32 eng_surface_victim(void)
 +{
 +    u32 cand[ENG_VICTIM_CANDS];
@@ -10759,6 +10776,23 @@ index 5c50e4a..36522b9 100644
 +        if (!(key[k] >> 60)) return cand[k];       /* loses nothing: no write-back either */
 +        if (!eng_surface_retire(cand[k])) return cand[k];
 +    }
++    /* None of the oldest can go (without the write watch, main-memory targets
++     * whose only copy is on the GPU): the whole list, in the same order. */
++    static eng_victim_ent all[ENG_SURFACE_SLOTS];
++    u32 n = 0;
++    for (u32 i = 0; i < g.n_surfaces; i++) {
++        const eng_surface* s = &g.surfaces[i];
++        if (i == g.last_present_surface || s->last_use > s_frame_serial) continue;
++        int tried = 0;
++        for (u32 k = 0; k < nc; k++) tried |= cand[k] == i;
++        if (tried) continue;
++        const u64 tier = (!s->color_written || eng_superseded(s->location, s->offset, eng_surface_span(s), s->last_write, s) ||
++                          eng_surface_overwritten(i)) ? 0u : eng_surface_writes_back(s) ? 1u : 2u;
++        all[n].key = (tier << 60) | (s->last_use & ((1ull << 60) - 1u)); all[n].idx = i; n++;
++    }
++    qsort(all, n, sizeof all[0], eng_victim_cmp);
++    for (u32 k = 0; k < n; k++)
++        if (!(all[k].key >> 60) || !eng_surface_retire(all[k].idx)) return all[k].idx;
 +    return ENG_INVALID;
 +}
 +
@@ -10782,7 +10816,7 @@ index 5c50e4a..36522b9 100644
   * rsx_live_draw.c's surface_get (2605-2690). */
  static u32 eng_surface_get(u32 location, u32 offset, u32 want_w, u32 want_h,
                            rsx_be_format want_fmt)
-@@ -518,46 +1066,77 @@ static u32 eng_surface_get(u32 location, u32 offset, u32 want_w, u32 want_h,
+@@ -518,46 +1095,83 @@ static u32 eng_surface_get(u32 location, u32 offset, u32 want_w, u32 want_h,
      if (!want_w) want_w = g.width;
      if (!want_h) want_h = g.height;
  
@@ -10830,15 +10864,21 @@ index 5c50e4a..36522b9 100644
          slot = g.n_surfaces;
 +    } else {
 +        slot = eng_surface_victim();
-+        if (slot == ENG_INVALID) {                 /* least recently bound */
-+            slot = 0;
-+            for (u32 i = 1; i < g.n_surfaces; i++)
-+                if (g.surfaces[i].last_use < g.surfaces[slot].last_use) slot = i;
-+            if (eng_surface_retire(slot)) {   /* every candidate keeps pixels nothing else has */
-+                static unsigned long long n_lost;
-+                if (++n_lost <= 8 || (n_lost & (n_lost - 1)) == 0)
-+                    fprintf(stderr, "[rsx engine] target list full: dropped %u:0x%08X %ux%u, whose pixels were only on the GPU (%llu so far)%c",
-+                            g.surfaces[slot].location, g.surfaces[slot].offset, g.surfaces[slot].w, g.surfaces[slot].h, n_lost, 10);
++        if (slot == ENG_INVALID) {
++            /* Every target holds pixels that are only on the GPU: never give
++             * one up. Grow into the spare room; past that, this target isn't
++             * made (its draws are skipped) rather than losing another's pixels. */
++            static unsigned long long n_grow, n_refused;
++            if (g.n_surfaces < ENG_SURFACE_SLOTS) {
++                slot = g.n_surfaces;
++                if (++n_grow <= 8 || (n_grow & (n_grow - 1)) == 0)
++                    fprintf(stderr, "[rsx engine] target list full of targets whose pixels are only on the GPU: grown to %u (%llu so far)%c",
++                            g.n_surfaces + 1u, n_grow, 10);
++            } else {
++                if (++n_refused <= 8 || (n_refused & (n_refused - 1)) == 0)
++                    fprintf(stderr, "[rsx engine] target list full (%u) of targets whose pixels are only on the GPU: %u:0x%08X %ux%u not made (%llu so far)%c",
++                            g.n_surfaces, location, offset, want_w, want_h, n_refused, 10);
++                return ENG_INVALID;
 +            }
 +        }
      }
@@ -10879,7 +10919,7 @@ index 5c50e4a..36522b9 100644
          fprintf(stderr, "[rsx engine] surface %u:0x%08X %ux%u fmt %d%s\n",
                  location, offset, want_w, want_h, (int)want_fmt,
                  seed ? " (seeded from guest memory)" : ""); }
-@@ -570,10 +1149,29 @@ static u32 eng_surface_get(u32 location, u32 offset, u32 want_w, u32 want_h,
+@@ -570,10 +1184,29 @@ static u32 eng_surface_get(u32 location, u32 offset, u32 want_w, u32 want_h,
   * vtable path's target_for binds by. Resolution stops at the first member
   * that cannot be created, as that path stops at the first gap. Returns how
   * many were resolved, or 0. */
@@ -10909,7 +10949,7 @@ index 5c50e4a..36522b9 100644
      /* SET_SURFACE_COLOR_TARGET 2 selects B alone; every other value starts at
       * A, and the MRT selectors add B, C and D on top of it. */
      const u32 sel = (sf.color_target == CELL_GCM_SURFACE_TARGET_1) ? 1u : 0u;
-@@ -581,6 +1179,10 @@ static u32 eng_current_target_set(u32 slots[RSX_BE_MAX_COLOR_TARGETS])
+@@ -581,6 +1214,10 @@ static u32 eng_current_target_set(u32 slots[RSX_BE_MAX_COLOR_TARGETS])
      const u32 first = eng_surface_get(sf.color_location[sel], sf.color_offset[sel],
                                        sf.clip_w, sf.clip_h, fmt);
      if (first == ENG_INVALID) return 0;
@@ -10920,7 +10960,7 @@ index 5c50e4a..36522b9 100644
      slots[0] = first;
      u32 n = 1;
  
-@@ -615,46 +1217,187 @@ static u32 eng_current_surface(void)
+@@ -615,46 +1252,187 @@ static u32 eng_current_surface(void)
  /* One depth target per guest zeta address. Sharing a single resource across a
   * title's shadow, scene and post passes cross-contaminates later depth tests;
   * upstream's ef3271b records that as "the black player-character mass". */
@@ -11122,7 +11162,7 @@ index 5c50e4a..36522b9 100644
      return slot;
  }
  
-@@ -662,18 +1405,206 @@ static u32 eng_zdepth_get(u32 location, u32 offset, u32 rt_w, u32 rt_h)
+@@ -662,18 +1440,206 @@ static u32 eng_zdepth_get(u32 location, u32 offset, u32 rt_w, u32 rt_h)
   * a depth-WRITING draw: a write-enable bit alone does not prove the pass
   * produced a usable depth map, and a clear-only zeta falls through to guest
   * memory instead (rsx_live_draw.c:6016-6018, 6265-6269). */
@@ -11332,7 +11372,7 @@ index 5c50e4a..36522b9 100644
  
  /* ---- textures ------------------------------------------------------------ */
  
-@@ -711,20 +1642,18 @@ static u32 eng_texture_span(u32 fmt, u32 w, u32 h, u32 levels, u32 pitch, int cu
+@@ -711,20 +1677,18 @@ static u32 eng_texture_span(u32 fmt, u32 w, u32 h, u32 levels, u32 pitch, int cu
  /* One hash per cached texture per presented frame. Word-at-a-time FNV over
   * the whole span is deliberately cheap: this is a mutation detector, not a
   * content id (rsx_live_draw.c:2002-2026). */
@@ -11360,7 +11400,7 @@ index 5c50e4a..36522b9 100644
      *readable = 1;
      return hash;
  }
-@@ -741,9 +1670,88 @@ static int eng_staging_reserve(u32 bytes)
+@@ -741,9 +1705,88 @@ static int eng_staging_reserve(u32 bytes)
  
  /* Decode a guest texture out of guest memory and hand every face and level to
   * the backend. Returns the backend handle, or 0. */
@@ -11450,7 +11490,7 @@ index 5c50e4a..36522b9 100644
      rsx_tex_level lv[RSX_MAX_TEXTURE_LEVELS];
      const u32 nlv = rsx_texture_mip_chain(fmt, w, h, levels, pitch, lv);
      if (!nlv || !lv[0].tl.face_bytes) return 0;
-@@ -753,23 +1761,53 @@ static u32 eng_texture_upload(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
+@@ -753,23 +1796,53 @@ static u32 eng_texture_upload(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
      const u32 span = eng_texture_span(fmt, w, h, levels, pitch, cube);
      const u8* src = eng_guest_ptr(NULL, location, offset, span);
      if (!src) return 0;
@@ -11510,7 +11550,7 @@ index 5c50e4a..36522b9 100644
                                   g.tex_staging, tl->dst_row_bytes, tl->rows);
          }
      }
-@@ -783,67 +1821,464 @@ static u32 eng_texture_upload(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
+@@ -783,67 +1856,464 @@ static u32 eng_texture_upload(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
   * cache full evicts the least recently used entry rather than returning
   * nothing: returning white "made the recovered orphanage render as flat
   * green/black geometry" (rsx_live_draw.c:2326-2334). */
@@ -11998,15 +12038,12 @@ index 5c50e4a..36522b9 100644
  /* SET_TEXTURE_FILTER's min field is [18:16] (1 NEAREST, 2 LINEAR, then 3..6,
   * the four combinations of a nearest/linear minification with a
   * nearest/linear mip filter) and mag [26:24]; SET_TEXTURE_CONTROL0 carries
-@@ -881,10 +2316,125 @@ static u32 eng_vtex_mask(void)
+@@ -881,6 +2351,121 @@ static u32 eng_vtex_mask(void)
      return mask;
  }
  
--static u32 eng_cube_mask(void)
 +static int eng_is_depth_fmt(u32 format)
- {
--    u32 mask = 0;
--    for (u32 u = 0; u < RSX_DSP_NUM_TEXTURES; u++) {
++{
 +    const u32 b = format & RSX_TEX_FMT_BASE_MASK & ~(u32)RSX_TEX_FMT_UNNORM;
 +    return b >= RSX_TEX_FMT_DEPTH24_D8 && b <= RSX_TEX_FMT_DEPTH16_F;
 +}
@@ -12120,14 +12157,10 @@ index 5c50e4a..36522b9 100644
 +    return mask;
 +}
 +
-+static u32 eng_cube_mask(void)
-+{
-+    u32 mask = 0;
-+    for (u32 u = 0; u < RSX_DSP_NUM_TEXTURES; u++) {
-         rsx_dsp_texture t;
-         rsx_dsp_get_texture(&g.rsx, u, &t);
-         /* A cube face is square by construction, so a non-square image
-@@ -901,6 +2451,10 @@ static u32 eng_cube_mask(void)
+ static u32 eng_cube_mask(void)
+ {
+     u32 mask = 0;
+@@ -901,6 +2486,10 @@ static u32 eng_cube_mask(void)
   * layout and by the pipeline, because they must not disagree: the built-in
   * program declares all sixteen inputs, so narrowing the layout for it would
   * leave the pipeline's vertex descriptor short of what the shader reads. */
@@ -12138,7 +12171,7 @@ index 5c50e4a..36522b9 100644
  static int eng_guest_programs(const u8** out_vp, u32* out_vp_instrs,
                                const u8** out_fp, u32* out_fp_size)
  {
-@@ -909,8 +2463,16 @@ static int eng_guest_programs(const u8** out_vp, u32* out_vp_instrs,
+@@ -909,8 +2498,16 @@ static int eng_guest_programs(const u8** out_vp, u32* out_vp_instrs,
      const u32 start = rsx_dsp_vp_start(&g.rsx);
      if (start < RSX_DSP_VP_INSTR) {
          vp_uc = (const u8*)(g.rsx.vp + start * 4);
@@ -12157,7 +12190,7 @@ index 5c50e4a..36522b9 100644
      }
  
      /* A zero SET_SHADER_PROGRAM is "none", not "the program at offset 0": the
-@@ -918,13 +2480,27 @@ static int eng_guest_programs(const u8** out_vp, u32* out_vp_instrs,
+@@ -918,13 +2515,27 @@ static int eng_guest_programs(const u8** out_vp, u32* out_vp_instrs,
       * never read back as zero. */
      const u8* fp_uc = NULL;
      u32 fp_size = 0;
@@ -12192,7 +12225,7 @@ index 5c50e4a..36522b9 100644
      }
  
      if (out_vp) *out_vp = vp_uc;
-@@ -942,10 +2518,17 @@ static void eng_vertex_layout(rsx_vertex_layout_plan* layout)
+@@ -942,10 +2553,17 @@ static void eng_vertex_layout(rsx_vertex_layout_plan* layout)
      const u8* uc = NULL;
      u32 instrs = 0;
      if (eng_guest_programs(&uc, &instrs, NULL, NULL)) {
@@ -12214,7 +12247,7 @@ index 5c50e4a..36522b9 100644
      }
      rsx_vertex_layout_plan_init(layout, mask);
  }
-@@ -1006,27 +2589,187 @@ static const char* const kEngFixedPS =
+@@ -1006,27 +2624,187 @@ static const char* const kEngFixedPS =
  "};\n"
  "float4 main(PSInput input) : SV_TARGET { return input.col0; }\n";
  
@@ -12408,7 +12441,7 @@ index 5c50e4a..36522b9 100644
  
      /* Identity: the vertex program's own bytes, the fragment program's
       * STRUCTURE (its inline constants are hoisted into the buffered block, so
-@@ -1034,17 +2777,47 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
+@@ -1034,17 +2812,47 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
       * SHADER_CONTROL, the cube and vertex-texture masks, the input layout,
       * and the structural render state. */
      u64 key = 1469598103934665603ull;
@@ -12460,7 +12493,7 @@ index 5c50e4a..36522b9 100644
      }
      key = eng_fnv1a(&layout->mask, sizeof layout->mask, key);
      key = eng_fnv1a(&layout->stride, sizeof layout->stride, key);
-@@ -1054,43 +2827,172 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
+@@ -1054,43 +2862,172 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
      key = eng_fnv1a(&rt_count, sizeof rt_count, key);
      key = rsx_draw_engine_hash_render_state(rs, key);
  
@@ -12516,7 +12549,8 @@ index 5c50e4a..36522b9 100644
 +        pin.unnorm_mask = unnorm_mask;
 +        memcpy(pin.unnorm_dim, unnorm_dim, sizeof pin.unnorm_dim);
 +        memcpy(pin.shadow_func, shadow_func, sizeof pin.shadow_func);
-+    }
+     }
+-    if (vi > 0 && fi > 0)
 +    rsx_draw_engine_gen_hlsl(&pin, vp_uc, fp_uc, s_vs_hlsl, sizeof s_vs_hlsl,
 +                             s_ps_hlsl, sizeof s_ps_hlsl, &vi, &fi, &nconst);
 +    if (!fixed && fi > 0 && nconst != g.fp_constants.count) fi = -1;
@@ -12566,8 +12600,7 @@ index 5c50e4a..36522b9 100644
 +                 while (s_nskip < 512 && fgets(ln, sizeof ln, f)) {
 +                     u64 k = strtoull(ln, 0, 16); if (k) s_skip[s_nskip++] = k; }
 +                 fclose(f); }
-     }
--    if (vi > 0 && fi > 0)
++    }
 +    int key_drop = 0;
 +    for (int i = 0; i < s_nskip; i++) if (s_skip[i] == key) { key_drop = 1; break; }
 +    const int dbg_drop = (s_plimit >= 0 && (long)g.n_pipelines >= s_plimit) ||
@@ -12659,7 +12692,7 @@ index 5c50e4a..36522b9 100644
      g.n_pipelines++;
      *out_fixed = fixed;
      return handle;
-@@ -1216,16 +3118,846 @@ static void dc_fetch(const rsx_vertex_layout_plan* layout, int allow_remap)
+@@ -1216,16 +3153,846 @@ static void dc_fetch(const rsx_vertex_layout_plan* layout, int allow_remap)
          dc.fetch_ok = 0;
          return;
      }
@@ -13509,7 +13542,7 @@ index 5c50e4a..36522b9 100644
  /* ---- sink ---------------------------------------------------------------- */
  
  static void sink_begin(void* user, const rsx_dispatch* r, u32 prim)
-@@ -1234,11 +3966,26 @@ static void sink_begin(void* user, const rsx_dispatch* r, u32 prim)
+@@ -1234,11 +4001,26 @@ static void sink_begin(void* user, const rsx_dispatch* r, u32 prim)
      dc_reset();
  }
  
@@ -13537,7 +13570,7 @@ index 5c50e4a..36522b9 100644
      dc.arr[dc.n_arr].first = first;
      dc.arr[dc.n_arr].count = count;
      dc.n_arr++;
-@@ -1256,7 +4003,7 @@ static void sink_inline_array(void* user, const rsx_dispatch* r,
+@@ -1256,7 +4038,7 @@ static void sink_inline_array(void* user, const rsx_dispatch* r,
      dc.inl = data;
      dc.inl_bytes = bytes;
      dc.n_packets++;
@@ -13546,7 +13579,7 @@ index 5c50e4a..36522b9 100644
      dc.arr[dc.n_arr].first = 0;
      dc.arr[dc.n_arr].count = bytes / stride;
      dc.n_arr++;
-@@ -1266,7 +4013,7 @@ static void sink_draw_index(void* user, const rsx_dispatch* r, u32 first, u32 co
+@@ -1266,7 +4048,7 @@ static void sink_draw_index(void* user, const rsx_dispatch* r, u32 first, u32 co
  {
      (void)user; (void)r;
      dc.n_packets++;
@@ -13555,7 +13588,7 @@ index 5c50e4a..36522b9 100644
      dc.idx[dc.n_idx].first = first;
      dc.idx[dc.n_idx].count = count;
      dc.n_idx++;
-@@ -1278,55 +4025,543 @@ static void sink_draw_index(void* user, const rsx_dispatch* r, u32 first, u32 co
+@@ -1278,55 +4060,543 @@ static void sink_draw_index(void* user, const rsx_dispatch* r, u32 first, u32 co
   * render-to-texture read back through a texture unit), a unit naming a
   * tracked zeta in DEPTH24_D8 samples its snapshot, and everything else is a
   * guest upload (rsx_live_draw.c:5986-6062). */
@@ -14117,7 +14150,7 @@ index 5c50e4a..36522b9 100644
      }
      return mask;
  }
-@@ -1350,12 +4585,156 @@ static u32 sink_bind_vertex_textures(
+@@ -1350,12 +4620,156 @@ static u32 sink_bind_vertex_textures(
      return bound;
  }
  
@@ -14274,7 +14307,7 @@ index 5c50e4a..36522b9 100644
      /* Everything that becomes triangles -- lists, strips, fans, quads, quad
       * strips and polygons -- is REBUILT into one triangle list through an
       * index buffer. A host strip topology cannot express a restart cut, which
-@@ -1368,41 +4747,68 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -1368,41 +4782,68 @@ static void sink_end(void* user, const rsx_dispatch* r)
      int scratch = 0;
      const int rebuild = eng_topology_rebuild(prim, 0, &scratch) != 0;
      if (!rebuild) {
@@ -14361,7 +14394,7 @@ index 5c50e4a..36522b9 100644
  
      /* Textures before any pipeline or target binding: a cache refresh can
       * replace a resource, and the backend is free to submit while doing it. */
-@@ -1414,28 +4820,44 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -1414,28 +4855,44 @@ static void sink_end(void* user, const rsx_dispatch* r)
      memset(samplers, 0, sizeof samplers);
      memset(vtextures, 0, sizeof vtextures);
      memset(vsamplers, 0, sizeof vsamplers);
@@ -14417,7 +14450,7 @@ index 5c50e4a..36522b9 100644
  
      /* The transform constant block, then the viewport epilogue the vertex
       * program's tail multiplies by: RSX window coordinates mapped into the
-@@ -1451,13 +4873,217 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -1451,13 +4908,217 @@ static void sink_end(void* user, const rsx_dispatch* r)
          xf[5] = -((vp.translate[1] - H * 0.5f) / (H * 0.5f));
          xf[6] = vp.translate[2];
      }
@@ -14638,7 +14671,7 @@ index 5c50e4a..36522b9 100644
      if (g.fp_cb_cap < fp_bytes) {
          u8* n = (u8*)realloc(g.fp_cb, fp_bytes);
          if (!n) return;
-@@ -1469,8 +5095,47 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -1469,8 +5130,47 @@ static void sink_end(void* user, const rsx_dispatch* r)
          memcpy(g.fp_cb, g.fp_constants.values, g.fp_constants.count * 16u);
      { float* alpha = (float*)(g.fp_cb + nslots * 16u);
        alpha[0] = rsx_fp_alpha_ref(rs.alpha_ref_raw, rs.alpha_ref_format);
@@ -14687,7 +14720,7 @@ index 5c50e4a..36522b9 100644
      /* The depth attachment is cleared the first time it is bound, so a title
       * that never clears its shadow zeta still tests against something. */
      const u32 depth_handle = (zslot != ENG_INVALID) ? g.zdepths[zslot].handle : 0;
-@@ -1482,15 +5147,50 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -1482,15 +5182,50 @@ static void sink_end(void* user, const rsx_dispatch* r)
          g.zdepths[zslot].had_write = 0;
      }
  
@@ -14742,7 +14775,7 @@ index 5c50e4a..36522b9 100644
  
      /* The guest scissor intersected with the surface. The nv40 reset is a
       * full 4096x4096 window and a never-written register reads 0 here, which
-@@ -1501,8 +5201,8 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -1501,8 +5236,8 @@ static void sink_end(void* user, const rsx_dispatch* r)
          u32 sw = g.surfaces[target].w, sh = g.surfaces[target].h;
          const u32 h = rsx_dsp_reg(&g.rsx, M_SCISSOR_HORIZONTAL);
          const u32 v = rsx_dsp_reg(&g.rsx, M_SCISSOR_VERTICAL);
@@ -14753,7 +14786,7 @@ index 5c50e4a..36522b9 100644
          if (gw > 0 && gh > 0) {
              u32 right = sx + sw, bottom = sy + sh;
              if (gx > sx) sx = gx;
-@@ -1517,17 +5217,342 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -1517,17 +5252,342 @@ static void sink_end(void* user, const rsx_dispatch* r)
      /* Dynamic, and deliberately outside the pipeline key. */
      g.be->set_stencil_ref(g.be->user,
                            rsx_dsp_reg(&g.rsx, M_STENCIL_FUNC_REF) & 0xFFu);
@@ -15101,7 +15134,7 @@ index 5c50e4a..36522b9 100644
  }
  
  static void sink_clear(void* user, const rsx_dispatch* r, u32 mask)
-@@ -1536,6 +5561,14 @@ static void sink_clear(void* user, const rsx_dispatch* r, u32 mask)
+@@ -1536,6 +5596,14 @@ static void sink_clear(void* user, const rsx_dispatch* r, u32 mask)
      if (!g.ready) return;
      u32 targets[RSX_BE_MAX_COLOR_TARGETS];
      const u32 n_targets = eng_current_target_set(targets);
@@ -15116,7 +15149,7 @@ index 5c50e4a..36522b9 100644
      if (!n_targets) return;
  
      if (mask & (RSX_CLEAR_COLOR_R | RSX_CLEAR_COLOR_G |
-@@ -1550,31 +5583,60 @@ static void sink_clear(void* user, const rsx_dispatch* r, u32 mask)
+@@ -1550,31 +5618,60 @@ static void sink_clear(void* user, const rsx_dispatch* r, u32 mask)
          /* Every target the set names, not only A: a deferred pass clears its
           * whole G-buffer in one CLEAR_SURFACE, and B, C and D would otherwise
           * keep whatever the last frame left in them. */
@@ -15184,7 +15217,7 @@ index 5c50e4a..36522b9 100644
          }
      }
  }
-@@ -1585,16 +5647,537 @@ static void sink_clear(void* user, const rsx_dispatch* r, u32 mask)
+@@ -1585,16 +5682,537 @@ static void sink_clear(void* user, const rsx_dispatch* r, u32 mask)
   * scene's draws having executed (rsx_live_draw.c:7557-7570). */
  static u32 eng_present_surface(u32 buffer_id)
  {
@@ -15548,7 +15581,7 @@ index 5c50e4a..36522b9 100644
 +    s_frame_serial_hist[g.frames & 63u] = s_frame_serial;
 +    /* A draw of the last ~second used it after this serial. */
 +    const u64 recent = s_frame_serial_hist[(g.frames - 60u) & 63u];
-+    static eng_lru_ent lru[ENG_MAX_TEXTURES > ENG_MAX_SURFACES ? ENG_MAX_TEXTURES : ENG_MAX_SURFACES];
++    static eng_lru_ent lru[ENG_MAX_TEXTURES > ENG_SURFACE_SLOTS ? ENG_MAX_TEXTURES : ENG_SURFACE_SLOTS];
 +    static unsigned long long n_tex_ev, n_rt_ev, n_z_ev;
 +
 +    const int pressure = g_rsx_vram_pressure;
@@ -15636,7 +15669,7 @@ index 5c50e4a..36522b9 100644
 +            lru[n].key = (tier << 60) | (s->last_use & ((1ull << 60) - 1u)); lru[n].idx = i; n++;
 +        }
 +        qsort(lru, n, sizeof lru[0], eng_lru_cmp);
-+        static u8 drop[ENG_MAX_SURFACES];
++        static u8 drop[ENG_SURFACE_SLOTS];
 +        memset(drop, 0, sizeof drop);
 +        u32 ev = 0;
 +        for (u32 k = 0; k < n && rt_bytes > tgt; k++) {
@@ -15726,7 +15759,7 @@ index 5c50e4a..36522b9 100644
  static void eng_present(u32 buffer_id)
  {
      if (!g.ready) return;
-@@ -1609,9 +6192,46 @@ static void eng_present(u32 buffer_id)
+@@ -1609,9 +6227,46 @@ static void eng_present(u32 buffer_id)
                      i, g.surfaces[i].location, g.surfaces[i].offset,
                      g.surfaces[i].w, g.surfaces[i].h, g.surfaces[i].handle);
      }
@@ -15773,7 +15806,7 @@ index 5c50e4a..36522b9 100644
      g.last_guest_draws = g.guest_draws;
      g.guest_draws = 0;
  }
-@@ -1661,6 +6281,8 @@ int rsx_draw_engine_init(u32 width, u32 height)
+@@ -1661,6 +6316,8 @@ int rsx_draw_engine_init(u32 width, u32 height)
      g.height = height ? height : 720;
      g.vp_cb = (u8*)calloc(1, ENG_VP_CB_BYTES);
      if (!g.vp_cb) return -1;
@@ -15782,7 +15815,7 @@ index 5c50e4a..36522b9 100644
      if (g.be->init && g.be->init(g.be->user, g.width, g.height) != 0) {
          free(g.vp_cb); g.vp_cb = NULL;
          return -1;
-@@ -1697,8 +6319,13 @@ void rsx_draw_engine_shutdown(void)
+@@ -1697,8 +6354,13 @@ void rsx_draw_engine_shutdown(void)
      if (g.ready && g.be->shutdown) g.be->shutdown(g.be->user);
  
      rsx_draw_engine_set_guest_memory(NULL, NULL);
@@ -15797,7 +15830,7 @@ index 5c50e4a..36522b9 100644
      memset(&dc, 0, sizeof dc);
      free(g.tex_staging); free(g.vp_cb); free(g.fp_cb); free(g.indices);
      const rsx_draw_backend* be = g.be;
-@@ -1719,6 +6346,25 @@ void rsx_draw_engine_method(u32 method, u32 arg)
+@@ -1719,6 +6381,25 @@ void rsx_draw_engine_method(u32 method, u32 arg)
      rsx_dispatch_method(&g.rsx, m, arg);
  }
  
@@ -15823,7 +15856,7 @@ index 5c50e4a..36522b9 100644
  void rsx_draw_engine_set_display_buffer(u32 buffer_id, u32 location, u32 offset,
                                          u32 pitch, u32 width, u32 height)
  {
-@@ -1745,10 +6391,363 @@ void rsx_draw_engine_present(void)
+@@ -1745,10 +6426,363 @@ void rsx_draw_engine_present(void)
       * a runner that both consumes 0xE944 and calls here would otherwise
       * re-present a double-buffered title's OTHER scanout. Presenting twice is
       * harmless either way -- the engine never clears the surface, so a second
