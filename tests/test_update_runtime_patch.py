@@ -96,6 +96,22 @@ class UpdateRuntimePatch(unittest.TestCase):
         r = self.run_script(self.p2)
         self.assertEqual(r.returncode, 0); self.assertIn('already applied', r.stdout)
 
+    def test_stale_stamp_after_a_restore(self):
+        self.assertEqual(self.run_script(self.p1).returncode, 0)
+        git(self.rt, 'checkout', '-q', '--', 'a.c')   # the patch is gone, the stamp stays
+        r = self.run_script(self.p1)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn('already applied', r.stdout)
+        self.assertIn('TWO', self.a())
+
+    def test_reset_when_already_applied(self):
+        self.assertEqual(self.run_script(self.p1).returncode, 0)
+        (self.rt / 'b.c').write_text(BASE['b.c'].replace('gamma', 'mine'))
+        r = self.run_script(self.p1, '--reset')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual((self.rt / 'b.c').read_text(), BASE['b.c'])
+        self.assertIn('TWO', self.a())
+
     def test_reset_starts_from_the_pinned_commit(self):
         self.assertEqual(self.run_script(self.p1).returncode, 0)
         (self.rt / 'a.c').write_text(self.a().replace('seven', 'my seven'))

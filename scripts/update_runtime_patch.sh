@@ -26,9 +26,11 @@ fits() { git -C "$RUNTIME" apply --check --ignore-whitespace "$@" 2>/dev/null; }
 want="$(hash "$PATCH")"
 done_() { echo "$want" > "$STAMP"; cp "$PATCH" "$APPLIED"; echo "Runtime patch applied."; exit 0; }
 
-[ "$(cat "$STAMP" 2>/dev/null)" = "$want" ] && { echo "Runtime patch is already applied."; exit 0; }
-if fits --reverse "$PATCH"; then
-    echo "$want" > "$STAMP"; cp "$PATCH" "$APPLIED"; echo "Runtime patch is already applied."; exit 0
+# Already in: the stamp alone isn't trusted (a git restore in the runtime leaves it
+# behind), only the patch itself being there. --reset always starts over.
+if [ "$RESET" != --reset ] && fits --reverse "$PATCH"; then
+    [ "$(cat "$STAMP" 2>/dev/null)" = "$want" ] || { echo "$want" > "$STAMP"; cp "$PATCH" "$APPLIED"; }
+    echo "Runtime patch is already applied."; exit 0
 fi
 stop() {
     echo "$RUNTIME: $1" >&2
