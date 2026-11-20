@@ -116,6 +116,12 @@ Whichever of this and `fix/hook-check` goes in second needs the small change the
 
 Round 7 added two more. The lock camera only took the mouse's yaw, now the mouse's pitch tilts it too. Its tilt isn't an angle you hold, it follows the stick's vertical axis and springs back to level, so the mouse goes into that axis right after the stick read, clamped to the stick's range, on 1.00 and 1.20. A lift patched with the older yaw-only lock hook gets it taken out and both put in (`tests/test_mouse_repatch.py`). And scripts/update_runtime_patch.sh and the setups run git with `core.autocrlf=false` and `core.eol=lf`, so a Windows git that defaults autocrlf to true doesn't make every runtime look edited. The test covers that with a global autocrlf=true config.
 
+## Black window with sound on the Mac (#72, `fix/macos-guest-programs`)
+
+On 1.0.0 the Mac game started from the .app showed a black window with sound. Windows and Linux turn on the guest's own shader programs (`PS3RECOMP_VK_GUEST_PROGRAMS=1`) and set `PS3_TITLE` before starting, the Mac start didn't, so the renderer took the vtable path and never uploaded a texture. Our test runs set both in the environment, which is why we never saw it. The Mac start now sets them too (the environment or settings.txt still win), and a smoke run now starts the packaged game the way a player does, without them, and checks the log for the register-file draw path and uploaded textures.
+
+Tested: RESULTS_GUEST
+
 ## Windows checkouts and tests (`fix/windows-gitattributes-eol`)
 
 The first Windows CI run found three Windows-only problems. With `* text=auto` a Windows clone checked out game/menu_keycaps.as with CRLF, so its hash stopped matching SOURCE_SHA and the menu keycaps script and its test failed. .gitattributes now keeps `*.as` LF and `*.bin` binary. The other two are test fixes on their own branches: test_update_runtime_patch runs the bash on PATH (a bare `bash` started WSL's, since Windows looks in System32 first, on `fix/mouse-direct-all-cameras`), and the comma test gives its harness programs a .exe name on Windows (on `fix/comma-binding`).
