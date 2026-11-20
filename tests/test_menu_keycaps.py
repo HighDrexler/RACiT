@@ -226,6 +226,25 @@ class GamePreparesItself(unittest.TestCase):
             self.assertFalse(first.exists(), 'the old temporary was left behind')
             self.assertEqual(second.read_bytes(), good)
 
+    @unittest.skipUnless(sys.platform == 'darwin', 'makes the rename fail with a locked file (chflags uchg, macOS)')
+    def test_unchecked_archive_is_not_used_when_publishing_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _, opened, _ = self.run_game(directory, None)
+            good = opened.read_bytes()
+            # A plausible archive at the path (right header and size, even the right
+            # bytes) without this game's marker, and a rename over it that fails: the
+            # game must not fall back to it, only to its own checked temporary.
+            Path(str(opened) + '.ok').unlink()
+            subprocess.run(['chflags', 'uchg', str(opened)], check=True)
+            try:
+                _, used, active = self.run_game(directory, None)
+            finally:
+                subprocess.run(['chflags', 'nouchg', str(opened)], check=True)
+            self.assertTrue(active)
+            self.assertNotEqual(used, opened, 'used an archive it never checked')
+            self.assertTrue(used.name.endswith('.tmp'), used.name)
+            self.assertEqual(used.read_bytes(), good)
+
     def test_off_with_zero(self):
         with tempfile.TemporaryDirectory() as directory:
             original, opened, active = self.run_game(directory, '0')
