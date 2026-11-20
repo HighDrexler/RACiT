@@ -1,6 +1,9 @@
 #include "util.h"
 
 #ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX   // windows.h min/max macros break std::min/std::max with MSVC
+#endif
 #include <windows.h>
 #include <bcrypt.h>
 #include <shellapi.h>

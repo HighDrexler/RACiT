@@ -3,6 +3,9 @@
 // counterpart of the Android launcher (android/), in the same look. The same screens on
 // macOS: an SDL window feeding this file's window procedure (mac/launcher/app_mac.h, main at the end).
 #ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX   // windows.h min/max macros break std::min/std::max with MSVC
+#endif
 #include <windows.h>
 #include <windowsx.h>
 #include <shellapi.h>

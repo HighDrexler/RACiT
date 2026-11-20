@@ -4,6 +4,9 @@
 #include "program_magic.h"
 
 #ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX   // windows.h min/max macros break std::min/std::max with MSVC
+#endif
 #include <windows.h>
 #else
 #include <unistd.h>
