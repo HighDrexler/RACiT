@@ -1013,22 +1013,41 @@ std::string Store::installed_release(const std::string& launcher_version) const
     return compare_versions(done, launcher_version) > 0 ? done : launcher_version;
 }
 
+#ifdef __APPLE__
+// What install_release set aside on macOS: the old .app bundle, holding the launcher program.
+static bool is_old_launcher_app(const fs::path& app)
+{
+    std::error_code ec;
+    return fs::is_directory(app, ec) && fs::is_regular_file(app / L"Contents" / L"MacOS" / L"RaCACiT Launcher", ec);
+}
+#endif
+
 void Store::clean_update_leftovers()
 {
     delete_tree(root / L".update");
     // The launcher this one replaced: it may still be on its way out.
-    fs::path old = exe_path(); old += L".old";
     std::error_code ec;
-    if (!fs::exists(old, ec)) return;
 #ifdef _WIN32
+    fs::path old = exe_path(); old += L".old";
+    if (!fs::exists(old, ec)) return;
     std::thread([old] {
         for (int i = 0; i < 40; i++) {
             if (DeleteFileW(old.c_str()) || GetLastError() == ERROR_FILE_NOT_FOUND) return;
             Sleep(250);
         }
     }).detach();
+#elif defined(__APPLE__)
+    // install_release sets the whole .app aside as <app>.old beside it: only that, when it
+    // still holds the launcher program, goes as a folder. Anything else of that name (and a
+    // stray <program>.old inside Contents/MacOS) is removed only if it's a file or empty.
+    fs::path old_app = app_bundle_path(); old_app += L".old";
+    if (is_old_launcher_app(old_app)) fs::remove_all(old_app, ec);
+    else fs::remove(old_app, ec);
+    fs::path old = exe_path(); old += L".old";
+    fs::remove(old, ec);
 #else
-    delete_tree(old);   // nothing holds a replaced program open here
+    fs::path old = exe_path(); old += L".old";
+    fs::remove(old, ec);   // nothing holds a replaced program open here
 #endif
 }
 
@@ -1220,7 +1239,7 @@ std::string Store::install_release(const ReleaseInfo& rel, Progress* p, std::str
         {
             std::error_code gone;
 #ifdef __APPLE__
-            if (fs::is_directory(self_old, gone) && fs::is_regular_file(program_of(self_old), gone))
+            if (is_old_launcher_app(self_old))
                 fs::remove_all(self_old, gone);
             else
 #endif
