@@ -120,6 +120,49 @@ MOUSE_DECLS = ('extern "C" int racit_camera_turn(const char*, double*, unsigned 
                '((double)SDL_GetPerformanceCounter() * 1000000000.0 / (double)SDL_GetPerformanceFrequency()); }\n')
 
 
+# What v1.0.0 put into the follow camera (func_000459D4) before this recipe: patch_lift
+# step 22 on the disc, the update 1.20 recipe on 1.20. A lift patched then still has it,
+# and the recipe below would declare mouse_angles a second time, so it comes out first.
+OLD_FOLLOW_MOUSE = (
+    # The disc's step 22.
+    '        double mouse_angles[2] = {};   /* racacit */\n'
+    '        const int mouse_direct = racit_camera_take(mouse_angles, (uint64_t)((double)SDL_GetPerformanceCounter() * 1000000000.0 / (double)SDL_GetPerformanceFrequency()));\n',
+    '        if (mouse_direct) ctx->fpr[1] -= mouse_angles[0];   /* racacit: added to the stick turn (PR #66) */\n',
+    '        if (mouse_direct) {   /* racacit */\n'
+    '            uint32_t lb = vm_read32(ctx->gpr[30] - 0x7F24), hb = vm_read32(ctx->gpr[30] - 0x7F1C);\n'
+    '            float lo, hi; memcpy(&lo, &lb, 4); memcpy(&hi, &hb, 4);\n'
+    '            const double target = ctx->fpr[31] + mouse_angles[1] - ctx->fpr[1];\n'
+    '            ctx->fpr[31] = fmin(fmax(target, lo), hi) + ctx->fpr[1];\n'
+    '        }\n',
+    # Update 1.20's recipe (versions/BCUS98124-1.20-hooks.json in v1.0.0).
+    '        double mouse_angles[2] = {};\n'
+    '        const int mouse_direct = racit_camera_take(mouse_angles,(uint64_t)((double)SDL_GetPerformanceCounter()*1000000000.0/(double)SDL_GetPerformanceFrequency()));\n',
+    '        if (mouse_direct) {\n'
+    '            uint32_t lb=vm_read32(ctx->gpr[30]-0x7F24), hb=vm_read32(ctx->gpr[30]-0x7F1C);\n'
+    '            float lo,hi; memcpy(&lo,&lb,4); memcpy(&hi,&hb,4);\n'
+    '            /* Clamp before the original angle wrapping so a fast vertical\n'
+    '             * swipe cannot jump across the pole or wrap to the other limit. */\n'
+    '            const double target=mouse_angles[1]-ctx->fpr[1];\n'
+    '            ctx->fpr[31]=fmin(fmax(target,lo),hi)+ctx->fpr[1];\n'
+    '        }\n',
+    '        if (mouse_direct) ctx->fpr[1] = -mouse_angles[0];\n',
+)
+OLD_MOUSE_DECL = 'extern "C" int racit_camera_take(double*, unsigned long long);\n'
+
+
+def strip_old_follow_mouse(fn, func):
+    """fn without v1.0.0's follow camera mouse patch (fn itself when it has none)."""
+    if 'racit_camera_take' not in fn:
+        return fn
+    for block in OLD_FOLLOW_MOUSE:
+        fn = fn.replace(block, '', 1)
+    if 'racit_camera_take' in fn or 'mouse_direct' in fn or 'mouse_angles' in fn:
+        sys.exit('patch_lift #22: %s holds a mouse patch this script does not know; '
+                 'regenerate the lift (scripts/pipeline.sh)' % func)
+    print('patch_lift #22: %s: the v1.0.0 follow camera patch taken out' % func)
+    return fn
+
+
 def mouse_camera_edit(fn, start, name, edit):
     """fn with one edit of camera name applied, or None when its place is not there once."""
     kind, where, code = edit
@@ -154,6 +197,12 @@ def apply_mouse_cameras(recomp, profile_id):
             fn = src[sp[0]:sp[2]]
             if '/* racacit mouse: %s */' % name in fn:
                 done.add(name); continue
+            stripped = strip_old_follow_mouse(fn, func)
+            if stripped is not fn:
+                src = src[:sp[0]] + stripped + src[sp[2]:]
+                changed = True
+                sp = func_span(src, func)
+                fn = src[sp[0]:sp[2]]
             start = int(func[5:], 16)
             for edit in MOUSE_CAMERAS[name]:
                 fn = mouse_camera_edit(fn, start, name, edit)
@@ -167,6 +216,7 @@ def apply_mouse_cameras(recomp, profile_id):
             src = src[:sp[0]] + fn + src[sp[2]:]
             done.add(name); changed = True
         if changed:
+            src = src.replace(OLD_MOUSE_DECL, '')
             if 'racit_mouse_now(void)' not in src:
                 i = src.index('\n', src.index('#include')) + 1
                 src = src[:i] + MOUSE_DECLS + src[i:]
