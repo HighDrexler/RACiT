@@ -52,10 +52,13 @@ extern "C" int racit_camera_active(uint64_t now)
  * the Settings > Controls mouse speed (percent) and Invert mouse Y. */
 extern "C" void racit_camera_feed(uint64_t now, int dx, int dy, int capture, float sensitivity, int invert)
 {
+    /* Whether a camera is active is read under the lock too: the takes set take_time
+     * under it, so a poll can't decide "no camera" from a time a take has just moved
+     * on from and then clear motion fed after that take. */
+    std::lock_guard<std::mutex> hold(motion_lock);
     const bool active = capture && racit_camera_active(now);
     const double gain = kGain * sensitivity / 100.0;
     const int64_t x = active ? (int64_t)(dx * gain) : 0, y = active ? (int64_t)(dy * gain * (invert ? -1 : 1)) : 0;
-    std::lock_guard<std::mutex> hold(motion_lock);
     if (!active) { camera_x = camera_y = 0; captured = capture != 0; return; }
     drop_stale(now);   /* a new move never joins motion that expired in a pause */
     camera_x += x;
