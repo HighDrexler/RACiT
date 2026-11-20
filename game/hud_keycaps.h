@@ -288,20 +288,32 @@ struct {
 
 static void hud_keys_sync(bool keyboard)
 {
-    if (!s_hud.ea) { s_hudkb.have = 0; return; }
     const uint32_t bytes = kHudRows * kHudPitch;
-    if (!readable(s_hud.entry, 32) || !readable(s_hud.ea, bytes)) return;   /* hud_sync drops it */
+    /* Left alone earlier (s_hud.ea 0) but its entry is known: look again every
+     * second instead of waiting for the next scan, so a picture the game has
+     * just loaded again gets its keys within a second. */
+    if (!s_hud.entry || !readable(s_hud.entry, 32)) { s_hudkb.have = 0; return; }
+    if (s_hud.ea && !readable(s_hud.ea, bytes)) return;   /* hud_sync drops it */
     const uint8_t* t = vm_base + s_hud.entry;
-    if (be16(t + 0x18) != kHudW || be16(t + 0x1A) != kKeyH || t[6] != 0xA8) return;
+    if (be16(t + 0x18) != kHudW || be16(t + 0x1A) != kKeyH || t[6] != 0xA8) { if (!s_hud.ea) s_hudkb.have = 0; return; }
     {   /* The picture moved and the entry with it: follow it (its content is checked below). */
         const uint32_t now = cellGcmResolveLocated(0, be32(t));
         if (!now || !readable(now, bytes)) { s_hud.ea = 0; s_hudkb.have = 0; return; }
         if (now != s_hud.ea) {
-            fprintf(stderr, "[prompts] HUD picture \"R2 + square\" moved %08X -> %08X%c", s_hud.ea, now, 10);
+            if (hud_rejected(now)) { s_hud.ea = 0; return; }   /* still what it was found to be */
+            if (s_hud.ea) fprintf(stderr, "[prompts] HUD picture \"R2 + square\" moved %08X -> %08X%c", s_hud.ea, now, 10);
             s_hud.ea = now;
         }
     }
-    if (s_hudkb.ea != s_hud.ea) { s_hudkb.ea = s_hud.ea; s_hudkb.have = 0; }
+    if (s_hudkb.ea != s_hud.ea) {
+        /* Moved: the game copied the picture as it was, keys and all (it stages a
+         * level's textures in main memory and then moves them). Still ours when the
+         * new memory holds the keys or the picture they were made from. */
+        const uint8_t* moved = vm_base + s_hud.ea;
+        const bool same = s_hudkb.have && (!memcmp(moved, s_hudkb.keys, bytes) || !memcmp(moved, s_hudkb.before, bytes));
+        s_hudkb.ea = s_hud.ea;
+        if (!same) s_hudkb.have = 0;
+    }
     uint8_t* tex = vm_base + s_hud.ea;
     const bool is_keys = s_hudkb.have && !memcmp(tex, s_hudkb.keys, bytes);
     if (!keyboard) {
@@ -322,8 +334,8 @@ static void hud_keys_sync(bool keyboard)
         hud_blocks(snap, cur);
         const bool known = s_hud.have && (!memcmp(cur, s_hud.orig, sizeof cur) || !memcmp(cur, s_hud.mine, sizeof cur));
         if (!known && !tether_is_picture(snap)) {
-            fprintf(stderr, "[prompts] HUD picture at %08X: not the \"R2 + square\" picture now, left alone until the next scan%c", s_hud.ea, 10);
-            s_hud.ea = 0; s_hudkb.have = 0; return;
+            fprintf(stderr, "[prompts] HUD picture at %08X: not the \"R2 + square\" picture now, left alone until it changes%c", s_hud.ea, 10);
+            hud_reject(s_hud.ea); s_hud.ea = 0; s_hudkb.have = 0; return;
         }
     }
     const int cols = kHudPitch / 16, w = cols * 4;

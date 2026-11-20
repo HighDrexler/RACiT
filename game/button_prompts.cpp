@@ -244,6 +244,15 @@ void hud_blocks(const uint8_t* tex, uint8_t* out)
     for (int r = 0; r < kHudRows; r++) memcpy(out + r * kKeyCols * 16, tex + r * kHudPitch, kKeyCols * 16);
 }
 
+/* Memory the tether's entry points at that was found not to be the picture:
+ * looked at again only once it changes (the entry is followed every second). */
+struct { uint32_t ea; uint8_t head[256]; } s_hud_rejected;
+void hud_reject(uint32_t ea) { s_hud_rejected.ea = ea; memcpy(s_hud_rejected.head, vm_base + ea, sizeof s_hud_rejected.head); }
+bool hud_rejected(uint32_t ea)
+{
+    return ea && ea == s_hud_rejected.ea && !memcmp(vm_base + ea, s_hud_rejected.head, sizeof s_hud_rejected.head);
+}
+
 /* Keep the picture in step with the layout (want: 1 = R1 drawn in). */
 void hud_sync(int want)
 {
@@ -251,6 +260,7 @@ void hud_sync(int want)
     if (!readable(s_hud.entry, 32) || !readable(s_hud.ea, kHudRows * kHudPitch)) { s_hud.ea = 0; return; }
     const uint8_t* t = vm_base + s_hud.entry;
     if (be16(t + 0x18) != kHudW || be16(t + 0x1A) != kKeyH || t[6] != 0xA8) { s_hud.ea = 0; return; }   /* memory reused */
+    if (hud_rejected(s_hud.ea)) { s_hud.ea = 0; return; }
     uint8_t* tex = vm_base + s_hud.ea;
     /* Identify and redraw from one copy taken now, and write only while the
      * entry still points here and the memory still holds that copy's blocks:
@@ -276,7 +286,7 @@ void hud_sync(int want)
         if (err > 40L * kKeyH * (kKeyW - 3)) {
             fprintf(stderr, "[prompts] HUD picture at %08X: not the font's R2 (difference %ld), left alone%c", s_hud.ea,
                     err / (kKeyH * (kKeyW - 3)), 10);
-            s_hud.ea = 0; return; }
+            hud_reject(s_hud.ea); s_hud.ea = 0; return; }
         memcpy(s_hud.orig, cur, sizeof cur);
         for (int r = 0; r < kHudRows; r++)
             for (int c = 0; c < kKeyCols; c++) {
