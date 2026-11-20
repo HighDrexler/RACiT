@@ -206,6 +206,26 @@ class GamePreparesItself(unittest.TestCase):
             # No temporaries left behind.
             self.assertEqual([p.name for p in opened.parent.iterdir() if p.name.endswith('.tmp')], [])
 
+    def test_unpublishable_archive_serves_its_session_from_the_temporary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            original, opened, _ = self.run_game(directory, None)
+            good = opened.read_bytes()
+            # The cache path can't be replaced (a folder sits there): the game uses its
+            # checked temporary, never the thing at the path.
+            opened.unlink(); Path(str(opened) + '.ok').unlink()
+            opened.mkdir(); (opened / 'not-an-archive').write_bytes(b'x')
+            _, first, active = self.run_game(directory, None)
+            self.assertTrue(active)
+            self.assertNotEqual(first, opened)
+            self.assertEqual(first.parent, opened.parent)
+            self.assertTrue(first.name.endswith('.tmp'), first.name)
+            self.assertEqual(first.read_bytes(), good)
+            # The next start (that game has exited) removes it and makes its own.
+            _, second, _ = self.run_game(directory, None)
+            self.assertNotEqual(second, first)
+            self.assertFalse(first.exists(), 'the old temporary was left behind')
+            self.assertEqual(second.read_bytes(), good)
+
     def test_off_with_zero(self):
         with tempfile.TemporaryDirectory() as directory:
             original, opened, active = self.run_game(directory, '0')
