@@ -740,13 +740,19 @@ void prompt_check(bool keyboard)
         if (keyboard && memcmp(vm_base + s_hudkb.ea, s_hudkb.keys, kHudRows * kHudPitch)) { wrong++; note("hud-tether", 0, s_hudkb.ea); }
     } else if (keyboard && s_hud.entry && readable(s_hud.entry, 32)) {
         /* The tether picture without keys yet (moved, or never prepared): wrong while it
-         * still shows the controller's R2 + square where its entry points. */
+         * still shows the controller's R2 + square where its entry points, at two checks
+         * in a row. One alone is a picture the game has just loaded (while loading a save
+         * it moves it a few times within a second): hud_keys_sync keys it within a second. */
+        static uint32_t s_unprepared;
         const uint8_t* t = vm_base + s_hud.entry;
         const uint32_t ea = cellGcmResolveLocated(0, be32(t));
         if (be16(t + 0x18) == kHudW && be16(t + 0x1A) == kKeyH && t[6] == 0xA8 && ea &&
             readable(ea, kHudRows * kHudPitch) && tether_is_picture(vm_base + ea)) {
-            pictures++; wrong++; note("hud-tether-unprepared", 0, ea);
-        }
+            pictures++;
+            if (s_unprepared == ea) { wrong++; note("hud-tether-unprepared", 0, ea); }
+            else fprintf(stderr, "[prompt-check] tether picture at %08X just loaded, no keys yet%c", ea, 10);
+            s_unprepared = ea;
+        } else s_unprepared = 0;
     }
     for (const auto& k : s_badgekb) {
         if (!k.have || !k.ea || !readable(k.ea, kBadgeBytes)) continue;
