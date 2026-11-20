@@ -212,6 +212,8 @@ only the disc; the update build has not been run on Windows yet.
 
 Prepare a separate archive from your own game dump with `python scripts/prepare_menu_keycaps.py ORIGINAL_GLOBAL_CACHED.PSARC PREPARED_GLOBAL_CACHED.PSARC`. The output directory must exist. The tool checks the bundled menu source and compiled actions, preserves the original archive, and records a receipt beside the prepared file. Repeating the command verifies and reuses the matching output. A changed input or output requires a fresh output path.
 
+Or let the game do it: with `RACACIT_MENU_KEYCAPS=1` (in the environment or the settings file) and no `RACACIT_MENU_ARCHIVE`, the game prepares the same archive the first time it opens `global_cached.psarc` and keeps it in a `menu-keycaps` folder next to the settings file, reusing it while the original's size and time are unchanged. It takes about half a second and needs as much free space as the original (about 220 MB).
+
 Set `RACACIT_MENU_ARCHIVE` to the prepared file when running the player through its usual entry point. The player validates the archive header before booting the guest and redirects read-only opens of `packed/game/global_cached.psarc`. Original stat, installation and write paths retain the owner's game files. Leave the variable unset to use the original archive.
 
 The menu hooks support BCUS98124 NA disc 1.00 and update 1.20. The bundled action payload contains only the adjacent owned AS2 source compiled into AVM1 actions. Game artwork and movies are supplied by the owner's archive.
