@@ -14,6 +14,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <map>
 #include <mutex>
 #include <stdexcept>
@@ -348,6 +349,51 @@ bool usable_archive(const std::filesystem::path& path, uint64_t original_size = 
     return !original_size || (length >= original_size / 2 && length <= original_size * 2);
 }
 
+// <archive>.ok, written after an archive this game made was checked and published: its
+// size and modification time. Only an archive whose marker still matches is reused, so a
+// file someone else put there (or one that changed since) is made again.
+std::string marker_text(const std::filesystem::path& archive)
+{
+    std::error_code error;
+    const uint64_t length = std::filesystem::file_size(archive, error);
+    if (error) return std::string();
+    const auto time = std::filesystem::last_write_time(archive, error).time_since_epoch().count();
+    if (error) return std::string();
+    char text[64];
+    std::snprintf(text, sizeof text, "%llu %lld\n", (unsigned long long)length, (long long)time);
+    return text;
+}
+
+std::filesystem::path marker_of(const std::filesystem::path& archive)
+{
+    std::filesystem::path marker = archive;
+    marker += ".ok";
+    return marker;
+}
+
+bool trusted_archive(const std::filesystem::path& archive, uint64_t original_size)
+{
+    if (!usable_archive(archive, original_size)) return false;
+    const std::string want = marker_text(archive);
+    std::ifstream in(marker_of(archive), std::ios::binary);
+    std::string have((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    return !want.empty() && have == want;
+}
+
+void write_marker(const std::filesystem::path& archive, const std::filesystem::path& temporary)
+{
+    std::error_code error;
+    const std::string text = marker_text(archive);
+    if (text.empty()) return;
+    {
+        std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
+        out << text;
+        if (!out) { std::filesystem::remove(temporary, error); return; }
+    }
+    std::filesystem::rename(temporary, marker_of(archive), error);
+    if (error) std::filesystem::remove(temporary, error);
+}
+
 std::string prepare(const std::filesystem::path& original)
 {
     namespace fs = std::filesystem;
@@ -361,9 +407,9 @@ std::string prepare(const std::filesystem::path& original)
     std::snprintf(name, sizeof name, "global_cached-%llu-%llx-%08lx.psarc", (unsigned long long)size,
                   (unsigned long long)stamp, (unsigned long)actions_crc);
     const fs::path destination = s_menu_cache / name;
-    if (usable_archive(destination, size)) return destination.string();
-    if (fs::exists(destination, error))   // torn or foreign: made again, then renamed over it
-        std::printf("[menu-keycaps] %s isn't a usable archive; preparing it again\n", destination.string().c_str());
+    if (trusted_archive(destination, size)) return destination.string();
+    if (fs::exists(destination, error))   // torn, changed or not ours: made again, then renamed over it
+        std::printf("[menu-keycaps] %s isn't one this game checked; preparing it again\n", destination.string().c_str());
 
     fs::create_directories(s_menu_cache, error);
     require(!error, "can't create the menu-keycaps folder");
@@ -418,6 +464,9 @@ std::string prepare(const std::filesystem::path& original)
             return destination.string();
         }
         require(!error, "can't publish the prepared archive");
+        fs::path marker_temporary = temporary;
+        marker_temporary += ".ok";
+        write_marker(destination, marker_temporary);
         std::printf("[menu-keycaps] prepared %zu menu movies in %s\n", replacements.size(), destination.string().c_str());
         return destination.string();
     } catch (...) {
