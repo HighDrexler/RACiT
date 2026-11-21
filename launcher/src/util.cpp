@@ -146,7 +146,7 @@ std::string copy_tree(const fs::path& src, const fs::path& dst, Progress* p)
     for (auto it = fs::recursive_directory_iterator(src, fs::directory_options::skip_permission_denied, ec);
          !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
         if (p && p->cancel) return "cancelled";
-        const fs::path rel = fs::relative(it->path(), src, ec);
+        const fs::path rel = it->path().lexically_relative(src);
         const fs::path out = dst / rel;
         if (it->is_directory(ec)) { fs::create_directories(out, ec); continue; }
         if (!it->is_regular_file(ec)) continue;
@@ -157,17 +157,28 @@ std::string copy_tree(const fs::path& src, const fs::path& dst, Progress* p)
         fs::create_directories(out.parent_path(), ec);
         HANDLE o = CreateFileW(out.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (o == INVALID_HANDLE_VALUE) { CloseHandle(in); return "cannot write " + u8(out); }
-        DWORD got = 0; bool ok = true;
-        while (ReadFile(in, buf.data(), (DWORD)buf.size(), &got, nullptr) && got) {
+        std::string failure;
+        for (;;) {
+            DWORD got = 0;
+            if (!ReadFile(in, buf.data(), (DWORD)buf.size(), &got, nullptr)) {
+                failure = "read failed at " + u8(it->path());
+                break;
+            }
+            if (got == 0) break;
             DWORD put = 0;
-            if (!WriteFile(o, buf.data(), got, &put, nullptr) || put != got) { ok = false; break; }
+            if (!WriteFile(o, buf.data(), got, &put, nullptr) || put != got) {
+                failure = "write failed (disk full?) at " + u8(out);
+                break;
+            }
             if (p) p->done += got;
-            if (p && p->cancel) { ok = false; break; }
+            if (p && p->cancel) { failure = "cancelled"; break; }
         }
-        FILETIME ct, at, wt;
-        if (GetFileTime(in, &ct, &at, &wt)) SetFileTime(o, &ct, &at, &wt);
+        if (failure.empty()) {
+            FILETIME ct, at, wt;
+            if (GetFileTime(in, &ct, &at, &wt)) SetFileTime(o, &ct, &at, &wt);
+        }
         CloseHandle(in); CloseHandle(o);
-        if (!ok) { DeleteFileW(out.c_str()); return p && p->cancel ? "cancelled" : "write failed (disk full?) at " + u8(out); }
+        if (!failure.empty()) { DeleteFileW(out.c_str()); return failure; }
     }
     if (ec) return "reading " + u8(src) + ": " + ec.message();
     return {};
