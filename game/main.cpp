@@ -1589,10 +1589,13 @@ int main(int argc, char** argv)
      * Pending asynchronous pipelines currently skip draws in this backend. */
     setenv("MVK_CONFIG_FAST_MATH_ENABLED", "0", 0);
     setenv("RACACIT_ASYNC_PIPELINES", "0", 0);
+#endif
+#if defined(RACACIT_HAVE_VULKAN) && (defined(__APPLE__) || (defined(__linux__) && !defined(__ANDROID__)))
+    /* Desktop defaults for a direct launch. Explicit settings and headless runs can override them. */
     setenv("RACACIT_HLE_SPURS", "1", 0);
     setenv("RACACIT_KBM", "1", 0);
     setenv("PS3RECOMP_VK_WINDOW", "1", 0);
-    /* As on Windows and Linux: the guest's own shader programs, and the title the
+    /* As on Windows: the guest's own shader programs, and the title the
      * renderer's per-game paths key on. Without them it takes the vtable path and
      * never uploads a texture, so the window stays black (#72). */
     setenv("PS3RECOMP_VK_GUEST_PROGRAMS", "1", 0);
