@@ -205,8 +205,11 @@ LIBSRE="$PWD/input/libsre.prx" PY="$PWD/tools/venv/Scripts/python -I" bash scrip
 The update gets a tree of its own, `out/BCUS98124-1.20/` (`recomp/`, `spu/`, `prx/`, `host/`,
 `build/`), so it never overwrites the disc's `game/src/recomp` and `game/spu`. Its hooks,
 function and data addresses and SPU payloads are in `versions/` (see `versions/README.md`);
-each hook checks the function's fingerprint before it edits it. The release launcher builds
-only the disc; the update build has not been run on Windows yet.
+each hook checks the function's fingerprint before it edits it. For the macOS package,
+pass the update executable to `mac/package_macos.sh --game120` alongside the disc executable.
+Use the next game build number after the one already shipped so existing launchers select it
+after updating. The launcher offers 1.20 when the USA disc, matching update files and
+the packaged update build are present. Windows release packaging continues to use the disc build.
 
 ## Keyboard menu artwork
 
