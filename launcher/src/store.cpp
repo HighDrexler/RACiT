@@ -1,14 +1,24 @@
 #include "store.h"
 #include "iso.h"
 #include "platform.h"
+#include "program_magic.h"
+#include "release_asset.h"
 
 #ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX   // windows.h min/max macros break std::min/std::max with MSVC
+#endif
 #include <windows.h>
 #else
 #include <unistd.h>
 extern char** environ;
 #endif
+#if defined(_MSC_VER) && !defined(__clang__) && (defined(_M_X64) || defined(_M_IX86))
+#include <intrin.h>   // MSVC: __cpuid, __cpuidex, _xgetbv (it has no cpuid.h)
+#define RACIT_CPUID_MSVC 1
+#elif defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
 #include <cpuid.h>
+#endif
 
 #include <algorithm>
 #include <cctype>
@@ -303,9 +313,16 @@ std::string Store::import_iso(const fs::path& iso, Progress* p, std::string* sum
     p->total = need;
     std::error_code ec;
     fs::create_directories(game_copy(), ec);
+#ifdef _WIN32
     ULARGE_INTEGER free_{};
     if (GetDiskFreeSpaceExW(game_copy().c_str(), &free_, nullptr, nullptr) && free_.QuadPart < need + (512ull << 20))
         return "Not enough space: the game needs " + format_size(need) + ", " + format_size(free_.QuadPart) + " free on this drive.";
+#else
+    const fs::space_info space = fs::space(game_copy(), ec);
+    if (!ec && space.available < need + (512ull << 20))
+        return "Not enough space: the game needs " + format_size(need) + ", " + format_size(space.available) + " free on this drive.";
+    ec.clear();
+#endif
     // An EBOOT.elf already in the launcher's copy is kept for the new one.
     const fs::path old_elf = game_copy() / L"PS3_GAME" / L"USRDIR" / L"EBOOT.elf";
     bool k = false;
@@ -409,6 +426,20 @@ std::vector<fs::path> Store::find_old_installs() const
 
 bool cpu_has_avx2()
 {
+#if !defined(__x86_64__) && !defined(__i386__) && !defined(_M_X64) && !defined(_M_IX86)
+    return true;   // not an x86 processor: there is no older-processor build to pick
+#elif defined(RACIT_CPUID_MSVC)
+    int r[4];
+    __cpuid(r, 0);
+    if (r[0] < 7) return false;
+    __cpuid(r, 1);
+    const unsigned c1 = (unsigned)r[2];
+    if (!(c1 & (1u << 12)) || !(c1 & (1u << 27)) || !(c1 & (1u << 28))) return false;   /* FMA, OSXSAVE, AVX */
+    if ((_xgetbv(0) & 6u) != 6u) return false;                                       /* YMM state saved */
+    __cpuidex(r, 7, 0);
+    if (!((unsigned)r[1] & (1u << 5)) || !((unsigned)r[1] & (1u << 8))) return false;   /* AVX2, BMI2 */
+    return !GetEnvironmentVariableA("RACACIT_TEST_NO_AVX2", nullptr, 0);
+#else
     unsigned a, b, c, d;
     if (!__get_cpuid(1, &a, &b, &c, &d) || !(c & (1u << 12)) || !(c & (1u << 27)) || !(c & (1u << 28))) return false;
     unsigned lo, hi;                                       /* FMA, OSXSAVE, AVX; then YMM state saved */
@@ -416,7 +447,12 @@ bool cpu_has_avx2()
     if ((lo & 6u) != 6u) return false;
     if (!__get_cpuid_count(7, 0, &a, &b, &c, &d)) return false;
     if (!(b & (1u << 5)) || !(b & (1u << 8))) return false;   /* AVX2, BMI2 */
+#ifdef _WIN32
     return !GetEnvironmentVariableA("RACACIT_TEST_NO_AVX2", nullptr, 0);
+#else
+    return !getenv("RACACIT_TEST_NO_AVX2");
+#endif
+#endif
 }
 
 static bool launcher_owned_key(const std::string& k)
@@ -774,8 +810,9 @@ std::string Store::fetch_latest_release(ReleaseInfo* out)
     }
     Json all; std::string err;
     if (!json_parse(body, &all, &err) || (all.type != Json::Obj && all.type != Json::Arr)) return "GitHub's answer could not be read. Try again later.";
-    // The newest published Windows release: not a draft or pre-release, not tagged for Android, and
-    // with a launcher .zip among its files. (The test server may answer with one object.)
+    // The newest published release for this platform: not a draft or pre-release, not tagged for
+    // Android, and with this platform's .zip among its files (release_asset.h). (The test server
+    // may answer with one object.)
     const Json* pick = all.type == Json::Obj ? &all : nullptr;
     if (!pick)
         for (const Json& r : all.a) {
@@ -784,11 +821,15 @@ std::string Store::fetch_latest_release(ReleaseInfo* out)
             bool has = false;
             for (const Json& a : r["assets"].a) {
                 const std::string low = lower(a.str("name"));
-                if (low.size() > 4 && low.compare(low.size() - 4, 4, ".zip") == 0 && low.find("launcher") != std::string::npos) has = true;
+                if (release_asset_here(low)) has = true;
             }
             if (has) { pick = &r; break; }
         }
+#ifdef __APPLE__
+    if (!pick) return "There is no macOS release on GitHub yet.";
+#else
     if (!pick) return "There is no Windows release on GitHub yet.";
+#endif
     const Json& j = *pick;
     out->tag = trim(j.str("tag_name"));
     if (out->tag.empty()) return "GitHub's answer has no release in it. Try again later.";
@@ -797,11 +838,10 @@ std::string Store::fetch_latest_release(ReleaseInfo* out)
     out->notes = plain_notes(j.str("body"));
     const std::string page = j.str("html_url");
     if (under(page, kReleasePages) || !test.empty()) out->page = page;
-    // The asset: a .zip with "launcher" in its name. A .7z is listed for the message only.
+    // The asset: this platform's .zip (release_asset.h). Anything else is listed for the message only.
     for (const Json& a : j["assets"].a) {
         const std::string n = a.str("name"), low = lower(n), url = a.str("browser_download_url");
-        const bool zip = low.size() > 4 && low.compare(low.size() - 4, 4, ".zip") == 0;
-        if (out->asset.empty() && zip && low.find("launcher") != std::string::npos && release_download_ok(url)) {
+        if (out->asset.empty() && release_asset_here(low) && release_download_ok(url)) {
             out->asset = n; out->url = url; out->size = (uint64_t)a.num("size");
             const std::string d = lower(a.str("digest"));
             if (d.rfind("sha256:", 0) == 0) out->sha256 = d.substr(7);
@@ -841,12 +881,22 @@ std::string Store::installed_release(const std::string& launcher_version) const
     return compare_versions(done, launcher_version) > 0 ? done : launcher_version;
 }
 
+#ifdef __APPLE__
+// What install_release set aside on macOS: the old .app bundle, holding the launcher program.
+static bool is_old_launcher_app(const fs::path& app)
+{
+    std::error_code ec;
+    return fs::is_directory(app, ec) && fs::is_regular_file(app / L"Contents" / L"MacOS" / L"RaCACiT Launcher", ec);
+}
+#endif
+
 void Store::clean_update_leftovers()
 {
     delete_tree(root / L".update");
     // The launcher this one replaced: it may still be on its way out.
-    fs::path old = exe_path(); old += L".old";
     std::error_code ec;
+#ifdef _WIN32
+    fs::path old = exe_path(); old += L".old";
     if (!fs::exists(old, ec)) return;
     std::thread([old] {
         for (int i = 0; i < 40; i++) {
@@ -854,6 +904,19 @@ void Store::clean_update_leftovers()
             Sleep(250);
         }
     }).detach();
+#elif defined(__APPLE__)
+    // install_release sets the whole .app aside as <app>.old beside it: only that, when it
+    // still holds the launcher program, goes as a folder. Anything else of that name (and a
+    // stray <program>.old inside Contents/MacOS) is removed only if it's a file or empty.
+    fs::path old_app = app_bundle_path(); old_app += L".old";
+    if (is_old_launcher_app(old_app)) fs::remove_all(old_app, ec);
+    else fs::remove(old_app, ec);
+    fs::path old = exe_path(); old += L".old";
+    fs::remove(old, ec);
+#else
+    fs::path old = exe_path(); old += L".old";
+    fs::remove(old, ec);   // nothing holds a replaced program open here
+#endif
 }
 
 std::string Store::download_release(const ReleaseInfo& rel, Progress* p)
@@ -904,6 +967,10 @@ static bool release_part(const std::string& rel_name)
 {
     const std::string n = lower(rel_name);
     if (n == "readme.txt") return true;
+#ifdef __APPLE__
+    // The macOS launcher is a bundle: everything under RaCACiT Launcher.app/.
+    if (n.rfind(lower(narrow(RACIT_LAUNCHER_FILE)) + "/", 0) == 0) return true;
+#endif
     if (n.find('/') == std::string::npos) return n.size() > 4 && n.compare(n.size() - 4, 4, ".exe") == 0 && n.find("launcher") != std::string::npos;
     if (n.rfind("mods/", 0) == 0) return n.size() > 5 && n.find('/', 5) != std::string::npos;
     if (n.rfind("builds/v", 0) == 0) {
@@ -915,8 +982,8 @@ static bool release_part(const std::string& rel_name)
 
 static bool looks_like_program(const fs::path& p)
 {
-    const std::string h = read_text(p, 2);
-    return h.size() >= 2 && h[0] == 'M' && h[1] == 'Z';
+    const std::string h = read_text(p, 4);
+    return looks_like_program_head(reinterpret_cast<const unsigned char*>(h.data()), h.size());
 }
 
 std::string Store::install_release(const ReleaseInfo& rel, Progress* p, std::string* summary, bool* restart)
@@ -933,7 +1000,14 @@ std::string Store::install_release(const ReleaseInfo& rel, Progress* p, std::str
     std::string r = zip_list(zip, &all);
     if (!r.empty()) return stop("The release could not be read: " + r + ". Nothing was changed.");
     std::string base;   // the folder everything is packed in, if any
-    auto is_main = [](const std::string& s) { return lower(s).rfind("builds/", 0) == 0 || (s.find('/') == std::string::npos && release_part(s) && lower(s) != "readme.txt"); };
+    auto is_main = [](const std::string& s) {
+        const std::string n = lower(s);
+        if (n.rfind("builds/", 0) == 0) return true;
+#ifdef __APPLE__
+        if (n.rfind(lower(narrow(RACIT_LAUNCHER_FILE)) + "/", 0) == 0) return true;
+#endif
+        return s.find('/') == std::string::npos && release_part(s) && n != "readme.txt";
+    };
     for (const auto& e : all) {
         if (is_main(e.name)) { base.clear(); break; }
         const size_t s = e.name.find('/');
@@ -1038,7 +1112,18 @@ std::string Store::install_release(const ReleaseInfo& rel, Progress* p, std::str
     if (ok && !new_launcher.empty()) {
         // A running exe can be renamed but not deleted: this one goes aside beside itself, and the next
         // start deletes it. The new launcher takes its name, whatever the player calls it.
-        DeleteFileW(self_old.c_str());
+        // Only what an earlier update set aside: a file (Windows), or on macOS the old .app
+        // bundle. A folder of any other kind that happens to have that name is left alone,
+        // and the update then stops at the rename instead of deleting it.
+        {
+            std::error_code gone;
+#ifdef __APPLE__
+            if (is_old_launcher_app(self_old))
+                fs::remove_all(self_old, gone);
+            else
+#endif
+                fs::remove(self_old, gone);
+        }
         ok = put(new_launcher, self, self_old);
     }
     if (!ok) {
@@ -1528,10 +1613,8 @@ std::string Store::launch(void** process, bool prepare)
          * to logs\backup_failed.txt. */
         const std::string r = backup_saves("play", nullptr);
         if (!r.empty()) {
-            if (FILE* f = _wfopen((logs() / L"backup_failed.txt").c_str(), L"ab")) {
-                fprintf(f, "%s  backup on Play failed: %s\r\n", stamp_now().c_str(), r.c_str());
-                fclose(f);
-            }
+            std::ofstream f(logs() / L"backup_failed.txt", std::ios::binary | std::ios::app);
+            if (f) f << stamp_now() << "  backup on Play failed: " << r << "\r\n";
         }
     }
     if (!prepare) rotate_log();
@@ -1670,6 +1753,7 @@ std::string Store::launch_mac(const GameInfo& g, const BuildInfo& b, std::map<st
     if (!c) return "Could not start " + u8(exe) + " (" + why + ").";
     *process = c;
     return {};
+}
 #endif
 
 void Store::collect_log()
