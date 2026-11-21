@@ -174,6 +174,10 @@ static void desktop_binding_label(const char* name, const char* fallback, char l
         else if (!strncmp(custom,"Return",6)) snprintf(label,8,"ENT");
         else if (!strncmp(custom,"Left Ctrl",9)) snprintf(label,8,"CTRL");
         else if (!strncmp(custom,"Left Shift",10)) snprintf(label,8,"SHIFT");
+        else if (!strncmp(custom,"Comma",5) && (!custom[5] || custom[5] == ','))
+            snprintf(label,8,",");
+        else if (custom[0] == ',' && (!custom[1] || custom[1] == ','))
+            snprintf(label,8,",");      /* saved before "Comma": the comma key as itself */
         else {
             /* The first key's SDL name, shortened to five characters that have a letter. */
             static const struct { const char* name; const char* label; } shorter[] = {
