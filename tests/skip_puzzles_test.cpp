@@ -6,7 +6,7 @@
 extern "C" {
 int racit_skip_puzzles_mode(const char* setting);
 void racit_skip_puzzles_set(int mode);
-void racit_skip_puzzle_input_at(unsigned long long now_ms, int key_held, int l3_held, int r3_held);
+void racit_skip_puzzle_input_at(unsigned long long now_ms, int key_held, int combo_held, int menu_open);
 int racit_skip_puzzle_now_at(const char* puzzle, unsigned long long now_ms);
 }
 static int failures;
@@ -31,21 +31,58 @@ int main()
     racit_skip_puzzles_set(1);
     CHECK(racit_skip_puzzle_now_at("p", t) && racit_skip_puzzle_now_at("p", t + 1));
 
-    /* Key: one press solves one puzzle, once. */
+    /* Key: one press solves one puzzle, once, however long the key stays down. */
     racit_skip_puzzles_set(2);
     t = 5000;
     CHECK(!racit_skip_puzzle_now_at("p", t));
     racit_skip_puzzle_input_at(t, 1, 0, 0);
     racit_skip_puzzle_input_at(t + 16, 1, 0, 0);            /* held: still one press */
     CHECK(racit_skip_puzzle_now_at("p", t + 20));
-    CHECK(!racit_skip_puzzle_now_at("p", t + 40));
-    racit_skip_puzzle_input_at(t + 50, 0, 0, 0);
-    /* L3 + R3: the second going down is the press; one alone is nothing. */
-    racit_skip_puzzle_input_at(t + 100, 0, 1, 0);
-    CHECK(!racit_skip_puzzle_now_at("p", t + 110));
-    racit_skip_puzzle_input_at(t + 120, 0, 1, 1);
-    CHECK(racit_skip_puzzle_now_at("p", t + 130));
-    racit_skip_puzzle_input_at(t + 140, 0, 0, 0);
+    racit_skip_puzzle_input_at(t + 32, 1, 0, 0);            /* still held after the skip was used */
+    racit_skip_puzzle_input_at(t + 48, 1, 0, 0);
+    CHECK(!racit_skip_puzzle_now_at("p", t + 50));          /* no second skip queued */
+    racit_skip_puzzle_input_at(t + 60, 0, 0, 0);
+    racit_skip_puzzle_input_at(t + 70, 1, 0, 0);            /* a new press is a new skip */
+    CHECK(racit_skip_puzzle_now_at("p", t + 75));
+    racit_skip_puzzle_input_at(t + 80, 0, 0, 0);
+
+    /* The controller hold: R3 + Down held a full second asks once; a shorter hold is nothing. */
+    t = 8000;
+    racit_skip_puzzle_input_at(t, 0, 1, 0);
+    racit_skip_puzzle_input_at(t + 500, 0, 1, 0);
+    CHECK(!racit_skip_puzzle_now_at("p", t + 510));
+    racit_skip_puzzle_input_at(t + 600, 0, 0, 0);           /* let go early */
+    racit_skip_puzzle_input_at(t + 700, 0, 1, 0);
+    racit_skip_puzzle_input_at(t + 1600, 0, 1, 0);          /* 900 ms of the new hold */
+    CHECK(!racit_skip_puzzle_now_at("p", t + 1610));
+    racit_skip_puzzle_input_at(t + 1700, 0, 1, 0);          /* 1 s */
+    CHECK(racit_skip_puzzle_now_at("p", t + 1710));
+    racit_skip_puzzle_input_at(t + 2800, 0, 1, 0);          /* kept held: no second skip */
+    racit_skip_puzzle_input_at(t + 4000, 0, 1, 0);
+    CHECK(!racit_skip_puzzle_now_at("p", t + 4010));
+    racit_skip_puzzle_input_at(t + 4100, 0, 0, 0);
+
+    /* The Settings menu open or opening: no input asks, and a pending skip is dropped. */
+    t = 14000;
+    racit_skip_puzzle_input_at(t, 1, 0, 1);                 /* F2 with the menu open */
+    CHECK(!racit_skip_puzzle_now_at("p", t + 10));
+    racit_skip_puzzle_input_at(t + 20, 0, 0, 1);
+    racit_skip_puzzle_input_at(t + 30, 1, 0, 0);            /* a press after it closes counts */
+    racit_skip_puzzle_input_at(t + 40, 0, 0, 1);            /* ...but the menu opens before a puzzle takes it */
+    CHECK(!racit_skip_puzzle_now_at("p", t + 50));
+    racit_skip_puzzle_input_at(t + 60, 0, 0, 0);
+    racit_skip_puzzle_input_at(t + 100, 0, 1, 0);           /* hold begins */
+    racit_skip_puzzle_input_at(t + 600, 0, 1, 1);           /* L3 joins: the menu opens */
+    racit_skip_puzzle_input_at(t + 1200, 0, 1, 1);
+    racit_skip_puzzle_input_at(t + 1300, 0, 1, 0);          /* menu closed, still held */
+    racit_skip_puzzle_input_at(t + 2500, 0, 1, 0);
+    CHECK(!racit_skip_puzzle_now_at("p", t + 2510));        /* the hold must start again */
+    racit_skip_puzzle_input_at(t + 2600, 0, 0, 0);
+    racit_skip_puzzle_input_at(t + 2700, 1, 0, 1);          /* key down while the menu is open */
+    racit_skip_puzzle_input_at(t + 2800, 1, 0, 0);          /* menu closes, key still down */
+    CHECK(!racit_skip_puzzle_now_at("p", t + 2810));        /* not a press */
+    racit_skip_puzzle_input_at(t + 2900, 0, 0, 0);
+    t = 20000;
     /* A press with no puzzle to take it lapses after a second: it does not solve the next one. */
     racit_skip_puzzle_input_at(t + 200, 1, 0, 0); racit_skip_puzzle_input_at(t + 216, 0, 0, 0);
     CHECK(!racit_skip_puzzle_now_at("p", t + 1300));
