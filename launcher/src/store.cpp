@@ -1049,7 +1049,6 @@ std::string Store::install_release(const ReleaseInfo& rel, Progress* p, std::str
     if (fs::is_directory(fresh / RACIT_LAUNCHER_FILE, ec)) new_launcher = fresh / RACIT_LAUNCHER_FILE;
     if (new_builds.empty() && new_launcher.empty()) return stop("That release holds no game build and no launcher. Nothing was changed.");
     const fs::path self = app_bundle_path().parent_path() == root ? app_bundle_path() : root / RACIT_LAUNCHER_FILE;
-    if (!new_launcher.empty() && sha256_file(program_of(new_launcher)) == sha256_file(program_of(self))) new_launcher.clear();   // the same one
     if (!new_launcher.empty()) {
         if (!looks_like_program(program_of(new_launcher))) return stop("The release's launcher is not a program. Nothing was changed.");
         const int code = run_argv({ u8(program_of(new_launcher)), "--self-test" }, fresh, &p->cancel);
