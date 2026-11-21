@@ -82,7 +82,7 @@ MOUSE_CAMERAS = {
              ('before', 0x3F8, 'ctx->fpr[1] += mouse_angles[0];')),
     # Strafe (L2, over the shoulder): yaw and pitch steps, which the game then limits.
     'strafe': (('after', 0x300, 'ctx->fpr[1] -= mouse_angles[0];'),
-               ('after', 0x3A4, 'ctx->fpr[1] -= mouse_angles[1];')),   # the same way up as follow and the stick
+               ('after', 0x3A4, 'ctx->fpr[1] += mouse_angles[1];')),   # the same way up as strafe's stick and follow's mouse
     # The lock camera (class 0xC239BC): the yaw step, and its tilt. The tilt isn't an angle the
     # player holds: it follows the stick's vertical axis and springs back to level when the
     # stick does. The mouse's pitch goes into that input (f13: the stick's vertical value times

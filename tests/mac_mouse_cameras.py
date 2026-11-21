@@ -260,7 +260,7 @@ PITCH_WAY = {}   # mode -> True when mouse down moved the picture down (rows > 0
 def turns(g, mode, cameras, key, results):
     """Stand still, then the stick, then the mouse, with the mode's key held throughout."""
     if key:
-        g.ui('hold 6500 ' + key)
+        g.ui('hold 8000 ' + key)
     # Small turns (a few degrees), so the picture shifts by less than the search range.
     time.sleep(1.5)
     a = g.capture(mode + '-still-0'); time.sleep(0.5); b = g.capture(mode + '-still-1')
@@ -281,9 +281,15 @@ def turns(g, mode, cameras, key, results):
     mark = len(g.text())
     # Pitch: by what the picture does (up or down), not only the hook's log line; a small move,
     # so it stays inside the camera's limits, then back.
-    p0 = g.capture(mode + '-pitch-0'); g.mouse(0, 30); time.sleep(0.6); p1 = g.capture(mode + '-pitch-1')
-    tilt = vshift(p0, p1)
-    g.mouse(0, -30); time.sleep(0.6)
+    # Down, then back up by as much. The camera can move by itself meanwhile (strafe's still
+    # settling over the shoulder):
+    # The drift is also measured outright (the same time with no input) and taken off each.
+    d0 = g.capture(mode + '-drift-0'); time.sleep(0.6); p0 = g.capture(mode + '-pitch-0')
+    drift = vshift(d0, p0)[0]
+    g.mouse(0, 30); time.sleep(0.6); p1 = g.capture(mode + '-pitch-1')
+    g.mouse(0, -30); time.sleep(0.6); p2 = g.capture(mode + '-pitch-2')
+    down, up = vshift(p0, p1), vshift(p1, p2)
+    tilt = (down[0] - drift, down[1], down[2])   # mouse down's own part
     turned = re.findall(r'\[mouse\] (\S+) turn (\S+) (\S+)', g.text()[lines_at:])
     hooked = sorted(set(c for c, _, _ in turned))
     yaw = any(c in cameras and abs(float(x)) > 0 for c, x, _ in turned)
@@ -304,12 +310,12 @@ def turns(g, mode, cameras, key, results):
     # checked in those modes (strafe).
     stick_ok = True if key else moved(stick) and (stick[0] > 0) == (mouse[0] > 0)
     ok = yaw and pitch_hook and pitch_moved and way_ok and moved(mouse) and stick_ok
-    results.append((mode, ok, 'hook %s (yaw %s, pitch %s), shift: still %d, stick %s, mouse %d, pitch %d rows (%s %s)'
+    results.append((mode, ok, 'hook %s (yaw %s, pitch %s), shift: still %d, stick %s, mouse %d, pitch %d rows [down %d, up %d, drift %d] (%s %s)'
                     % ('/'.join(hooked) or 'none', yaw, pitch_hook, still[0],
-                       'n/a (key held)' if key else '%d' % stick[0], mouse[0], tilt[0],
+                       'n/a (key held)' if key else '%d' % stick[0], mouse[0], tilt[0], down[0], up[0], drift,
                        'stick %d rows' % stick_tilt[0] if stick_tilted else 'follow mouse',
                        'same way' if way_ok else 'WRONG WAY')))
-    time.sleep(4)   # the mode's key is let go by now
+    time.sleep(5.5)   # the mode's key is let go by now
 
 
 def menu(g, results):
