@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / 'tests' / 'mac_user_launch.py'
 
 
+@unittest.skipUnless(sys.platform == 'darwin', 'the macOS launch smoke uses /usr/bin/pgrep')
 class Guards(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -67,7 +68,6 @@ DRAWS = 'echo "[RSX vulkan] register-file draw engine path"\n'
 STATS = 'echo "[rsx-stats] methods=1 draws=1 flips=0 gcmflips=$n clears=0 texups=5 texMB=0 us=1"'
 
 
-@unittest.skipUnless(sys.platform == 'darwin', 'the fake game is a shell script, and the check runs /usr/bin/pgrep')
 class Verdicts(Guards):
     """What it makes of a game that keeps drawing, hangs after its first frames, or crashes:
     a fake RaCACiT that prints the log lines the check reads."""
