@@ -267,10 +267,13 @@ def turns(g, mode, cameras, key, results):
     still = shift(a, b)
     g.press('0 6 128 128 255 128'); time.sleep(0.8); s1 = g.capture(mode + '-stick')
     stick = shift(b, s1)
-    # The stick's vertical axis (down), for which way up the mouse's pitch should go.
-    time.sleep(0.5); v0 = g.capture(mode + '-stick-v0')
-    g.press('0 6 128 128 128 255'); time.sleep(0.8); v1 = g.capture(mode + '-stick-v1')
-    stick_tilt = vshift(v0, v1)
+    # The stick's vertical axis (down), for which way up the mouse's pitch should go. Not with a
+    # key held: the scripted stick is ignored then, and the time would run the hold out.
+    stick_tilt = (0, 0, 0)
+    if not key:
+        time.sleep(0.5); v0 = g.capture(mode + '-stick-v0')
+        g.press('0 6 128 128 128 255'); time.sleep(0.8); v1 = g.capture(mode + '-stick-v1')
+        stick_tilt = vshift(v0, v1)
     time.sleep(0.5)
     lines_at = len(g.text())
     m0 = g.capture(mode + '-mouse-0'); g.mouse(40, 0); time.sleep(0.6); m1 = g.capture(mode + '-mouse-1')
