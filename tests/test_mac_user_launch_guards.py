@@ -63,5 +63,46 @@ class Guards(unittest.TestCase):
         self.assertStopped(self.run_script(work, '--update', str(Path(self.tmp.name) / 'nope')), '--update')
 
 
+DRAWS = 'echo "[RSX vulkan] register-file draw engine path"\n'
+STATS = 'echo "[rsx-stats] methods=1 draws=1 flips=0 gcmflips=$n clears=0 texups=5 texMB=0 us=1"'
+
+
+class Verdicts(Guards):
+    """What it makes of a game that keeps drawing, hangs after its first frames, or crashes:
+    a fake RaCACiT that prints the log lines the check reads."""
+
+    def fake(self, body):
+        prog = self.build / 'RaCACiT'
+        prog.write_text('#!/bin/sh\n' + DRAWS + body, encoding='utf-8')
+        prog.chmod(0o755)
+
+    def verdict(self, *extra):
+        result = self.run_script(Path(self.tmp.name) / 'w', '--seconds', '4', '--alive', '4', '--cap', '30', *extra)
+        return result.returncode, result.stdout + result.stderr
+
+    def test_keeps_drawing_passes(self):
+        self.fake('n=0; while :; do n=$((n+10)); %s; sleep 1; done\n' % STATS)
+        code, out = self.verdict()
+        self.assertEqual(code, 0, out)
+
+    def test_hang_after_first_frames_fails(self):
+        self.fake('n=10; %s; n=20; %s; sleep 60\n' % (STATS, STATS))
+        code, out = self.verdict()
+        self.assertEqual(code, 1, out)
+
+    def test_crash_fails(self):
+        self.fake('n=0; for i in 1 2 3; do n=$((n+10)); %s; sleep 1; done; kill -SEGV $$\n' % STATS)
+        code, out = self.verdict('--seconds', '20')
+        self.assertEqual(code, 1, out)
+        self.assertIn('stopped by itself', out)
+
+    def test_never_drawing_is_inconclusive_at_the_cap(self):
+        prog = self.build / 'RaCACiT'
+        prog.write_text('#!/bin/sh\nwhile :; do echo "[fs] read fd=3"; sleep 1; done\n', encoding='utf-8')
+        prog.chmod(0o755)
+        result = self.run_script(Path(self.tmp.name) / 'w', '--seconds', '4', '--cap', '6')
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -7,9 +7,12 @@ calling shell, so a default the game forgets to set shows up here (#72: without 
 programs it took the vtable draw path, uploaded no textures and showed a black window with
 sound). The only additions are the switches that keep a test quiet: offscreen
 (PS3RECOMP_VK_WINDOW=0, SDL's dummy video driver, a background app) and no audio. Runs the
-game for --seconds, then checks the log for the register-file draw path and for texture
-uploads (an [rsx-stats] line with texups > 0). Needs a decrypted disc and EBOOT; exits 0 when
-both checks pass.
+game until it draws (the register-file draw path and an [rsx-stats] line with texups > 0),
+then watches it for --seconds more, and longer while it is still loading (a file read in the
+last 10 s), up to --cap in all. It passes when it drew, kept drawing (new frames in the last
+--alive seconds: a game that hangs after its first textures fails) and never stopped by itself.
+Exits 0 (PASS), 1 (FAIL) or 2 (INCONCLUSIVE: still loading or not drawing yet at --cap; run it
+again with a larger --cap rather than counting it). Needs a decrypted disc and EBOOT.
 
     python3 tests/mac_user_launch.py --build RELEASE/builds/v101 --elf EBOOT.ELF --game DISC --work DIR
     (1.20: add --update UPDATE_DIR, the update's PARAM.SFO and USRDIR)
@@ -70,7 +73,9 @@ def main():
     ap.add_argument('--elf', required=True); ap.add_argument('--game', required=True)
     ap.add_argument('--work', required=True); ap.add_argument('--update')
     ap.add_argument('--installed', help="the game's HDD install (hdd0/game/BCUS98124 of a profile that has played)")
-    ap.add_argument('--seconds', type=float, default=150)
+    ap.add_argument('--seconds', type=float, default=60, help='watched after the first drawn frame')
+    ap.add_argument('--alive', type=float, default=20, help='frames must still be coming in this last part')
+    ap.add_argument('--cap', type=float, default=600, help='at most this long in all (fit it under the job timeout)')
     o = ap.parse_args()
     build, work = os.path.abspath(o.build), os.path.abspath(o.work)
     check_inputs(o, build, work)
@@ -112,10 +117,29 @@ def main():
     })
     p = subprocess.Popen([os.path.join(build, 'RaCACiT'), os.path.abspath(o.elf)], cwd=build, env=env,
                          stdin=subprocess.DEVNULL, stdout=open(log, 'wb'), stderr=subprocess.STDOUT, start_new_session=True)
-    end = time.time() + o.seconds
-    while time.time() < end and p.poll() is None:
+    stats = re.compile(r'\[rsx-stats\].*?gcmflips=(\d+).*?texups=(\d+)')
+    started, drawing_at, last_reads, verdict = time.time(), None, None, None
+    flips = []   # (time, gcmflips) for each [rsx-stats] line
+    seen = 0
+    while p.poll() is None:
         time.sleep(2)
+        now = time.time()
+        text = open(log, encoding='utf-8', errors='replace').read()
+        new, seen = text[seen:], len(text)
+        for m in stats.finditer(new):
+            flips.append((now, int(m.group(1))))
+            if drawing_at is None and int(m.group(2)) > 0 and 'register-file draw engine path' in text:
+                drawing_at = now   # the clock starts once it draws
+        if re.search(r'\[fs\] (open|read)|levels/', new):
+            last_reads = now
+        loading = last_reads is not None and now - last_reads < 10
+        if drawing_at is not None and now - drawing_at >= o.seconds and not loading:
+            break
+        if now - started >= o.cap:
+            verdict = 'INCONCLUSIVE'   # still loading, or not drawing yet
+            break
     exited = p.poll()
+    end_at = time.time()
     if exited is None:
         os.killpg(p.pid, signal.SIGTERM)
         try:
@@ -127,12 +151,20 @@ def main():
     tex = max([int(t) for t in re.findall(r'\[rsx-stats\].*?texups=(\d+)', text)] or [-1])
     print('register-file draw path: %s' % ('yes' if path else 'NO'))
     print('texture uploads (max texups): %s' % (tex if tex >= 0 else 'no [rsx-stats] line'))
+    recent = [f for t, f in flips if t >= end_at - o.alive]
+    alive = len(recent) >= 2 and recent[-1] > recent[0]
+    print('frames in the last %.0f s: %s' % (o.alive, '%d' % (recent[-1] - recent[0]) if len(recent) >= 2 else 'no [rsx-stats] lines'))
+    if drawing_at is not None:
+        print('drawing %.0f s after start, watched %.0f s' % (drawing_at - started, end_at - drawing_at))
     if exited is not None:
-        print('game stopped by itself after %.0f s: %s' % (o.seconds - (end - time.time()),
+        print('game stopped by itself after %.0f s: %s' % (end_at - started,
               'signal %d' % -exited if exited < 0 else 'exit %d' % exited))
     print('log: ' + log)
-    # A game that stops by itself (an error, a crash) during the run fails, whatever it drew.
-    ok = path and tex > 0 and exited is None
+    # Fails: stopped by itself (an error, a crash), never drew, or stopped drawing (a hang).
+    if exited is None and verdict == 'INCONCLUSIVE' and not (path and tex > 0 and drawing_at is not None):
+        print('INCONCLUSIVE (still loading or not drawing at %.0f s)' % o.cap)
+        return 2
+    ok = path and tex > 0 and exited is None and alive and drawing_at is not None
     print('PASS' if ok else 'FAIL')
     return 0 if ok else 1
 
