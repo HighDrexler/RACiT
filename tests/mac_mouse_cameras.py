@@ -284,10 +284,24 @@ def turns(g, mode, cameras, key, results):
     # Down, then back up by as much. The camera can move by itself meanwhile (strafe's still
     # settling over the shoulder):
     # The drift is also measured outright (the same time with no input) and taken off each.
-    d0 = g.capture(mode + '-drift-0'); time.sleep(0.6); p0 = g.capture(mode + '-pitch-0')
+    # The key is pressed again before each part, so it is still held for every swipe (a capture
+    # can take a while), and each swipe's pitch has to come from this mode's camera.
+    def rehold():
+        if key:
+            g.ui('hold 3000 ' + key)
+    rehold(); d0 = g.capture(mode + '-drift-0'); time.sleep(0.6); p0 = g.capture(mode + '-pitch-0')
     drift = vshift(d0, p0)[0]
-    g.mouse(0, 30); time.sleep(0.6); p1 = g.capture(mode + '-pitch-1')
-    g.mouse(0, -30); time.sleep(0.6); p2 = g.capture(mode + '-pitch-2')
+    swipes = []
+    rehold(); at = len(g.text()); g.mouse(0, 30); time.sleep(0.6); p1 = g.capture(mode + '-pitch-1')
+    swipes.append(g.text()[at:])
+    rehold(); at = len(g.text()); g.mouse(0, -30); time.sleep(0.6); p2 = g.capture(mode + '-pitch-2')
+    swipes.append(g.text()[at:])
+    # Per swipe: the cameras that answered with pitch. One outside this mode's (follow, when
+    # the key had been let go after all) means the swipe didn't measure this mode.
+    pitched = [set(c for c, _, y in re.findall(r'\[mouse\] (\S+) turn (\S+) (\S+)', t) if abs(float(y)) > 0)
+               for t in swipes]
+    from_mode = all(ps and ps <= set(cameras) for ps in pitched)
+    foreign = any(ps - set(cameras) for ps in pitched)
     down, up = vshift(p0, p1), vshift(p1, p2)
     tilt = (down[0] - drift, down[1], down[2])   # mouse down's own part
     turned = re.findall(r'\[mouse\] (\S+) turn (\S+) (\S+)', g.text()[lines_at:])
@@ -309,13 +323,16 @@ def turns(g, mode, cameras, key, results):
     # runtime counts a person at the pad and ignores the scripted stick, so it can't be
     # checked in those modes (strafe).
     stick_ok = True if key else moved(stick) and (stick[0] > 0) == (mouse[0] > 0)
-    ok = yaw and pitch_hook and pitch_moved and way_ok and moved(mouse) and stick_ok
-    results.append((mode, ok, 'hook %s (yaw %s, pitch %s), shift: still %d, stick %s, mouse %d, pitch %d rows [down %d, up %d, drift %d] (%s %s)'
-                    % ('/'.join(hooked) or 'none', yaw, pitch_hook, still[0],
+    ok = yaw and pitch_hook and from_mode and pitch_moved and way_ok and moved(mouse) and stick_ok
+    if not from_mode and key and foreign:
+        ok = None   # the held key ran out: not a measurement of this mode, so neither pass nor fail
+    results.append((mode, ok, 'hook %s (yaw %s, pitch %s), swipe pitch from %s, shift: still %d, stick %s, mouse %d, pitch %d rows [down %d, up %d, drift %d] (%s %s)'
+                    % ('/'.join(hooked) or 'none', yaw, pitch_hook,
+                       ' then '.join('/'.join(sorted(ps)) or 'none' for ps in pitched), still[0],
                        'n/a (key held)' if key else '%d' % stick[0], mouse[0], tilt[0], down[0], up[0], drift,
                        'stick %d rows' % stick_tilt[0] if stick_tilted else 'follow mouse',
                        'same way' if way_ok else 'WRONG WAY')))
-    time.sleep(5.5)   # the mode's key is let go by now
+    time.sleep(4.0)   # the mode's key is let go by now (3 s after the last press)
 
 
 def menu(g, results):
@@ -366,9 +383,11 @@ def main():
     finally:
         g.stop()
     for mode, ok, note in results:
-        print('%-11s %s  %s' % (mode, 'PASS' if ok else 'FAIL', note))
+        print('%-11s %s  %s' % (mode, {True: 'PASS', False: 'FAIL', None: 'INCONCLUSIVE'}[ok], note))
     print('log: ' + g.log)
-    return 0 if results and all(ok for _, ok, _ in results) else 1
+    if not results or any(ok is False for _, ok, _ in results):
+        return 1
+    return 2 if any(ok is None for _, ok, _ in results) else 0
 
 
 if __name__ == '__main__':
