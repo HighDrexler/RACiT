@@ -85,12 +85,12 @@ MOUSE_CAMERAS = {
                ('after', 0x3A4, 'ctx->fpr[1] -= mouse_angles[1];')),   # the same way up as follow and the stick
     # The lock camera (class 0xC239BC): the yaw step, and its tilt. The tilt isn't an angle the
     # player holds: it follows the stick's vertical axis and springs back to level when the
-    # stick does. The mouse's pitch goes into that axis (the stick's value after its dead zone,
-    # at [r1+0x78]), about full deflection for 0.05 rad in one update and kept within the
-    # stick's range, so it tilts and springs back as the stick does.
-    'lock': (('after', 0x104, '{ uint32_t yb = vm_read32(ctx->gpr[1] + 0x78); float y; memcpy(&y, &yb, 4);\n'
-                              '          y = (float)fmin(fmax(y + mouse_angles[1] * 20.0, -1.0), 1.0);\n'
-                              '          memcpy(&yb, &y, 4); vm_write32(ctx->gpr[1] + 0x78, yb); }'),
+    # stick does. The mouse's pitch goes into that input (f13: the stick's vertical value times
+    # its magnitude, the other way up from the raw axis, so the mouse is taken off) right before
+    # the game's own gate picks it, so it tilts with the stick centred too: about full deflection
+    # for 0.05 rad in one update, kept within the stick's range.
+    'lock': (('text', 'ctx->fpr[12] = (ctx->fpr[1] >= 0.0) ? ctx->fpr[13] : ctx->fpr[0];',
+              'ctx->fpr[13] = (float)fmin(fmax(ctx->fpr[13] - mouse_angles[1] * 20.0, -1.0), 1.0);'),
              ('before', 0x4C8, 'ctx->fpr[1] -= mouse_angles[0];')),
     # First-person look (hero state): the yaw step, and the pitch before the game clamps it.
     'hero_look': (('before', 0x228, 'ctx->fpr[1] -= mouse_angles[0];'),

@@ -90,7 +90,8 @@ class MouseRepatch(unittest.TestCase):
         cameras = cameras or names['_DISC_CAMERAS']
         parts = ['#include "ppu_recomp.h"\n', names['OLD_MOUSE_DECL'] if 'racit_camera_take' in follow else '']
         for name, func in sorted(cameras.items()):
-            parts.append(follow if name == 'follow' else camera_function(func, names['MOUSE_CAMERAS'][name]))
+            parts.append(follow if name == 'follow' else self.lock_function(func) if name == 'lock'
+                         else camera_function(func, names['MOUSE_CAMERAS'][name]))
         path = Path(directory) / 'ppu_recomp_000.cpp'
         path.write_text(''.join(parts), encoding='utf-8')
         return path
@@ -150,16 +151,33 @@ class MouseRepatch(unittest.TestCase):
             _, follow = self.follow_of(path)
             self.assertEqual(len(re.findall(r'double mouse_angles\[2\]', follow)), 1, follow)
 
-    def old_lock(self, func):
-        """The lock camera as the yaw-only recipe left it (before its tilt went in)."""
+    STICK_READ = '        ctx->lr = 0x%08X; func_006417C0(ctx); DRAIN_TRAMPOLINE(ctx);\n'   # at +0x104
+    GATE = '        ctx->fpr[12] = (ctx->fpr[1] >= 0.0) ? ctx->fpr[13] : ctx->fpr[0];\n'
+    TAKE = '        if (!mouse_taken) { mouse_taken = 1; mouse_direct = racit_camera_turn("lock", mouse_angles, racit_mouse_now()); }\n'
+
+    def lock_function(self, func):
+        """The lock camera's lines the recipes look for: the stick read (+0x104), the tilt gate,
+        and the yaw step's call (+0x4C8)."""
         names = recipe()
         fn = camera_function(func, names['MOUSE_CAMERAS']['lock'])
+        head = '        ctx->gpr[3] = 0;\n'
+        return fn.replace(head, head + self.STICK_READ % (int(func[5:], 16) + 0x104), 1)
+
+    def old_lock(self, func, tilt_after_read=False):
+        """The lock camera as an earlier recipe left it: the yaw only (round 6), or with the
+        tilt written into [r1+0x78] right after the stick read (round 7)."""
+        fn = self.lock_function(func)
         head = 'void %s(ppu_context* ctx) {\n' % func
         fn = fn.replace(head, head + '        double mouse_angles[2] = {0, 0}; int mouse_taken = 0, mouse_direct = 0;   /* racacit */\n', 1)
         call = '        ctx->lr = 0x%08X;' % (int(func[5:], 16) + 0x4C8)
-        old = ('        if (!mouse_taken) { mouse_taken = 1; mouse_direct = racit_camera_turn("lock", mouse_angles, racit_mouse_now()); }\n'
-               '        if (mouse_direct) ctx->fpr[1] -= mouse_angles[0];   /* racacit mouse: lock */\n')
-        return fn.replace(call, old + call, 1)
+        fn = fn.replace(call, self.TAKE + '        if (mouse_direct) ctx->fpr[1] -= mouse_angles[0];   /* racacit mouse: lock */\n' + call, 1)
+        if tilt_after_read:
+            read = self.STICK_READ % (int(func[5:], 16) + 0x104)
+            fn = fn.replace(read, read + self.TAKE +
+                            '        if (mouse_direct) { uint32_t yb = vm_read32(ctx->gpr[1] + 0x78); float y; memcpy(&y, &yb, 4);\n'
+                            '          y = (float)fmin(fmax(y + mouse_angles[1] * 20.0, -1.0), 1.0);\n'
+                            '          memcpy(&yb, &y, 4); vm_write32(ctx->gpr[1] + 0x78, yb); }   /* racacit mouse: lock */\n', 1)
+        return fn
 
     def check_lock(self, path, func):
         text = path.read_text(encoding='utf-8')
@@ -168,10 +186,11 @@ class MouseRepatch(unittest.TestCase):
         self.assertEqual(lock.count('/* racacit mouse: lock */'), 2, lock)
         self.assertEqual(lock.count('double mouse_angles[2]'), 1, lock)
         self.assertEqual(lock.count('ctx->fpr[1] -= mouse_angles[0];'), 1, lock)
-        # The tilt goes in right after the stick read, clamped to the stick's range.
-        tilt = lock.index('vm_write32(ctx->gpr[1] + 0x78')
+        self.assertNotIn('vm_write32(ctx->gpr[1] + 0x78', lock)
+        # The tilt goes on the stick input right before the game's gate, the other way up from mouse_angles[1].
+        tilt = lock.index('ctx->fpr[13] = (float)fmin(fmax(ctx->fpr[13] - mouse_angles[1] * 20.0, -1.0), 1.0);')
+        self.assertLess(tilt, lock.index(self.GATE.strip()))
         self.assertLess(lock.index('ctx->lr = 0x%08X;' % (int(func[5:], 16) + 0x104)), tilt)
-        self.assertIn('fmin(fmax(y + mouse_angles[1]', lock)
         return text
 
     def test_old_lock_patch_gets_tilt(self):
@@ -183,8 +202,8 @@ class MouseRepatch(unittest.TestCase):
                 follow = camera_function(cameras['follow'], names['MOUSE_CAMERAS']['follow'])
                 path = self.lift(directory, follow, cameras)
                 text = path.read_text(encoding='utf-8')
-                fresh = camera_function(func, names['MOUSE_CAMERAS']['lock'])
-                path.write_text(text.replace(fresh, self.old_lock(func), 1), encoding='utf-8')
+                fresh = self.lock_function(func)
+                path.write_text(text.replace(fresh, self.old_lock(func, tilt_after_read=update120), 1), encoding='utf-8')
                 out = self.patch_update120(directory) if update120 else self.patch(directory)
                 self.assertIn('earlier lock camera patch replaced', out)
                 text = self.check_lock(path, func)
