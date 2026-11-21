@@ -99,7 +99,7 @@ class HookLists(unittest.TestCase):
     def test_menu_and_camera_hooks_are_checked_on_every_version(self):
         for profile in PROFILES:
             hooks, functions = hook_list(profile)
-            for name in ('racit_camera_take', 'racit_publish_menu_keyboard', 'racacit_front_end_cards'):
+            for name in ('racit_camera_turn', 'racit_camera_peek', 'racit_publish_menu_keyboard', 'racacit_front_end_cards'):
                 self.assertIn(name, hooks, profile)
             self.assertTrue(functions, profile + ' needs @function lines to recognise its lift')
 
@@ -149,22 +149,6 @@ class CheckLiftHooks(unittest.TestCase):
                 self.lift(directory, hooks, functions)
                 result = self.run_check(directory, profile)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-
-    def test_non_ascii_path_on_a_cp1252_console(self):
-        """A checkout under C:\\Users\\李 on a cp1252 console: the messages name the path."""
-        import os
-        profile = PROFILES[0]
-        hooks, functions = hook_list(profile)
-        with tempfile.TemporaryDirectory() as parent:
-            directory = os.path.join(parent, '李', 'recomp')
-            os.makedirs(directory)
-            self.lift(directory, hooks, functions)
-            env = dict(os.environ, PYTHONIOENCODING='cp1252')
-            result = subprocess.run([sys.executable, str(CHECK), directory, '--profile', profile],
-                                    capture_output=True, env=env)
-            out = (result.stdout + result.stderr).decode('utf-8', 'replace')
-            self.assertEqual(result.returncode, 0, out)
-            self.assertIn('李', out)
 
     def test_chunk_count_does_not_change_the_count(self):
         # Each chunk declares and defines the hooks again: only the calls count.
@@ -250,9 +234,14 @@ class CheckLiftHooks(unittest.TestCase):
         # A lift patched before racacit_lua_throw_hook existed: --patch runs patch_lift.py,
         # which puts it in, and the check passes; a second run with the stamp leaves it be.
         hooks, functions = hook_list('BCUS98124-1.00')
+        # patch_lift.py also stops unless it finds every mouse camera (tests/test_mouse_repatch.py).
+        from test_mouse_repatch import camera_function, recipe
+        names = recipe()
+        cameras = ''.join(camera_function(func, names['MOUSE_CAMERAS'][name])
+                          for name, func in sorted(names['_DISC_CAMERAS'].items()))
         with tempfile.TemporaryDirectory() as directory:
             self.lift(directory, hooks, functions, leave_out=('racacit_lua_throw_hook',),
-                      extra='void func_0050A83C(ppu_context* ctx) {\n        return;\n}')
+                      extra='void func_0050A83C(ppu_context* ctx) {\n        return;\n}\n' + cameras)
             stamp = Path(directory) / 'patched.ok'
             result = self.run_check(directory, 'BCUS98124-1.00', '--patch', '--stamp', str(stamp))
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

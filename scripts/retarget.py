@@ -56,8 +56,8 @@ racacit_follow_fov_unscale racacit_force_abort racacit_front_end_cards racacit_g
 racacit_jb_push racacit_level_change racacit_longjmp racacit_lua_exec_hook racacit_lua_throw_hook
 racacit_luac_trace racacit_movie_update_hook racacit_skillpoint_blocked racacit_skin_armor_rows
 racacit_skin_armor_selected racacit_snd_play_hook racacit_snd_start_end racacit_snd_stop_hook
-racacit_stream_pause_hook racacit_wait_begin racacit_wait_end racit_camera_take
-racit_publish_menu_keyboard'''.split()
+racacit_stream_pause_hook racacit_wait_begin racacit_wait_end racit_camera_peek
+racit_camera_turn racit_publish_menu_keyboard'''.split()
 REQUIRED += ['racacit: get re-read', 'racacit: on the disc']
 _blob = ''.join(open(p, encoding='latin-1').read() for p in glob.glob(os.path.join(RECOMP, 'ppu_recomp_*.cpp')))
 _missing = [r for r in REQUIRED if r not in _blob]

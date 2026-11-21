@@ -40,5 +40,7 @@ racacit_snd_stop_hook 2
 racacit_stream_pause_hook 1
 racacit_wait_begin 3
 racacit_wait_end 3
-racit_camera_take 1
+racit_camera_turn 17
+racit_camera_peek 1
+racit_mouse_now 18
 racit_publish_menu_keyboard 3
