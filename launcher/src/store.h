@@ -230,6 +230,6 @@ private:
     std::string prepare_update_hdd();   // update files and the disc's installed data into hdd_update()
 #ifdef __APPLE__
 private:
-    std::string launch_mac(const fs::path& vfs_root, const BuildInfo& b, const fs::path& eboot, std::map<std::wstring, std::wstring>& set, void** process);
+    std::string launch_mac(const BuildInfo& b, const fs::path& eboot, std::map<std::wstring, std::wstring>& set, void** process);
 #endif
 };

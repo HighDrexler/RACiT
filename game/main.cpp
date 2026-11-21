@@ -1713,9 +1713,14 @@ int main(int argc, char** argv)
     /* Real title id (BCUS98124) from PARAM.SFO; without this cellGame,
      * save data and trophies all fall back to the BLES00000 placeholder. */
     {
-        char sfo[1100];
-        snprintf(sfo, sizeof sfo, "%s/PS3_GAME/PARAM.SFO", ppu_vfs_root);
-        cellGame_init_from_paramsfo(sfo);
+        const char* update_sfo = getenv("PS3_UPDATE_PARAM_SFO");
+        if (update_sfo && *update_sfo) {
+            cellGame_init_from_paramsfo(update_sfo);
+        } else {
+            char sfo[1100];
+            snprintf(sfo, sizeof sfo, "%s/PS3_GAME/PARAM.SFO", ppu_vfs_root);
+            cellGame_init_from_paramsfo(sfo);
+        }
     }
 
     ppu_recomp_register();   /* lifted function table -> address map */

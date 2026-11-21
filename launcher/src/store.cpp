@@ -392,7 +392,7 @@ std::string Store::add_elf(const fs::path& elf)
     if (!r.empty()) return r;
     std::error_code ec;
     if (v == 120) {   // update 1.20's: beside the update's files, the disc's EBOOT.elf stays
-        if (!supports_update120()) return "Update 1.20 requires the macOS release of A Crack in Time.";
+        if (!supports_update120()) return "Update 1.20 requires A Crack in Time.";
         fs::create_directories(update_dir(), ec);
         if (!(fs::exists(update_elf(), ec) && fs::equivalent(elf, update_elf(), ec)) &&
             !fs::copy_file(elf, update_elf(), fs::copy_options::overwrite_existing, ec))
@@ -435,16 +435,12 @@ bool Store::plays_update(const std::string& title_id) const
 
 bool Store::supports_update120() const
 {
-#ifdef __APPLE__
     return prof == &kRacitProfile;
-#else
-    return false;
-#endif
 }
 
 std::string Store::import_update(const fs::path& picked, Progress* p, std::string* summary)
 {
-    if (!supports_update120()) return "Update 1.20 requires the macOS release of A Crack in Time.";
+    if (!supports_update120()) return "Update 1.20 requires A Crack in Time.";
     std::error_code ec;
     if (lower(u8(picked.extension())) == ".pkg")
         return "A .pkg is locked with PlayStation keys, which the launcher does not ship. Install it in RPCS3 "
@@ -543,40 +539,10 @@ std::string Store::prepare_update_hdd()
     fs::create_directories(disc_home, ec);
     if (ec) return "cannot open the disc's save folder: " + ec.message();
     const fs::path home = hdd_update() / L"home";
-    if (!fs::exists(fs::symlink_status(home, ec))) {
-        fs::create_directory_symlink(fs::path(L"..") / hdd().filename() / L"home", home, ec);   // relative: the folder can move
-        if (ec) return "cannot link " + u8(home) + " to the saves: " + ec.message();
-    }
-    if (!fs::equivalent(home, disc_home, ec))
-        return u8(home) + " is not linked to the disc's save folder. Move it aside or restore the link before playing update 1.20.";
+    if (fs::exists(fs::symlink_status(home, ec)) && !fs::equivalent(home, disc_home, ec))
+        return "There is a separate save folder at " + u8(home) + ". Move it aside before using the disc's saves with update 1.20.";
     return {};
 }
-
-#ifdef __APPLE__
-// Present the update's metadata at the disc mount while borrowing the original assets.
-static std::error_code prepare_update_disc(const fs::path& disc, const fs::path& sfo, const fs::path& mount)
-{
-    std::error_code error;
-    const fs::path source = fs::absolute(disc, error);
-    if (error) return error;
-    fs::remove_all(mount, error);
-    if (error) return error;
-    fs::create_directories(mount / L"PS3_GAME", error);
-    if (error) return error;
-    const auto link_entries = [&](const fs::path& from, const fs::path& to, const fs::path& skip) {
-        for (fs::directory_iterator it(from, error), end; !error && it != end; it.increment(error)) {
-            const auto name = it->path().filename();
-            if (name != skip) fs::create_symlink(it->path(), to / name, error);
-            if (error) break;
-        }
-    };
-    link_entries(source, mount, L"PS3_GAME");
-    if (error) return error;
-    link_entries(source / L"PS3_GAME", mount / L"PS3_GAME", L"PARAM.SFO");
-    if (!error) fs::copy_file(sfo, mount / L"PS3_GAME" / L"PARAM.SFO", error);
-    return error;
-}
-#endif
 
 std::string Store::refresh_art()
 {
@@ -650,7 +616,8 @@ bool cpu_has_avx2()
 
 static bool launcher_owned_key(const std::string& k)
 {
-    static const char* own[] = { "PS3_HDD0_ROOT", "RSX_SHADER_CACHE", "RSX_PIPELINE_CACHE", "RSX_PIPELINE_LIST",
+    static const char* own[] = { "PS3_HDD0_ROOT", "PS3_HDD0_HOME_ROOT", "PS3_UPDATE_PARAM_SFO", "PS3_VFS_ROOT",
+                                 "RSX_SHADER_CACHE", "RSX_PIPELINE_CACHE", "RSX_PIPELINE_LIST",
                                  "RACACIT_SETTINGS_FILE", "RACACIT_LOG_FILE", "RACACIT_MODS",
                                  "RACACIT_CODE_MODS", "RACIT_GAME_VERSION" };
     for (const char* o : own) if (same_key(k, o)) return true;
@@ -1850,7 +1817,10 @@ std::string Store::launch(void** process, bool prepare)
                     }
     }
     set[L"RACACIT_SETTINGS_FILE"] = settings.path.wstring();
+    set[L"PS3_VFS_ROOT"] = g.root.wstring();
     set[L"PS3_HDD0_ROOT"] = (u120 ? hdd_update() : hdd()).wstring();
+    set[L"PS3_HDD0_HOME_ROOT"] = u120 ? (hdd() / L"home").wstring() : L"";
+    set[L"PS3_UPDATE_PARAM_SFO"] = u120 ? (hdd_update() / L"game" / L"BCUS98124" / L"PARAM.SFO").wstring() : L"";
     set[L"RSX_SHADER_CACHE"] = (cache() / L"shadercache.bin").wstring();
     set[L"RSX_PIPELINE_CACHE"] = (cache() / L"pipelinecache.bin").wstring();
     set[L"RSX_PIPELINE_LIST"] = (cache() / L"pipelinelist.bin").wstring();
@@ -1878,13 +1848,7 @@ std::string Store::launch(void** process, bool prepare)
 
 #ifdef __APPLE__
     if (prepare) return "Preparing shaders is not available on this system yet.";
-    fs::path vfs_root = g.root;
-    if (u120) {
-        vfs_root = hdd_update() / L"disc";
-        if (const auto error = prepare_update_disc(g.root, update_dir() / L"PARAM.SFO", vfs_root))
-            return "Could not prepare the update's disc files: " + error.message();
-    }
-    return launch_mac(vfs_root, b, eboot, set, process);
+    return launch_mac(b, eboot, set, process);
 #else
     std::wstring env;
     if (wchar_t* cur = GetEnvironmentStringsW()) {
@@ -1940,11 +1904,10 @@ std::string Store::launch(void** process, bool prepare)
 // same environment as on Windows, the game folder named outright (PS3_VFS_ROOT), the
 // Vulkan loader and MoltenVK beside the build (builds/vNN/lib, unless settings.txt names
 // others), and stdout + stderr into data/log.txt.
-std::string Store::launch_mac(const fs::path& vfs_root, const BuildInfo& b, const fs::path& eboot, std::map<std::wstring, std::wstring>& set, void** process)
+std::string Store::launch_mac(const BuildInfo& b, const fs::path& eboot, std::map<std::wstring, std::wstring>& set, void** process)
 {
     std::error_code ec;
     auto ours = [&](const wchar_t* k) { for (auto& kv : set) if (_wcsicmp(kv.first.c_str(), k) == 0) return true; return false; };
-    set[L"PS3_VFS_ROOT"] = vfs_root.wstring();
     const fs::path lib = b.dir / L"lib";
     if (!ours(L"PS3RECOMP_VULKAN_LIBRARY") && fs::exists(lib / L"libvulkan.1.dylib", ec))
         set[L"PS3RECOMP_VULKAN_LIBRARY"] = (lib / L"libvulkan.1.dylib").wstring();
