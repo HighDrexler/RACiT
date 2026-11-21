@@ -17311,10 +17311,10 @@ index cbec250..4359a3b 100644
   * PSO identity should use rsx_fp_structural_hash in buffered mode. */
 diff --git a/libs/video/rsx_host_ui.c b/libs/video/rsx_host_ui.c
 new file mode 100644
-index 0000000..12376a2
+index 00000000..8305c149
 --- /dev/null
 +++ b/libs/video/rsx_host_ui.c
-@@ -0,0 +1,2296 @@
+@@ -0,0 +1,2304 @@
 +/*
 + * ps3recomp - host settings menu and on-screen display. See rsx_host_ui.h.
 + */
@@ -18215,11 +18215,16 @@ index 0000000..12376a2
 +#ifdef __ANDROID__
 +    on = 0;   /* touch screens: the touch controls, no cursor */
 +#endif
-+    if (!s_win || on == s_mcap) return;
-+    s_mcap = on;
-+    SDL_SetRelativeMouseMode(on ? SDL_TRUE : SDL_FALSE);
-+    LOCK(); s_mdx = s_mdy = s_mwheel = 0; s_mbtn = s_mbtn_tap = 0; UNLOCK();
-+    if (!on) update_cursor();
++    if (!s_win || (on && SDL_GetKeyboardFocus() != s_win)) return;
++    const SDL_bool wanted = on ? SDL_TRUE : SDL_FALSE;
++    if (SDL_GetRelativeMouseMode() != wanted) SDL_SetRelativeMouseMode(wanted);
++    const int captured = SDL_GetRelativeMouseMode() == SDL_TRUE;
++    LOCK();
++    s_mcap = captured;
++    s_mdx = s_mdy = s_mwheel = 0;
++    s_mbtn = s_mbtn_tap = 0;
++    UNLOCK();
++    if (!captured) update_cursor();
 +}
 +
 +int rsx_host_ui_mouse_take(int* dx, int* dy, int* wheel, unsigned* buttons)
@@ -18436,7 +18441,10 @@ index 0000000..12376a2
 +        if (s_open && k_rows[s_sel].kind == K_OPT && e->wheel.y) adjust(k_rows[s_sel].id, e->wheel.y > 0 ? 1 : -1);
 +        return 0;
 +    case SDL_WINDOWEVENT:
-+        if (e->window.event == SDL_WINDOWEVENT_FOCUS_LOST) mouse_capture(0);
++        if (e->window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
++            s_mcap_resume = 0;
++            mouse_capture(0);
++        }
 +        if (e->window.event == SDL_WINDOWEVENT_SIZE_CHANGED && s_win &&
 +            !(SDL_GetWindowFlags(s_win) & (SDL_WINDOW_FULLSCREEN | SDL_WINDOW_FULLSCREEN_DESKTOP | SDL_WINDOW_MAXIMIZED))) {
 +            /* A window dragged to a new size keeps it next time. */
