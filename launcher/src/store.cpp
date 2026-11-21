@@ -1617,7 +1617,7 @@ std::vector<fs::path> Store::old_logs() const
 // seen: "RSXPLS01", u32 record size, u32 0, then records of that size). They were copied into
 // data\cache only when it had none, so a player who started on an older build never got a
 // newer build's caches: every area compiled its shaders again during play, build after build.
-// Now a build's entries are merged in once (cache\seeded.txt: the last build merged); the
+// A build's entries are merged once, tracked separately for the disc and update variants. The
 // game itself drops the oldest when a file outgrows its cap. pipelinecache.bin is the
 // graphics driver's own: copied only when there is none.
 namespace {
@@ -1668,9 +1668,10 @@ bool merge_shader_cache(const fs::path& from, const fs::path& to)
     for (const SpvRec& r : src) {
         if (!have.insert({ r.a, r.b }).second) continue;
         buf.resize(24 + (size_t)r.n * 4);
-        if (!in.seekg((std::streamoff)r.off) || !in.read(buf.data(), (std::streamsize)buf.size())) break;
-        out.write(buf.data(), (std::streamsize)buf.size());
+        if (!in.seekg((std::streamoff)r.off) || !in.read(buf.data(), (std::streamsize)buf.size())) return false;
+        if (!out.write(buf.data(), (std::streamsize)buf.size())) return false;
     }
+    out.close();
     return (bool)out;
 }
 
@@ -1693,8 +1694,9 @@ bool merge_pipeline_list(const fs::path& from, const fs::path& to)
     std::ofstream out(to, std::ios::binary | std::ios::app);
     for (size_t i = 0; 16 + (i + 1) * rs <= s.size(); i++) {
         std::string r = s.substr(16 + i * rs, rs);
-        if (have.insert(r).second) out.write(r.data(), (std::streamsize)rs);
+        if (have.insert(r).second && !out.write(r.data(), (std::streamsize)rs)) return false;
     }
+    out.close();
     return (bool)out;
 }
 }  // namespace
@@ -1702,18 +1704,23 @@ bool merge_pipeline_list(const fs::path& from, const fs::path& to)
 void Store::seed_caches(const BuildInfo& b)
 {
     std::error_code ec;
-    const fs::path mark = cache() / L"seeded.txt";
+    const fs::path mark = cache() / (b.update120 ? L"seeded-u120.txt" : L"seeded-disc.txt");
     const bool merged = atoi(trim(read_text(mark, 64)).c_str()) == b.version;
     bool ok = true;
+    bool found_seed = false;
     for (const wchar_t* cf : { L"shadercache.bin", L"pipelinecache.bin", L"pipelinelist.bin" }) {
         const fs::path from = b.dir / cf, to = cache() / cf;
-        if (!fs::exists(from, ec)) continue;
-        if (!fs::exists(to, ec)) { fs::copy_file(from, to, ec); continue; }   // a fresh install starts from the build's
+        if (!fs::exists(from, ec)) { if (ec) ok = false; continue; }
+        found_seed = true;
+        if (!fs::exists(to, ec)) {
+            if (ec || !fs::copy_file(from, to, ec)) ok = false;
+            continue;
+        }
         if (merged) continue;
         if (!wcscmp(cf, L"shadercache.bin")) ok = merge_shader_cache(from, to) && ok;
         else if (!wcscmp(cf, L"pipelinelist.bin")) ok = merge_pipeline_list(from, to) && ok;
     }
-    if (!merged && ok) write_text_atomic(mark, std::to_string(b.version) + "\r\n");   // else tried again next Play
+    if (!merged && found_seed && ok) write_text_atomic(mark, std::to_string(b.version) + "\r\n");
 }
 
 // ---- shaders: the prepare's files in data\cache ---------------------------------------------
@@ -1748,7 +1755,11 @@ int Store::shader_variants() const
 
 std::map<std::string, std::string> Store::shader_stamp() const { return key_values(cache() / L"shaders.stamp"); }
 std::map<std::string, std::string> Store::shader_state() const { return key_values(cache() / L"shaders.state"); }
-std::string Store::shader_build_tag() const { const BuildInfo b = current_build(); return b.version ? "v" + std::to_string(b.version) : std::string(); }
+std::string Store::shader_build_tag() const
+{
+    const std::string title_id = game().title_id;
+    return build_for(plays_update(title_id), title_id).shader_tag();
+}
 
 int Store::shader_status() const
 {
@@ -1827,7 +1838,7 @@ std::string Store::launch(void** process, bool prepare)
     set[L"RACACIT_LOG_FILE"] = (prepare ? prepare_log() : log()).wstring();
     if (prepare) {
         set[L"RACACIT_PREPARE"] = L"1";
-        set[L"RACACIT_PREPARE_TAG"] = widen(shader_build_tag());
+        set[L"RACACIT_PREPARE_TAG"] = widen(b.shader_tag());
         fs::remove(cache() / L"shaders.progress", ec);
     }
     set[L"RACACIT_LAUNCHER"] = L"1";
