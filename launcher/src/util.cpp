@@ -559,8 +559,12 @@ std::string sha256_file(const fs::path& p, Progress* prog)
     if (BCryptCreateHash(alg, &h, nullptr, 0, nullptr, 0, 0) == 0) {
         HANDLE f = CreateFileW(p.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
         if (f != INVALID_HANDLE_VALUE) {
-            std::vector<unsigned char> buf(1u << 20); DWORD got = 0; bool ok = true;
-            while (ReadFile(f, buf.data(), (DWORD)buf.size(), &got, nullptr) && got) {
+            std::vector<unsigned char> buf(1u << 20);
+            bool ok = true;
+            for (;;) {
+                DWORD got = 0;
+                if (!ReadFile(f, buf.data(), (DWORD)buf.size(), &got, nullptr)) { ok = false; break; }
+                if (got == 0) break;
                 if (BCryptHashData(h, buf.data(), got, 0) != 0) { ok = false; break; }
                 if (prog) { prog->done += got; if (prog->cancel) { ok = false; break; } }
             }
