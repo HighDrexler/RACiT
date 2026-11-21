@@ -141,7 +141,7 @@ std::string copy_tree(const fs::path& src, const fs::path& dst, Progress* p)
     for (auto it = fs::recursive_directory_iterator(src, fs::directory_options::skip_permission_denied, ec);
          !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
         if (p && p->cancel) return "cancelled";
-        const fs::path rel = fs::relative(it->path(), src, ec);
+        const fs::path rel = it->path().lexically_relative(src);
         const fs::path out = dst / rel;
         if (it->is_directory(ec)) { fs::create_directories(out, ec); continue; }
         if (!it->is_regular_file(ec)) continue;
