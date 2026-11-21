@@ -136,6 +136,7 @@ public:
     fs::path update_elf() const { return update_dir() / L"EBOOT.elf"; }
     fs::path hdd_update() const { return data() / L"dev_hdd0_u120"; }   // its own game data; saves shared
     std::string import_update(const fs::path& picked, Progress* p, std::string* summary);
+    bool supports_update120() const;
     bool update_added() const;          // update\PARAM.SFO is 1.20's
     bool update_ready() const;          // and its EBOOT.elf is in place
     bool plays_update() const;          // Play runs the 1.20 build
@@ -229,6 +230,6 @@ private:
     std::string prepare_update_hdd();   // update files and the disc's installed data into hdd_update()
 #ifdef __APPLE__
 private:
-    std::string launch_mac(const GameInfo& g, const BuildInfo& b, const fs::path& eboot, std::map<std::wstring, std::wstring>& set, void** process);
+    std::string launch_mac(const fs::path& vfs_root, const BuildInfo& b, const fs::path& eboot, std::map<std::wstring, std::wstring>& set, void** process);
 #endif
 };
