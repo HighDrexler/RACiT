@@ -25,7 +25,12 @@ tools/venv/Scripts/python.exe -m pip install -q --disable-pip-version-check \
     pycryptodome==3.24.1 tabulate==0.10.0 tqdm==4.70.1
 
 echo "== Sources"
-pin ps3recomp      sp00nznet/ps3recomp         5244db92669b54831c6d3ebb7a96d58c4dbfa6df
+runtime_pin=5244db92669b54831c6d3ebb7a96d58c4dbfa6df
+pin ps3recomp      sp00nznet/ps3recomp         "$runtime_pin"
+if [ "$(git -C tools/ps3recomp rev-parse HEAD)" != "$runtime_pin" ]; then
+    echo "Runtime revision differs. Use the pinned runtime in a separate checkout." >&2
+    exit 1
+fi
 pin Vulkan-Headers KhronosGroup/Vulkan-Headers c46850864f4661461b0f6cb9922c058ffea4915e
 pin glslang-src    KhronosGroup/glslang        2fbed5e1fb43a1c480fe020e3bb686a31010989a
 pin zlib           madler/zlib                 767c4c947852e143f582c85f14cf573411df1b35
