@@ -459,10 +459,16 @@ std::string Store::import_update(const fs::path& picked, Progress* p, std::strin
     if (sfo["TITLE_ID"] != "BCUS98124") return "This is " + (sfo["TITLE_ID"].empty() ? std::string("not a PS3 game update") : sfo["TITLE_ID"]) + ", not A Crack in Time USA (BCUS98124).";
     if (sfo["APP_VER"] != "01.20") return "This is version " + sfo["APP_VER"] + " of the game. The launcher plays update 1.20 (or the disc's 1.00).";
     const fs::path tmp = data() / L"update.new";
-    delete_tree(tmp);
+    const fs::path previous = data() / L"update.previous";
+    if (fs::exists(previous, ec) && !fs::exists(update_dir(), ec)) {
+        fs::rename(previous, update_dir(), ec);
+        if (ec) return "Could not restore the previous update: " + ec.message();
+    }
+    if (!delete_tree(tmp)) return "Could not clear " + u8(tmp);
+    auto stop = [&](const std::string& message) { delete_tree(tmp); return message; };
     p->total = tree_size(d);
     std::string r = copy_tree(d, tmp, p);
-    if (!r.empty()) { delete_tree(tmp); return r; }
+    if (!r.empty()) return stop(r);
     // A decrypted EBOOT.elf in the update's folder (RPCS3 writes it beside EBOOT.BIN) is taken
     // as the 1.20 program, not kept with the update's data.
     int v = 0; bool known = false;
@@ -470,13 +476,29 @@ std::string Store::import_update(const fs::path& picked, Progress* p, std::strin
     const fs::path found = tmp / L"USRDIR" / L"EBOOT.elf";
     if (fs::exists(found, ec) && check_elf(found, &known, &v).empty() && v == 120) {
         fs::rename(found, tmp / L"EBOOT.elf", ec);
+        if (ec) return stop("Could not stage the update's EBOOT.elf: " + ec.message());
         elf_note = " Its EBOOT.elf was there too.";
     } else if (fs::exists(update_elf(), ec)) {
-        fs::rename(update_elf(), tmp / L"EBOOT.elf", ec);
+        if (!fs::copy_file(update_elf(), tmp / L"EBOOT.elf", fs::copy_options::overwrite_existing, ec))
+            return stop("Could not keep the update's EBOOT.elf: " + ec.message());
     }
-    delete_tree(update_dir());
+    const bool replacing = fs::exists(update_dir(), ec);
+    if (ec) return stop("Could not check the existing update: " + ec.message());
+    if (replacing) {
+        if (!delete_tree(previous)) return stop("Could not clear " + u8(previous));
+        fs::rename(update_dir(), previous, ec);
+        if (ec) return stop("Could not move the existing update aside: " + ec.message());
+    }
     fs::rename(tmp, update_dir(), ec);
-    if (ec) return "Could not put the update in " + u8(update_dir()) + ": " + ec.message();
+    if (ec) {
+        r = "Could not put the update in " + u8(update_dir()) + ": " + ec.message();
+        if (replacing) {
+            fs::rename(previous, update_dir(), ec);
+            if (ec) r += " The original is still in " + u8(previous) + ": " + ec.message();
+        }
+        return stop(r);
+    }
+    if (replacing) delete_tree(previous);
     if (summary) *summary = "Update 1.20 added." + elf_note + (update_ready() ? " Play runs version 1.20."
                           : " Now add its EBOOT.elf: its USRDIR/EBOOT.BIN, decrypted with RPCS3.");
     return {};
