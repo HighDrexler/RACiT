@@ -17,6 +17,10 @@ legally dumped copy of the USA disc (`BCUS98124`).
 
 Newer releases install over older ones, and the app checks GitHub for them when it opens.
 
+## Graphics startup
+
+RACiT requires a working Vulkan driver and the Vulkan features reported in the game log. If graphics fail to start, open **Diagnostics > Last game log** and share the first `[RSX vulkan]` failure with your device model and Android version. If the game reports an allocation failure, try the **Low** graphics preset once and compare the log. A device with no usable Vulkan driver needs a compatible system driver or another device to run this build.
+
 ## Build
 
 On Windows, with Git Bash, Python 3.12, and one folder holding `android-ndk-r29`,
