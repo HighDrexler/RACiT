@@ -306,13 +306,31 @@ PUZZLE_HOOKS = {
     'fix_time': ('ctx->gpr[29] = vm_read32(ctx->gpr[31] + 0x98);',
                  'if (vm_read16(ctx->gpr[31] + 0x60) == 2 && (int32_t)vm_read32(ctx->gpr[31] + 0x98) != 2 &&\n'
                  '            racit_skip_puzzle_now("fix_time")) vm_write32(ctx->gpr[31] + 0x98, 2);'),
+    # Bolt cranks and winches (the winch's update calls the crank's): while the player turns
+    # it (in use, not yet done +0x3C9, not rusted +0x3CC), the update compares the turn so far
+    # (+0x394) with the turn needed (+0x390) and finishes only past it. The hook makes the turn
+    # the full one and lets the comparison pass, so the crank's own finish runs: its cue, the
+    # done latch, and the level script that waits for it.
+    'bolt_crank': ('{ double a = ctx->fpr[7]; double b = ctx->fpr[6]; uint32_t cr_val = (a != a || b != b) ? 1 : '
+                   '(a < b) ? 8 : (a > b) ? 4 : 2; ctx->cr = (ctx->cr & ~(0xFu << 28)) | (cr_val << 28); }',
+                   'if (vm_read8(ctx->gpr[31] + 0x3C8) != 0 && vm_read8(ctx->gpr[31] + 0x3C9) == 0 &&\n'
+                   '            vm_read8(ctx->gpr[31] + 0x3CC) == 0 && !(ctx->fpr[7] > ctx->fpr[6]) &&\n'
+                   '            racit_skip_puzzle_now("bolt_crank")) {\n'
+                   '            vm_write32(ctx->gpr[31] + 0x394, vm_read32(ctx->gpr[31] + 0x390)); ctx->fpr[7] = ctx->fpr[6] + 1.0; }'),
+    # Hydroplants (OmniSoaker): each accepted soak grows the plant one stage (+0x3D0) in its
+    # growing state (state +0x60 == 2); stage 3 is grown, and the game sets its completion bit.
+    # The hook starts that soak from stage 2, so this soak is the last and the game's own
+    # growth and completion run.
+    'hydroplant': ('ctx->gpr[5] = vm_read32(ctx->gpr[27] + 0x3D0);',
+                   'if (vm_read16(ctx->gpr[31]) == 2 && (int32_t)vm_read32(ctx->gpr[27] + 0x3D0) < 2 &&\n'
+                   '            racit_skip_puzzle_now("hydroplant")) vm_write32(ctx->gpr[27] + 0x3D0, 2);'),
 }
-_DISC_PUZZLES = {'fix_time': 'func_0039CA18'}
+_DISC_PUZZLES = {'fix_time': 'func_0039CA18', 'bolt_crank': 'func_00353A30', 'hydroplant': 'func_0042A464'}
 PUZZLE_FUNCS = {
     'BCUS98124-1.00': _DISC_PUZZLES,
     'BCES00511-1.00': _DISC_PUZZLES,
     # Update 1.20 (same code, moved): written as numbers so retarget.py leaves them.
-    'BCUS98124-1.20': {name: 'func_%08X' % a for name, a in (('fix_time', 0x39cd50),)},
+    'BCUS98124-1.20': {name: 'func_%08X' % a for name, a in (('fix_time', 0x39cd50), ('bolt_crank', 0x353d68), ('hydroplant', 0x42a79c))},
 }
 PUZZLE_DECL = 'extern "C" int racit_skip_puzzle_now(const char* puzzle);\n'
 
