@@ -360,15 +360,26 @@ def game_map(g, results):
 
 
 def menu(g, results):
-    """The pause menu takes no mouse turn, and nothing turns when play resumes."""
+    """The pause menu takes no mouse turn, and nothing turns when play resumes. With no camera
+    active the mouse is a right-stick push there too, so the menu itself must not move with it
+    either (no scrolling, no other entry picked): the picture changes no more under steady mouse
+    motion than it does by itself."""
     g.press('0x%04X 4' % START); time.sleep(2.5)
     before = len(re.findall(r'\[mouse\] \S+ turn', g.text()))
-    g.mouse(300, 0); time.sleep(1.0)
+    q0 = g.capture('pause-0'); time.sleep(1.0); q1 = g.capture('pause-1')
+    g.mouse(300, 0)
+    for dx, dy in ((0, 6), (6, 0), (0, -6), (-6, 0)):   # ~0.5 s each way: a held push
+        for _ in range(20):
+            g.mouse(dx, dy); time.sleep(0.025)
+    time.sleep(0.5); q2 = g.capture('pause-2')
+    by_itself, with_mouse = shift(q0, q1)[2], shift(q1, q2)[2]
+    still = with_mouse <= 2 * max(1.0, by_itself)
     paused = len(re.findall(r'\[mouse\] \S+ turn', g.text())) - before
     g.press('0x%04X 4' % START); time.sleep(2.5)
     resumed = len(re.findall(r'\[mouse\] \S+ turn', g.text())) - before
-    results.append(('pause menu', paused == 0 and resumed == 0,
-                    'turns while paused %d, after resuming %d' % (paused, resumed)))
+    results.append(('pause menu', paused == 0 and resumed == 0 and still,
+                    'turns while paused %d, after resuming %d, menu change with the mouse %.1f (by itself %.1f)'
+                    % (paused, resumed, with_mouse, by_itself)))
 
 
 def main():
