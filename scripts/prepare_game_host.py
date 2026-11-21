@@ -55,6 +55,12 @@ def main():
     for name in ('main.cpp', 'stubs.cpp'):
         source = (ROOT / 'game' / name).read_text(encoding='utf-8')
         if update:
+            if name == 'stubs.cpp':
+                # Disc-only ports of 1.20's own fixes: they name disc functions 1.20 has no
+                # host mapping for, and the update build never calls them.
+                begin, finish = '// Disc-only 1.20 fixes begin.', '// Disc-only 1.20 fixes end.'
+                start = source.index(begin)
+                source = source[:start] + source[source.index(finish, start) + len(finish):]
             source = rewrite_host(source, functions, addresses)
             if name == 'stubs.cpp':
                 start = source.index('extern "C" void racacit_skin_armor_selected(')

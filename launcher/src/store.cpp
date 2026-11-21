@@ -159,7 +159,11 @@ static const char* kSettingsTemplateRest =
     "# GAME = the folder that contains your disc dump's PS3_GAME folder (set by Import).\r\n"
     "# --- Cutscenes ---\r\n"
     "RACACIT_START_SKIPS_MOVIES=1\r\n"
-    "RACACIT_ALL_CUTSCENES_SKIPPABLE=1\r\n";
+    "RACACIT_ALL_CUTSCENES_SKIPPABLE=1\r\n"
+    "# --- Puzzles (also Settings > General > Puzzles in the game) ---\r\n"
+    "# off = play them, auto = solve each as it starts, key = the skip key\r\n"
+    "# (RACACIT_BIND_SKIP_PUZZLE, F2) or L3 + R3 on a controller solves the current one.\r\n"
+    "RACACIT_SKIP_PUZZLES=off\r\n";
 
 static const char* kIniTemplate =
     "# RACiT Launcher options (NAME=value)\r\n"
