@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <charconv>
 #include <cstdio>
 #include <cstdint>
 #include <cstdlib>
@@ -19,6 +20,7 @@
 #include <iterator>
 #include <map>
 #include <mutex>
+#include <regex>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -425,15 +427,18 @@ bool process_alive(long pid)
 // that couldn't publish its archive used it for its session.
 void remove_old_temporaries(const std::filesystem::path& folder)
 {
+    static const std::regex name_pattern(
+        R"(^\.global_cached-[0-9]+-[0-9a-f]{1,16}-[0-9a-f]{8}\.psarc\.([0-9]+)-[0-9]+\.tmp(\.ok)?$)");
     std::error_code error;
     for (const auto& entry : std::filesystem::directory_iterator(folder, error)) {
         const std::string n = entry.path().filename().string();
-        if (n.empty() || n[0] != '.' || n.find(".tmp") == std::string::npos) continue;
-        const size_t dash = n.rfind('-', n.find(".tmp"));
-        const size_t dot = dash == std::string::npos ? std::string::npos : n.rfind('.', dash);
-        if (dot == std::string::npos) continue;
-        const long pid = std::strtol(n.c_str() + dot + 1, nullptr, 10);
-        if (!process_alive(pid)) std::filesystem::remove(entry.path(), error);
+        std::smatch match;
+        if (!std::regex_match(n, match, name_pattern)) continue;
+        const char* first = n.data() + match.position(1);
+        int pid = 0;
+        const auto parsed = std::from_chars(first, first + match.length(1), pid);
+        if (parsed.ec == std::errc() && pid > 0 && !process_alive(pid))
+            std::filesystem::remove(entry.path(), error);
     }
 }
 
