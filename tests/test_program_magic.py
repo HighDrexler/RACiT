@@ -35,7 +35,7 @@ class ProgramMagic(unittest.TestCase):
         cls.tmp = tempfile.TemporaryDirectory()
         src = Path(cls.tmp.name) / 'check.cpp'
         src.write_text(CHECKER, encoding='utf-8')
-        cls.exe = str(Path(cls.tmp.name) / 'check')
+        cls.exe = str(Path(cls.tmp.name) / 'check.exe')   # .exe: clang for MSVC writes -o's name as given
         subprocess.run([CXX, '-std=c++17', '-I', str(ROOT / 'launcher' / 'src'), str(src), '-o', cls.exe], check=True)
 
     @classmethod
