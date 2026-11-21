@@ -27,6 +27,7 @@ import sys
 import time
 
 
+SLOT = 7   # s: frames must advance in every slot this long at the end of the run
 MARKER = '.mac_user_launch-work'   # what this script made, so it may clear it next time
 
 
@@ -74,7 +75,7 @@ def main():
     ap.add_argument('--work', required=True); ap.add_argument('--update')
     ap.add_argument('--installed', help="the game's HDD install (hdd0/game/BCUS98124 of a profile that has played)")
     ap.add_argument('--seconds', type=float, default=60, help='watched after the first drawn frame')
-    ap.add_argument('--alive', type=float, default=20, help='frames must still be coming in this last part')
+    ap.add_argument('--alive', type=float, default=21, help='frames must keep coming in every 7 s of this last part')
     ap.add_argument('--cap', type=float, default=600, help='at most this long in all (fit it under the job timeout)')
     o = ap.parse_args()
     build, work = os.path.abspath(o.build), os.path.abspath(o.work)
@@ -151,9 +152,19 @@ def main():
     tex = max([int(t) for t in re.findall(r'\[rsx-stats\].*?texups=(\d+)', text)] or [-1])
     print('register-file draw path: %s' % ('yes' if path else 'NO'))
     print('texture uploads (max texups): %s' % (tex if tex >= 0 else 'no [rsx-stats] line'))
-    recent = [f for t, f in flips if t >= end_at - o.alive]
-    alive = len(recent) >= 2 and recent[-1] > recent[0]
-    print('frames in the last %.0f s: %s' % (o.alive, '%d' % (recent[-1] - recent[0]) if len(recent) >= 2 else 'no [rsx-stats] lines'))
+    # Frames have to keep coming all the way to the end: in each SLOT seconds of the last
+    # --alive seconds a stats line with more flips than the one before ([rsx-stats] comes every
+    # 5 s; the slot leaves room for that and the 2 s this loop sleeps).
+    slots, alive = [], True
+    t = end_at - o.alive
+    while t < end_at - 0.5:
+        prev = [f for tt, f in flips if tt < t]
+        inside = [f for tt, f in flips if t <= tt < t + SLOT]
+        moved = bool(inside) and inside[-1] > (prev[-1] if prev else -1)
+        slots.append('%d' % (inside[-1] - prev[-1]) if inside and prev else '-' if not inside else 'new')
+        alive &= moved
+        t += SLOT
+    print('frames per %d s in the last %.0f s: %s' % (SLOT, o.alive, ' '.join(slots) or 'none'))
     if drawing_at is not None:
         print('drawing %.0f s after start, watched %.0f s' % (drawing_at - started, end_at - drawing_at))
     if exited is not None:

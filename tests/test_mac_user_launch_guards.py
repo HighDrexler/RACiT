@@ -67,6 +67,7 @@ DRAWS = 'echo "[RSX vulkan] register-file draw engine path"\n'
 STATS = 'echo "[rsx-stats] methods=1 draws=1 flips=0 gcmflips=$n clears=0 texups=5 texMB=0 us=1"'
 
 
+@unittest.skipUnless(sys.platform == 'darwin', 'the fake game is a shell script, and the check runs /usr/bin/pgrep')
 class Verdicts(Guards):
     """What it makes of a game that keeps drawing, hangs after its first frames, or crashes:
     a fake RaCACiT that prints the log lines the check reads."""
@@ -77,7 +78,7 @@ class Verdicts(Guards):
         prog.chmod(0o755)
 
     def verdict(self, *extra):
-        result = self.run_script(Path(self.tmp.name) / 'w', '--seconds', '4', '--alive', '4', '--cap', '30', *extra)
+        result = self.run_script(Path(self.tmp.name) / 'w', '--seconds', '8', '--alive', '7', '--cap', '40', *extra)
         return result.returncode, result.stdout + result.stderr
 
     def test_keeps_drawing_passes(self):
@@ -88,6 +89,12 @@ class Verdicts(Guards):
     def test_hang_after_first_frames_fails(self):
         self.fake('n=10; %s; n=20; %s; sleep 60\n' % (STATS, STATS))
         code, out = self.verdict()
+        self.assertEqual(code, 1, out)
+
+    def test_freeze_near_the_end_fails(self):
+        # Draws for about 12 s, then stops 10 s before the end of a 22 s watch.
+        self.fake('n=0; for i in $(seq 12); do n=$((n+10)); %s; sleep 1; done; sleep 60\n' % STATS)
+        code, out = self.verdict('--seconds', '22', '--alive', '14')
         self.assertEqual(code, 1, out)
 
     def test_crash_fails(self):
