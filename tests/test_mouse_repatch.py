@@ -186,7 +186,7 @@ class MouseRepatch(unittest.TestCase):
                 fresh = camera_function(func, names['MOUSE_CAMERAS']['lock'])
                 path.write_text(text.replace(fresh, self.old_lock(func), 1), encoding='utf-8')
                 out = self.patch_update120(directory) if update120 else self.patch(directory)
-                self.assertIn('earlier lock camera patch taken out', out)
+                self.assertIn('earlier lock camera patch replaced', out)
                 text = self.check_lock(path, func)
                 # And again: nothing more goes in.
                 self.patch_update120(directory) if update120 else self.patch(directory)
@@ -198,6 +198,64 @@ class MouseRepatch(unittest.TestCase):
             path = self.lift(directory, camera_function('func_000459D4', names['MOUSE_CAMERAS']['follow']))
             self.patch(directory)
             self.check_lock(path, names['_DISC_CAMERAS']['lock'])
+
+    def test_strafe_pitch_the_other_way_up_is_replaced(self):
+        """A lift patched when strafe's pitch went the other way up (+=) gets it the way up of the
+        recipe now, once, and nothing else changes."""
+        names = recipe()
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.lift(directory, camera_function('func_000459D4', names['MOUSE_CAMERAS']['follow']))
+            self.patch(directory)
+            now = path.read_text(encoding='utf-8')
+            want = [e for e in names['MOUSE_CAMERAS']['strafe'] if 'mouse_angles[1]' in e[2]][0][2]
+            self.assertIn(want, now)
+            line = want + '   /* racacit mouse: strafe */'
+            self.assertEqual(now.count(line), 1)
+            other = want.replace('-=', '+=') if '-=' in want else want.replace('+=', '-=')
+            path.write_text(now.replace(line, other + '   /* racacit mouse: strafe */'), encoding='utf-8')
+            out = self.patch(directory)
+            self.assertIn('earlier strafe camera patch replaced', out)
+            self.assertEqual(path.read_text(encoding='utf-8'), now)
+
+    def test_494cfa6_follow_patch_is_replaced(self):
+        """The lift the shipped v1.0.0 USA Windows exes came from: patched by 494cfa6's recipe
+        (text as it was there), with its three declarations at the top."""
+        names = recipe()
+        fn = camera_function('func_000459D4', names['MOUSE_CAMERAS']['follow'])
+        changes = (   # 494cfa6:scripts/patch_lift.py, the follow-camera distances step
+            ('void func_000459D4(ppu_context* ctx) {',
+             'void func_000459D4(ppu_context* ctx) {\n        double mouse_angles[2] = {};\n        const int mouse_direct = racit_camera_take(mouse_angles, SDL_GetPerformanceCounter() * (1000000000.0 / SDL_GetPerformanceFrequency()));'),
+            ('        ctx->lr = 0x00045D6C; func_00633C34(ctx); DRAIN_TRAMPOLINE(ctx);',
+             '        if (mouse_direct) ctx->fpr[1] = -mouse_angles[0];\n        ctx->lr = 0x00045D6C; func_00633C34(ctx); DRAIN_TRAMPOLINE(ctx);'),
+            ('        ctx->fpr[3] = ppu_fp_single(ppu_fsub(ctx->fpr[31], ctx->fpr[1]));',
+             '''        if (mouse_direct) {
+            uint32_t lb=vm_read32(ctx->gpr[30]-0x7F24), hb=vm_read32(ctx->gpr[30]-0x7F1C);
+            float lo,hi; memcpy(&lo,&lb,4); memcpy(&hi,&hb,4);
+            const double target=mouse_angles[1]-ctx->fpr[1];
+            ctx->fpr[31]=fmin(fmax(target,lo),hi)+ctx->fpr[1];
+        }
+        ctx->fpr[3] = ppu_fp_single(ppu_fsub(ctx->fpr[31], ctx->fpr[1]));'''),
+        )
+        for old, new in changes:
+            self.assertEqual(fn.count(old), 1, old)
+            fn = fn.replace(old, new, 1)
+        decls = ('extern "C" int racit_camera_take(double*, unsigned long long);\n'
+                 'extern "C" unsigned long long SDL_GetPerformanceCounter(void);\n'
+                 'extern "C" unsigned long long SDL_GetPerformanceFrequency(void);\n')
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.lift(directory, fn)
+            text = path.read_text(encoding='utf-8')
+            i = text.index('\n') + 1
+            path.write_text(text[:i] + decls + text[i:], encoding='utf-8')
+            out = self.patch(directory)
+            self.assertIn('v1.0.0 follow camera patch taken out', out)
+            text, follow = self.follow_of(path)
+            self.assertEqual(len(re.findall(r'double mouse_angles\[2\]', follow)), 1, follow)
+            self.assertNotIn('racit_camera_take', text)
+            self.assertEqual(text.count('extern "C" unsigned long long SDL_GetPerformanceCounter(void);'), 1)
+            self.assertIn('racit_camera_turn("follow"', follow)
+            self.patch(directory)
+            self.assertEqual(path.read_text(encoding='utf-8'), text)
 
     def test_unknown_old_patch_stops(self):
         names = recipe()

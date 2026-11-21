@@ -82,7 +82,7 @@ MOUSE_CAMERAS = {
              ('before', 0x3F8, 'ctx->fpr[1] += mouse_angles[0];')),
     # Strafe (L2, over the shoulder): yaw and pitch steps, which the game then limits.
     'strafe': (('after', 0x300, 'ctx->fpr[1] -= mouse_angles[0];'),
-               ('after', 0x3A4, 'ctx->fpr[1] += mouse_angles[1];')),
+               ('after', 0x3A4, 'ctx->fpr[1] -= mouse_angles[1];')),   # the same way up as follow and the stick
     # The lock camera (class 0xC239BC): the yaw step, and its tilt. The tilt isn't an angle the
     # player holds: it follows the stick's vertical axis and springs back to level when the
     # stick does. The mouse's pitch goes into that axis (the stick's value after its dead zone,
@@ -152,8 +152,20 @@ OLD_FOLLOW_MOUSE = (
     '            ctx->fpr[31]=fmin(fmax(target,lo),hi)+ctx->fpr[1];\n'
     '        }\n',
     '        if (mouse_direct) ctx->fpr[1] = -mouse_angles[0];\n',
+    # 494cfa6 and 3efe71f (before 1.0.0): what the shipped v1.0.0 USA Windows exes were built from.
+    '        double mouse_angles[2] = {};\n'
+    '        const int mouse_direct = racit_camera_take(mouse_angles, SDL_GetPerformanceCounter() * (1000000000.0 / SDL_GetPerformanceFrequency()));\n',
+    '        if (mouse_direct) {\n'
+    '            uint32_t lb=vm_read32(ctx->gpr[30]-0x7F24), hb=vm_read32(ctx->gpr[30]-0x7F1C);\n'
+    '            float lo,hi; memcpy(&lo,&lb,4); memcpy(&hi,&hb,4);\n'
+    '            const double target=mouse_angles[1]-ctx->fpr[1];\n'
+    '            ctx->fpr[31]=fmin(fmax(target,lo),hi)+ctx->fpr[1];\n'
+    '        }\n',
 )
 OLD_MOUSE_DECL = 'extern "C" int racit_camera_take(double*, unsigned long long);\n'
+# 494cfa6 also declared SDL's counter beside it.
+OLD_SDL_DECL = ('extern "C" unsigned long long SDL_GetPerformanceCounter(void);\n'
+                'extern "C" unsigned long long SDL_GetPerformanceFrequency(void);\n')
 
 
 def strip_old_follow_mouse(fn, func):
@@ -187,6 +199,32 @@ def mouse_camera_edit(fn, start, name, edit):
     return fn[:lines[0]] + '        ' + code + fn[lines[0]:]
 
 
+MOUSE_HEAD = '        double mouse_angles[2] = {0, 0}; int mouse_taken = 0, mouse_direct = 0;   /* racacit */\n'
+
+
+def strip_camera_marks(fn, name):
+    """fn without this script's own edits for camera name (and its mouse_angles line)."""
+    mark = re.escape('/* racacit mouse: %s */' % name)
+    fn = re.sub(r'(?ms)^        if \(!mouse_taken\) \{[^\n]*\n        if \(mouse_direct\) .*?' + mark + r'\n', '', fn)
+    fn = re.sub(r'(?m)^        if \(racit_camera_peek\([^\n]*' + mark + r'\n', '', fn)
+    if 'racacit mouse:' not in fn:
+        fn = fn.replace(MOUSE_HEAD, '', 1)
+    return fn
+
+
+def add_camera_edits(fn, func, name):
+    """fn with camera name's recipe put in, or None when a place for it is missing."""
+    start = int(func[5:], 16)
+    for edit in MOUSE_CAMERAS[name]:
+        fn = mouse_camera_edit(fn, start, name, edit)
+        if fn is None:
+            return None
+    if any(e[2] != 'peek' for e in MOUSE_CAMERAS[name]) and 'double mouse_angles[2]' not in fn:
+        head = 'void %s(ppu_context* ctx) {\n' % func
+        fn = fn.replace(head, head + MOUSE_HEAD, 1)
+    return fn
+
+
 def apply_mouse_cameras(recomp, profile_id):
     """Puts every camera's mouse hook into the lift; stops the build if one is missing."""
     funcs = MOUSE_CAMERA_FUNCS.get(profile_id)
@@ -202,36 +240,35 @@ def apply_mouse_cameras(recomp, profile_id):
             if not sp:
                 continue
             fn = src[sp[0]:sp[2]]
-            edits = MOUSE_CAMERAS[name]
-            marks = fn.count('/* racacit mouse: %s */' % name)
-            if marks == len(edits):
-                done.add(name); continue
-            if marks:   # patched by an earlier recipe with fewer edits (the lock camera's yaw only)
-                fn = re.sub(r'(?m)^        if \(!mouse_taken\) \{[^\n]*\n        if \(mouse_direct\) [^\n]*/\* racacit mouse: %s \*/\n'
-                            % re.escape(name), '', fn)
-                if '/* racacit mouse: %s */' % name in fn:
+            mark = '/* racacit mouse: %s */' % name
+            if mark in fn:
+                # Patched before: up to date when taking our edits out and putting this recipe's
+                # in gives the same function; otherwise an earlier recipe (the lock camera's yaw
+                # only, strafe's pitch the other way up) is replaced.
+                bare = strip_camera_marks(fn, name)
+                if mark in bare:
                     failed.append('%s (%s: an earlier patch this script cannot take out)' % (name, func)); continue
-                print('patch_lift #22: %s: the earlier %s camera patch taken out' % (func, name))
+                fresh = add_camera_edits(bare, func, name)
+                if fresh == fn:
+                    done.add(name); continue
+                if fresh is None:
+                    failed.append('%s (%s)' % (name, func)); continue
+                src = src[:sp[0]] + fresh + src[sp[2]:]
+                print('patch_lift #22: %s: the earlier %s camera patch replaced' % (func, name))
+                done.add(name); changed = True; continue
             stripped = strip_old_follow_mouse(fn, func)
             if stripped is not fn:
                 src = src[:sp[0]] + stripped + src[sp[2]:]
                 changed = True
                 sp = func_span(src, func)
                 fn = src[sp[0]:sp[2]]
-            start = int(func[5:], 16)
-            for edit in MOUSE_CAMERAS[name]:
-                fn = mouse_camera_edit(fn, start, name, edit)
-                if fn is None:
-                    break
+            fn = add_camera_edits(fn, func, name)
             if fn is None:
                 failed.append('%s (%s)' % (name, func)); continue
-            if any(e[2] != 'peek' for e in MOUSE_CAMERAS[name]) and 'double mouse_angles[2]' not in fn:
-                head = 'void %s(ppu_context* ctx) {\n' % func
-                fn = fn.replace(head, head + '        double mouse_angles[2] = {0, 0}; int mouse_taken = 0, mouse_direct = 0;   /* racacit */\n', 1)
             src = src[:sp[0]] + fn + src[sp[2]:]
             done.add(name); changed = True
         if changed:
-            src = src.replace(OLD_MOUSE_DECL, '')
+            src = src.replace(OLD_MOUSE_DECL + OLD_SDL_DECL, '').replace(OLD_MOUSE_DECL, '')
             if 'racit_mouse_now(void)' not in src:
                 i = src.index('\n', src.index('#include')) + 1
                 src = src[:i] + MOUSE_DECLS + src[i:]

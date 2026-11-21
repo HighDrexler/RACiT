@@ -193,6 +193,21 @@ class Game:
             time.sleep(0.5)
         return False
 
+    def settle(self, least, most):
+        """After a level load: at least `least` s, then on while the game is still loading (a
+        file read in the last 5 s), up to `most` s. False when it is still loading at `most`."""
+        start = time.time()
+        while True:
+            if self.p.poll() is not None:
+                sys.exit('the game exited (%s); see %s' % (self.p.returncode, self.log))
+            el = time.time() - start
+            before = len(self.text()); time.sleep(5)
+            loading = re.search(r'\[fs\] (open|read)|levels/', self.text()[before:])
+            if el + 5 >= least and not loading:
+                return True
+            if el + 5 >= most:
+                return False
+
     def press(self, line):
         """A pad line ("mask polls lx ly rx ry"), once the previous one was taken."""
         end = time.time() + 10
@@ -239,6 +254,9 @@ class Game:
                 os.killpg(self.p.pid, signal.SIGKILL)
 
 
+PITCH_WAY = {}   # mode -> True when mouse down moved the picture down (rows > 0)
+
+
 def turns(g, mode, cameras, key, results):
     """Stand still, then the stick, then the mouse, with the mode's key held throughout."""
     if key:
@@ -249,6 +267,10 @@ def turns(g, mode, cameras, key, results):
     still = shift(a, b)
     g.press('0 6 128 128 255 128'); time.sleep(0.8); s1 = g.capture(mode + '-stick')
     stick = shift(b, s1)
+    # The stick's vertical axis (down), for which way up the mouse's pitch should go.
+    time.sleep(0.5); v0 = g.capture(mode + '-stick-v0')
+    g.press('0 6 128 128 128 255'); time.sleep(0.8); v1 = g.capture(mode + '-stick-v1')
+    stick_tilt = vshift(v0, v1)
     time.sleep(0.5)
     lines_at = len(g.text())
     m0 = g.capture(mode + '-mouse-0'); g.mouse(40, 0); time.sleep(0.6); m1 = g.capture(mode + '-mouse-1')
@@ -264,15 +286,26 @@ def turns(g, mode, cameras, key, results):
     yaw = any(c in cameras and abs(float(x)) > 0 for c, x, _ in turned)
     pitch_hook = any(c in cameras and abs(float(y)) > 0 for c, _, y in re.findall(r'\[mouse\] (\S+) turn (\S+) (\S+)', g.text()[mark:]))
     pitch_moved = abs(tilt[0]) >= 3 and tilt[1] < tilt[2]
+    # Which way: mouse down has to tilt the picture the way the stick's down does, and where a
+    # held key masks the scripted stick, the way follow's mouse did (PITCH_WAY, from follow).
+    stick_tilted = not key and abs(stick_tilt[0]) >= 3 and stick_tilt[1] < stick_tilt[2]
+    if stick_tilted:
+        way_ok = (tilt[0] > 0) == (stick_tilt[0] > 0)
+    else:
+        way_ok = mode != 'follow' and 'follow' in PITCH_WAY and (tilt[0] > 0) == PITCH_WAY['follow']
+    if pitch_moved and mode == 'follow':
+        PITCH_WAY['follow'] = tilt[0] > 0
     moved = lambda m: abs(m[0]) >= max(4, 3 * abs(still[0])) and m[1] < m[2]
     # The stick must turn the picture too, the same way as the mouse. With a key held the
     # runtime counts a person at the pad and ignores the scripted stick, so it can't be
     # checked in those modes (strafe).
     stick_ok = True if key else moved(stick) and (stick[0] > 0) == (mouse[0] > 0)
-    ok = yaw and pitch_hook and pitch_moved and moved(mouse) and stick_ok
-    results.append((mode, ok, 'hook %s (yaw %s, pitch %s), shift: still %d, stick %s, mouse %d, pitch %d rows'
+    ok = yaw and pitch_hook and pitch_moved and way_ok and moved(mouse) and stick_ok
+    results.append((mode, ok, 'hook %s (yaw %s, pitch %s), shift: still %d, stick %s, mouse %d, pitch %d rows (%s %s)'
                     % ('/'.join(hooked) or 'none', yaw, pitch_hook, still[0],
-                       'n/a (key held)' if key else '%d' % stick[0], mouse[0], tilt[0])))
+                       'n/a (key held)' if key else '%d' % stick[0], mouse[0], tilt[0],
+                       'stick %d rows' % stick_tilt[0] if stick_tilted else 'follow mouse',
+                       'same way' if way_ok else 'WRONG WAY')))
     time.sleep(4)   # the mode's key is let go by now
 
 
@@ -310,7 +343,10 @@ def main():
         g.press('0x%04X' % CROSS)   # LOAD: the save's level
         if not g.wait_for(r'levels/(?!front_end)', 120):
             sys.exit('no level loaded after LOAD; see ' + g.log)
-        time.sleep(o.level_wait)
+        # The clock starts once the level is in, and runs on while it is still loading.
+        if not g.settle(o.level_wait, 4 * o.level_wait):
+            print('INCONCLUSIVE: still loading %d s after the level started' % (4 * o.level_wait))
+            return 2
         # The pause menu first: a held key (strafe's) counts as a person at the pad, and the
         # runtime then ignores scripted pad input (START, the stick) for 20 s.
         mode, key, cameras = MODES[0]
