@@ -54,6 +54,10 @@ extern "C" void ppu_threads_dump_stacks(ppu_context* main_ctx);
 #include <sys/mman.h>
 #include <unistd.h>   /* _exit */
 #endif
+#if defined(__linux__) && !defined(__ANDROID__)
+#include <filesystem>
+#include <fstream>
+#endif
 
 #ifdef __ANDROID__
 /* SDLActivity loads libmain.so and calls SDL_main: SDL.h renames main(). */
@@ -1586,8 +1590,47 @@ extern "C" int racacit_entry(void)
 #endif
 #endif
 
+#if defined(__linux__) && !defined(__ANDROID__)
+static void linux_load_settings()
+{
+    namespace fs = std::filesystem;
+    fs::path path;
+    if (const char* file = getenv("RACACIT_SETTINGS_FILE")) {
+        if (!*file) return;
+        path = file;
+    } else {
+        const char* config = getenv("XDG_CONFIG_HOME");
+        fs::path dir = config ? fs::path(config) : fs::path();
+        if (!dir.is_absolute()) {
+            const char* home = getenv("HOME");
+            if (!home || !*home) return;
+            dir = fs::path(home) / ".config";
+        }
+        dir /= "racit";
+        std::error_code error;
+        fs::create_directories(dir, error);
+        if (error) return;
+        path = dir / "settings.txt";
+        setenv("RACACIT_SETTINGS_FILE", path.c_str(), 0);
+    }
+
+    std::ifstream file(path);
+    for (std::string line; std::getline(file, line); ) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.compare(0, 8, "RACACIT_") != 0) continue;
+        const size_t separator = line.find('=');
+        if (separator == std::string::npos) continue;
+        line[separator] = '\0';
+        setenv(line.c_str(), line.c_str() + separator + 1, 0);
+    }
+}
+#endif
+
 int main(int argc, char** argv)
 {
+#if defined(__linux__) && !defined(__ANDROID__)
+    linux_load_settings();
+#endif
 #if defined(__APPLE__) && defined(RACACIT_HAVE_VULKAN)
     /* Preserve IEEE shader guards before SDL or the Vulkan loader starts.
      * Pending asynchronous pipelines currently skip draws in this backend. */

@@ -236,6 +236,12 @@ folder. For 1.20, use the same disc root and a separate writable installed-data 
 `PS3_UPDATE_PARAM_SFO` to that installed metadata file and `PS3_HDD0_HOME_ROOT` to the 1.00
 HDD folder's `home` directory to share saves. Pass the respective decrypted EBOOT to each binary.
 
+Both Linux versions load and save in-game settings in `$XDG_CONFIG_HOME/racit/settings.txt`
+(`~/.config/racit/settings.txt` by default). Set `RACACIT_SETTINGS_FILE` to use a different
+file, or set it to an empty value to disable settings persistence for that run. The file
+loads `RACACIT_` settings, including key bindings and mouse sensitivity. Explicit
+environment values take precedence.
+
 ## Keyboard menu artwork
 
 Prepare a separate archive from your own game dump with `python scripts/prepare_menu_keycaps.py ORIGINAL_GLOBAL_CACHED.PSARC PREPARED_GLOBAL_CACHED.PSARC`. The output directory must exist. The tool checks the bundled menu source and compiled actions, preserves the original archive, and records a receipt beside the prepared file. Repeating the command verifies and reuses the matching output. A changed input or output requires a fresh output path.
