@@ -396,7 +396,7 @@ if(ZLIB_SOURCES)
     target_include_directories(${PROJECT_NAME} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../tools/zlib")
 endif()
 
-if(APPLE)
+if(APPLE OR (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ZLIB_SOURCES))
     find_package(ZLIB REQUIRED)
     target_link_libraries(${PROJECT_NAME} PRIVATE ZLIB::ZLIB)
     target_link_libraries(ps3recomp_runtime PRIVATE ZLIB::ZLIB)

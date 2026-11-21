@@ -28637,18 +28637,14 @@ index 11a7480..2251ce0 100644
      for (unsigned i = 0; i < 8 * sizeof mask && i < CPU_SETSIZE; i++)
          if (mask & ((DWORD_PTR)1 << i)) CPU_SET(i, &set);
 diff --git a/runtime/ppu/ppu_fs.cpp b/runtime/ppu/ppu_fs.cpp
-index e8f6c2b..50138e6 100644
+index e8f6c2bd..23836588 100644
 --- a/runtime/ppu/ppu_fs.cpp
 +++ b/runtime/ppu/ppu_fs.cpp
-@@ -18,8 +18,16 @@
+@@ -18,8 +18,12 @@
  #include "ps3emu/nid.h"      /* ps3_compute_nid */
  #include "ps3emu/guest_call.h" /* ps3_invoke_guest: AIO completion is a guest OPD */
  #include "sdata_decrypt.h"   /* SDATA/EDAT (NPD) decryption for cellFsSdataOpen */
-+#ifdef __APPLE__
 +#include <zlib.h>   /* PSARC manifests (DualSense routing) */
-+#else
-+#include "../../../zlib/zlib.h"   /* PSARC manifests (DualSense routing) */
-+#endif
 +#include <string>
 +#include <vector>
  #include <stdint.h>
@@ -28657,7 +28653,7 @@ index e8f6c2b..50138e6 100644
  #include <string.h>
  #include <stdlib.h>
  #include <sys/stat.h>
-@@ -103,6 +111,15 @@ static void host_path(char* out, size_t cap, const char* guest)
+@@ -103,6 +107,15 @@ static void host_path(char* out, size_t cap, const char* guest)
          return;
      }
  
@@ -28673,7 +28669,7 @@ index e8f6c2b..50138e6 100644
      /* /dev_flash is FIRMWARE, not game data — mapping it into the game root (the
       * old behaviour) makes every firmware lookup miss. YDKJ's FMOD asks for
       * /dev_flash/sys/external/flashMP3.pic and, on a miss, prints "mp3 failed to
-@@ -145,13 +162,65 @@ static void host_path(char* out, size_t cap, const char* guest)
+@@ -145,13 +158,65 @@ static void host_path(char* out, size_t cap, const char* guest)
      snprintf(out, cap, "%s/%s", ppu_vfs_root, rel);
      for (char* p = out; *p; p++) if (*p == '\\') *p = '/';
      ps3_vfs_ps3game_fallback(out, cap);
@@ -28740,7 +28736,7 @@ index e8f6c2b..50138e6 100644
  static DIR*  g_dirs[FS_MAX];
  static char  g_dir_path[FS_MAX][1024];   /* host path per open dir (for readdir stat) */
  
-@@ -174,6 +243,8 @@ static void cellFsOpen(ppu_context* ctx)
+@@ -174,6 +239,8 @@ static void cellFsOpen(ppu_context* ctx)
      uint32_t flags  = (uint32_t)ctx->gpr[4];
      uint32_t fd_ptr = (uint32_t)ctx->gpr[5];
      host_path(hpath, sizeof hpath, gpath);
@@ -28749,7 +28745,7 @@ index e8f6c2b..50138e6 100644
  
      /* NPDRM: see the note in sys_fs.c -- an EDAT is decrypted once into a cache
       * file and that is opened in its place. */
-@@ -206,9 +277,20 @@ static void cellFsOpen(ppu_context* ctx)
+@@ -206,9 +273,20 @@ static void cellFsOpen(ppu_context* ctx)
              return;
          }
      }
@@ -28770,7 +28766,7 @@ index e8f6c2b..50138e6 100644
          ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_ENOENT; return;
      }
      const char* fmode = (acc == CELL_FS_O_RDWR)
-@@ -230,6 +312,9 @@ static void cellFsOpen(ppu_context* ctx)
+@@ -230,6 +308,9 @@ static void cellFsOpen(ppu_context* ctx)
       * movies) is diagnosed from the opener: its sibling read path is the one
       * that is not running. */
      if (fd >= 0 && fd < FS_MAX) { strncpy(g_fd_path[fd], gpath, sizeof g_fd_path[fd]-1); g_fd_path[fd][sizeof g_fd_path[fd]-1]=0; }
@@ -28780,7 +28776,7 @@ index e8f6c2b..50138e6 100644
      { char who[64] = "?";
        if (getenv("FS_CALLER")) { ppu_guest_caller(who, sizeof who);
            fprintf(stderr, "[fs] open '%s' -> fd %d  (opened by %s)\n", gpath, fd, who);
-@@ -371,6 +456,361 @@ static inline void fs_prefault(uint32_t buf, uint64_t len)
+@@ -371,6 +452,361 @@ static inline void fs_prefault(uint32_t buf, uint64_t len)
      p[len - 1] = p[len - 1];
  }
  
@@ -29142,7 +29138,7 @@ index e8f6c2b..50138e6 100644
  static void cellFsRead(ppu_context* ctx)
  {
      int fd          = (int)(uint32_t)ctx->gpr[3];
-@@ -380,9 +820,73 @@ static void cellFsRead(ppu_context* ctx)
+@@ -380,9 +816,73 @@ static void cellFsRead(ppu_context* ctx)
      if (fd < 0 || fd >= FS_MAX || !g_files[fd]) { ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_EIO; return; }
      uint64_t raw_nbytes = ctx->gpr[5];
      long fpos_before = ftell(g_files[fd]);
@@ -29216,7 +29212,7 @@ index e8f6c2b..50138e6 100644
      /* PS3_FSLOG_EOF=<fd>,<bytes>: report end-of-file past <bytes> on one descriptor.
       * The intro cinematic is 28 seconds and this port renders it at a few frames
       * a second, so it cannot be watched to its end -- truncating the stream makes
-@@ -406,9 +910,9 @@ static void cellFsRead(ppu_context* ctx)
+@@ -406,9 +906,9 @@ static void cellFsRead(ppu_context* ctx)
        if (wfd >= 0 && fd == wfd)
            fprintf(stderr, "[fsread] fd=%d want=%llu got=%zu pos=%ld\n",
                    fd, (unsigned long long)nbytes, n, fpos_before); }
@@ -29228,7 +29224,7 @@ index e8f6c2b..50138e6 100644
  #endif
      /* Per-fd totals, not just the first 50 lines. The flat cap made "this file is
       * opened and never read" unfalsifiable: reads on a later-opened fd fall off
-@@ -533,6 +1037,7 @@ static void cellFsLseek(ppu_context* ctx)
+@@ -533,6 +1033,7 @@ static void cellFsLseek(ppu_context* ctx)
      int worigin = (wh == CELL_FS_SEEK_END) ? SEEK_END : (wh == CELL_FS_SEEK_CUR) ? SEEK_CUR : SEEK_SET;
      fseek(g_files[fd], (long)off, worigin);
      long p = ftell(g_files[fd]);
@@ -29236,7 +29232,7 @@ index e8f6c2b..50138e6 100644
      if (pos_ptr) vm_write64(pos_ptr, (uint64_t)p);
      ctx->gpr[3] = CELL_OK;
  }
-@@ -600,7 +1105,7 @@ static void cellFsFstat(ppu_context* ctx)
+@@ -600,7 +1101,7 @@ static void cellFsFstat(ppu_context* ctx)
                fprintf(stderr, "[fs] fstat fd=%d size %ld -> capped %ld (FS_FSTAT_CAP)\n", fd, sz, c);
                sz = c; } } }
      if (sb) write_stat(sb, CELL_FS_S_IFREG | 0x1B6, (uint64_t)sz);
