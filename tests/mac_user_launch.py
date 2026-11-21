@@ -87,18 +87,16 @@ def main():
     if o.installed:
         subprocess.run(['/bin/cp', '-c', '-R', o.installed, os.path.join(hdd0, 'game', 'BCUS98124')], check=True)
     vfs = os.path.abspath(o.game)
-    if o.update:   # the disc with the update's PARAM.SFO, its USRDIR installed in hdd0 (as the game installs it)
-        vfs = os.path.join(work, 'vfs'); os.makedirs(os.path.join(vfs, 'PS3_GAME'))
-        for e in os.listdir(o.game):
-            if e != 'PS3_GAME':
-                os.symlink(os.path.join(os.path.abspath(o.game), e), os.path.join(vfs, e))
-        for e in os.listdir(os.path.join(o.game, 'PS3_GAME')):
-            if e != 'PARAM.SFO':
-                os.symlink(os.path.join(os.path.abspath(o.game), 'PS3_GAME', e), os.path.join(vfs, 'PS3_GAME', e))
-        shutil.copy(os.path.join(o.update, 'PARAM.SFO'), os.path.join(vfs, 'PS3_GAME'))
+    update_mounts = {}
+    if o.update:
         install = os.path.join(hdd0, 'game', 'BCUS98124'); os.makedirs(install, exist_ok=True)
         shutil.copy(os.path.join(o.update, 'PARAM.SFO'), install)
         subprocess.run(['/bin/cp', '-c', '-R', os.path.join(o.update, 'USRDIR'), install], check=True)
+        home = os.path.join(work, 'shared-home'); os.makedirs(home)
+        update_mounts = {
+            'PS3_UPDATE_PARAM_SFO': os.path.join(install, 'PARAM.SFO'),
+            'PS3_HDD0_HOME_ROOT': home,
+        }
     settings = os.path.join(work, 'settings.txt'); open(settings, 'w').close()
     log = os.path.join(work, 'game.log')
     # The calling shell's environment minus anything the game or its libraries read.
@@ -116,6 +114,7 @@ def main():
     env.update({   # test switches only: offscreen, no audio
         'PS3RECOMP_VK_WINDOW': '0', 'SDL_VIDEODRIVER': 'dummy', 'SDL_MAC_BACKGROUND_APP': '1', 'SDL_AUDIODRIVER': 'dummy',
     })
+    env.update(update_mounts)
     p = subprocess.Popen([os.path.join(build, 'RaCACiT'), os.path.abspath(o.elf)], cwd=build, env=env,
                          stdin=subprocess.DEVNULL, stdout=open(log, 'wb'), stderr=subprocess.STDOUT, start_new_session=True)
     stats = re.compile(r'\[rsx-stats\].*?gcmflips=(\d+).*?texups=(\d+)')
