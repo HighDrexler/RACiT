@@ -23,7 +23,7 @@ someone is playing: it refuses when a game is already running.
 """
 import argparse, os, re, shutil, signal, subprocess, sys, time
 
-START, CROSS = 0x0008, 0x4000
+SELECT, START, CROSS = 0x0001, 0x0008, 0x4000
 # (mode, key held through it with the test hook, cameras whose hook may answer in that mode).
 # Mouse3 (the right button) is strafe, L2, in the default keyboard and mouse controls.
 MODES = (('follow', None, ('follow',)), ('strafe', 'Mouse3', ('strafe',)))
@@ -335,6 +335,30 @@ def turns(g, mode, cameras, key, results):
     time.sleep(4.0)   # the mode's key is let go by now (3 s after the last press)
 
 
+def game_map(g, results):
+    """The map (SELECT) has no hooked camera: the mouse pans it through the right stick, no
+    camera turns meanwhile, and none turns after it closes. Inconclusive when SELECT showed
+    nothing new (the map didn't open, so nothing was tested)."""
+    before = g.capture('map-before')
+    g.press('0x%04X 4' % SELECT); time.sleep(3.0)
+    m0 = g.capture('map-0'); time.sleep(0.6); m1 = g.capture('map-1')
+    opened = shift(before, m0)[2] > 4 * max(1.0, shift(m0, m1)[2])   # the picture changed, then held still
+    still = shift(m0, m1)
+    turns_at = len(re.findall(r'\[mouse\] \S+ turn', g.text()))
+    for _ in range(60):   # ~1.5 s of steady motion to the right: a held push
+        g.mouse(6, 0); time.sleep(0.025)
+    time.sleep(0.2); m2 = g.capture('map-2')
+    pan = shift(m1, m2)
+    vpan = vshift(m1, m2)
+    turned = len(re.findall(r'\[mouse\] \S+ turn', g.text())) - turns_at
+    g.press('0x%04X 4' % SELECT); time.sleep(2.5)
+    after = len(re.findall(r'\[mouse\] \S+ turn', g.text())) - turns_at - turned
+    moved = (abs(pan[0]) >= max(4, 3 * abs(still[0])) and pan[1] < pan[2]) or (abs(vpan[0]) >= 3 and vpan[1] < vpan[2])
+    ok = None if not opened else (moved and turned == 0 and after == 0)
+    results.append(('map', ok, '%s, pan %d columns / %d rows (still %d), camera turns on the map %d, after closing %d'
+                    % ('opened' if opened else 'SELECT showed no map (untested)', pan[0], vpan[0], still[0], turned, after)))
+
+
 def menu(g, results):
     """The pause menu takes no mouse turn, and nothing turns when play resumes."""
     g.press('0x%04X 4' % START); time.sleep(2.5)
@@ -355,6 +379,7 @@ def main():
     ap.add_argument('--installed', help="the game's HDD install folder (hdd0/game/BCUS98124 of a profile that has played)")
     ap.add_argument('--settings'); ap.add_argument('--vk-icd')
     ap.add_argument('--level-wait', type=float, default=45)
+    ap.add_argument('--map', action='store_true', help='also check the mouse pans the map (SELECT)')
     o = ap.parse_args()
     check_inputs(o)
     for name in ('RaCACiTRecomp', 'racit-player'):
@@ -378,6 +403,8 @@ def main():
         mode, key, cameras = MODES[0]
         turns(g, mode, cameras, key, results)
         menu(g, results)
+        if o.map:
+            game_map(g, results)
         for mode, key, cameras in MODES[1:]:
             turns(g, mode, cameras, key, results)
     finally:
