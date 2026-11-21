@@ -170,6 +170,7 @@ static const char* kSettingsTemplateRest =
     "# by hand are kept.\r\n"
     "#\r\n"
     "# GAME = the folder that contains your disc dump's PS3_GAME folder (set by Import).\r\n"
+    "# A relative GAME path starts in the launcher folder.\r\n"
     "# --- Cutscenes ---\r\n"
     "RACACIT_START_SKIPS_MOVIES=1\r\n"
     "RACACIT_ALL_CUTSCENES_SKIPPABLE=1\r\n";
@@ -232,7 +233,7 @@ GameInfo Store::game() const
 {
     GameInfo g;
     const std::string gs = settings.get("GAME");
-    g.root = gs.empty() ? game_copy() : upath(gs);
+    g.root = gs.empty() ? game_copy() : root / upath(gs);
     std::error_code ec;
     if (!fs::is_directory(g.root / L"PS3_GAME", ec)) {
         g.status = gs.empty() ? "Not imported yet" : "PS3_GAME not found in " + gs;
@@ -630,6 +631,7 @@ std::string Store::migrate_from(const fs::path& old, Progress* p, std::string* s
     if (!os.load()) return "No settings.txt in " + u8(old);
     const std::string mods_on = settings.get("RACACIT_MODS_ENABLED");
     const std::string hdd_src = os.get("PS3_HDD0_ROOT");
+    const std::string game_src = os.get("GAME");
     // The old file's lines (its comments too); what the launcher sets itself is left as a comment.
     SettingsFile ns = settings;
     ns.lines.clear();
@@ -639,6 +641,7 @@ std::string Store::migrate_from(const fs::path& old, Progress* p, std::string* s
         else ns.lines.push_back(l);
     }
     if (!mods_on.empty()) ns.put("RACACIT_MODS_ENABLED", mods_on);
+    if (!game_src.empty()) ns.put("GAME", u8(old / upath(game_src)));
     settings = ns;
     if (!settings.save()) return "Could not write " + u8(settings.path);
     std::string s = "Settings from " + u8(old.filename()) + ".";
@@ -807,12 +810,14 @@ std::string Store::migrate_from_launcher(const fs::path& old, Progress* p, std::
         else ns.lines.push_back(l);
     }
     const std::string old_game = os.get("GAME");
+    const fs::path old_game_root = old / upath(old_game);
     const fs::path old_copy = old / L"game";
     if (here.ok) {
         if (here_game.empty()) ns.remove("GAME"); else ns.put("GAME", here_game);
         s += " Game: this launcher's own, kept.";
-    } else if (!old_game.empty() && fs::is_directory(upath(old_game) / L"PS3_GAME", ec)) {
-        s += " Game: " + old_game + ", as before.";
+    } else if (!old_game.empty() && fs::is_directory(old_game_root / L"PS3_GAME", ec)) {
+        ns.put("GAME", u8(old_game_root));
+        s += " Game: " + u8(old_game_root) + ", as before.";
     } else if (fs::is_directory(old_copy / L"PS3_GAME", ec)) {
         ns.put("GAME", u8(old_copy));
         s += " Game: played from " + u8(old_copy) + ", not copied. Keep that folder, or import the .iso again here.";
