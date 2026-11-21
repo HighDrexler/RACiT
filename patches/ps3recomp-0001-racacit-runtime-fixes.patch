@@ -2301,7 +2301,7 @@ index 5166a47..c82129b 100644
                     (uint32_t)(uintptr_t)buf,
                     (unsigned long long)nbytes, (unsigned long long)bytes_read);
 diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
-index f2b4c11..a65092c 100644
+index f2b4c11..4c92246 100644
 --- a/libs/input/cellPad.c
 +++ b/libs/input/cellPad.c
 @@ -12,11 +12,13 @@
@@ -2942,7 +2942,7 @@ index f2b4c11..a65092c 100644
  
          s_host_state[i].buttons = btns;
  
-@@ -356,26 +915,342 @@ static void pad_poll_sdl2(void)
+@@ -356,26 +915,347 @@ static void pad_poll_sdl2(void)
          s_host_state[i].press_square   = (btns & CELL_PAD_CTRL_SQUARE)   ? 255 : 0;
          s_host_state[i].press_l1       = (btns & CELL_PAD_CTRL_L1)       ? 255 : 0;
          s_host_state[i].press_r1       = (btns & CELL_PAD_CTRL_R1)       ? 255 : 0;
@@ -3185,18 +3185,23 @@ index f2b4c11..a65092c 100644
 +        }
 +    }
 +    /* The mouse turns the cameras directly (game/desktop_mouse.cpp, the camera hooks of
-+     * scripts/patch_lift.py), each move used once, never through the right stick. The
-+     * camera keys (Settings > Controls) are keys, and stay a right-stick push. */
++     * scripts/patch_lift.py), each move used once, never through the right stick. Where no
++     * hooked camera is active (the map, the rotate-object puzzles) it pushes the right stick
++     * instead, and only then. The camera keys (Settings > Controls) stay a right-stick push;
++     * keys and mouse add up, inside the stick's range. */
 +    {
-+        extern void racit_camera_feed(uint64_t, int, int, int, float, int);
++        extern void racit_mouse_feed(uint64_t, int, int, int, float, int, int, float*);
++        extern int racit_stick_byte(float, float);
 +        const uint64_t now_ns = (uint64_t)((double)SDL_GetPerformanceCounter() * 1000000000.0 / (double)SDL_GetPerformanceFrequency());
 +        /* The quick select pointer has the mouse while the ring is open (public PR #42):
-+         * the camera does not turn then. */
-+        racit_camera_feed(now_ns, qs_open ? 0 : dx, qs_open ? 0 : dy, captured, (float)opt.mouse_sens, opt.mouse_invert);
++         * the camera does not turn then, and the stick gets no push from it. */
++        float push[2] = { 0.0f, 0.0f };
++        racit_mouse_feed(now_ns, qs_open ? 0 : dx, qs_open ? 0 : dy, captured, (float)opt.mouse_sens, opt.mouse_invert,
++                         !qs_open, push);
 +        const float kx = (float)(held[KB_RS_RIGHT] - held[KB_RS_LEFT]), ky = (float)(held[KB_RS_DOWN] - held[KB_RS_UP]);
-+        if (kx || ky) {
-+            hs->analog_rx = (u8)(128.0f + 127.0f * kx * 0.8f);
-+            hs->analog_ry = (u8)(128.0f + 127.0f * ky * 0.8f);
++        if (kx || ky || push[0] || push[1]) {
++            hs->analog_rx = (u8)racit_stick_byte(kx, push[0]);
++            hs->analog_ry = (u8)racit_stick_byte(ky, push[1]);
 +        }
 +    }
 +}
@@ -3293,7 +3298,7 @@ index f2b4c11..a65092c 100644
  }
  
  static void pad_shutdown_backend(void)
-@@ -421,6 +1296,62 @@ static unsigned long long pad_now_ms(void)
+@@ -421,6 +1301,62 @@ static unsigned long long pad_now_ms(void)
  #endif
  }
  
@@ -3356,7 +3361,7 @@ index f2b4c11..a65092c 100644
  static void pad_poll_backend(void)
  {
      /* Benign race: two threads may poll in the same tick. That costs one extra
-@@ -439,9 +1370,33 @@ static void pad_poll_backend(void)
+@@ -439,9 +1375,33 @@ static void pad_poll_backend(void)
  #elif PAD_BACKEND_SDL2
      pad_poll_sdl2();
  #endif
@@ -3391,7 +3396,7 @@ index f2b4c11..a65092c 100644
  }
  
  /* ---------------------------------------------------------------------------
-@@ -466,6 +1421,14 @@ s32 cellPadInit(u32 max_connect)
+@@ -466,6 +1426,14 @@ s32 cellPadInit(u32 max_connect)
      s_max_connect = max_connect > CELL_PAD_MAX_PORT_NUM ? CELL_PAD_MAX_PORT_NUM : max_connect;
      memset(s_port_setting, 0, sizeof(s_port_setting));
      memset(s_host_state, 0, sizeof(s_host_state));
@@ -3406,7 +3411,7 @@ index f2b4c11..a65092c 100644
  
      pad_init_backend();
  
-@@ -502,6 +1465,103 @@ void cellPad_poll(void)
+@@ -502,6 +1470,103 @@ void cellPad_poll(void)
   * were fixed.) These used to be redeclared here with a 64-bit address
   * parameter, which conflicts with the header now that it is included. */
  
@@ -3510,7 +3515,7 @@ index f2b4c11..a65092c 100644
  s32 cellPadGetData(u32 port_no, CellPadData* data_guest)
  {
      { static int _once = 0;
-@@ -518,6 +1578,7 @@ s32 cellPadGetData(u32 port_no, CellPadData* data_guest)
+@@ -518,6 +1583,7 @@ s32 cellPadGetData(u32 port_no, CellPadData* data_guest)
  
      /* Poll fresh state */
      pad_poll_backend();
@@ -3518,7 +3523,7 @@ index f2b4c11..a65092c 100644
  
      /* YDKJ_INJECT_PAD: the game's wait loop polls the pad (cellPadSetActDirect /
       * GetData) -- if it's parked on a "press button" prompt after loading, no
-@@ -601,7 +1662,7 @@ skip_inject: ;
+@@ -601,7 +1667,7 @@ skip_inject: ;
       * human at the pad. Env-gated test scaffolding, off by default. */
      { static int s_ap = -1; static unsigned s_apn = 0;
        if (s_ap < 0) s_ap = getenv("PAD_AUTOPRESS") ? 1 : 0;
@@ -3527,7 +3532,7 @@ index f2b4c11..a65092c 100644
            unsigned ph = s_apn++ % 240;
            if (ph < 12)
                data->button[CELL_PAD_BTN_OFFSET_DIGITAL2] |= 0x40;   /* CROSS */
-@@ -636,7 +1697,7 @@ skip_inject: ;
+@@ -636,7 +1702,7 @@ skip_inject: ;
                printf("[cellPad] PAD_SCRIPT: %d event(s)\n", n_ev);
            }
        }
@@ -3536,7 +3541,7 @@ index f2b4c11..a65092c 100644
            double now = (double)(GetTickCount64() - t0) / 1000.0;
            /* Latch, do not window. A fixed time window is missed whenever the
             * title stops polling the pad for longer than the window (it does
-@@ -672,30 +1733,87 @@ skip_inject: ;
+@@ -672,30 +1738,87 @@ skip_inject: ;
       */
      { static int s_pf = -1; static char pf_path[512];
        static unsigned held_mask = 0; static int held_n = 0;
@@ -3635,7 +3640,7 @@ index f2b4c11..a65092c 100644
      /* Analog sticks */
      /* PAD_STICK="lx,ly,rx,ry" (0-255, 128 = centred): hold the analog sticks at
       * fixed positions. Rubber Ducky drives its camera from the sticks and never
-@@ -714,7 +1832,7 @@ skip_inject: ;
+@@ -714,7 +1837,7 @@ skip_inject: ;
                   sscanf(e, "%d,%d,%d,%d,%lf,%lf", &a,&b,&c,&d,&s_from,&s_until);
                   s_v[0]=(unsigned char)a; s_v[1]=(unsigned char)b;
                   s_v[2]=(unsigned char)c; s_v[3]=(unsigned char)d; } }
@@ -3644,7 +3649,7 @@ index f2b4c11..a65092c 100644
                    hs->analog_rx = s_v[2]; hs->analog_ry = s_v[3];
                    hs->connected = 1; }
        /* PAD_SWEEP=<seconds per step>: walk the sticks through a fixed set of
-@@ -725,7 +1843,7 @@ skip_inject: ;
+@@ -725,7 +1848,7 @@ skip_inject: ;
        { static int sw = -1; static clock_t t0 = 0;
          if (sw < 0) { const char* e = getenv("PAD_SWEEP");
                        sw = e ? atoi(e) : 0; if (sw < 0) sw = 0; }
@@ -3653,7 +3658,7 @@ index f2b4c11..a65092c 100644
              static const unsigned char steps[9][4] = {
                  {128,128,128,128},
                  {128,  0,128,128}, {128,255,128,128},
-@@ -793,10 +1911,40 @@ skip_inject: ;
+@@ -793,10 +1916,40 @@ skip_inject: ;
          data->button[CELL_PAD_BTN_OFFSET_SENSOR_Y] = 399; /* gravity */
          data->button[CELL_PAD_BTN_OFFSET_SENSOR_Z] = 512;
          data->button[CELL_PAD_BTN_OFFSET_SENSOR_G] = 512;
@@ -3694,7 +3699,7 @@ index f2b4c11..a65092c 100644
      /* A non-zero len means "here is a CHANGE packet" -- the constant is literally
       * named CELL_PAD_LEN_CHANGE_DEFAULT. Hardware reports len = 0 once the port
       * has nothing new, and titles DRAIN on that: The Simpsons Arcade Game's
-@@ -985,7 +2133,7 @@ s32 cellPadPeriphGetInfo(CellPadPeriphInfo* info_guest)
+@@ -985,7 +2138,7 @@ s32 cellPadPeriphGetInfo(CellPadPeriphInfo* info_guest)
            vm_write32((unsigned long long)ea + _o, *(u32*)((char*)info + _o)); }
  
      { static int _n = 0;
@@ -3703,7 +3708,7 @@ index f2b4c11..a65092c 100644
            printf("[cellPad] PeriphGetInfo(max=%u now=%u) -> STANDARD class\n",
                   info->max_connect, connected); }
      return CELL_OK;
-@@ -1082,13 +2230,61 @@ s32 cellPadSetActDirect(u32 port_no, CellPadActParam* param)
+@@ -1082,13 +2235,61 @@ s32 cellPadSetActDirect(u32 port_no, CellPadActParam* param)
  #endif
  
  #if PAD_BACKEND_SDL2
