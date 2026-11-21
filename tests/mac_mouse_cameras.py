@@ -254,6 +254,10 @@ class Game:
                 os.killpg(self.p.pid, signal.SIGKILL)
 
 
+# A right-stick push (the mouse where no camera is active) counts as a person at the pad, and
+# scripted pad input (START, SELECT) then stands down for 20 s (cellPad.c pad_note_human).
+HUMAN_HOLD = 21.0
+PERSON = '[cellPad] controller in use'
 PITCH_WAY = {}   # mode -> True when mouse down moved the picture down (rows > 0)
 
 
@@ -345,12 +349,15 @@ def game_map(g, results):
     opened = shift(before, m0)[2] > 4 * max(1.0, shift(m0, m1)[2])   # the picture changed, then held still
     still = shift(m0, m1)
     turns_at = len(re.findall(r'\[mouse\] \S+ turn', g.text()))
+    at = len(g.text())
     for _ in range(60):   # ~1.5 s of steady motion to the right: a held push
         g.mouse(6, 0); time.sleep(0.025)
     time.sleep(0.2); m2 = g.capture('map-2')
     pan = shift(m1, m2)
     vpan = vshift(m1, m2)
     turned = len(re.findall(r'\[mouse\] \S+ turn', g.text())) - turns_at
+    if PERSON in g.text()[at:]:
+        time.sleep(HUMAN_HOLD)   # else the SELECT that closes the map is ignored
     g.press('0x%04X 4' % SELECT); time.sleep(2.5)
     after = len(re.findall(r'\[mouse\] \S+ turn', g.text())) - turns_at - turned
     moved = (abs(pan[0]) >= max(4, 3 * abs(still[0])) and pan[1] < pan[2]) or (abs(vpan[0]) >= 3 and vpan[1] < vpan[2])
@@ -366,6 +373,7 @@ def menu(g, results):
     motion than it does by itself."""
     g.press('0x%04X 4' % START); time.sleep(2.5)
     before = len(re.findall(r'\[mouse\] \S+ turn', g.text()))
+    at = len(g.text())
     q0 = g.capture('pause-0'); time.sleep(1.0); q1 = g.capture('pause-1')
     g.mouse(300, 0)
     for dx, dy in ((0, 6), (6, 0), (0, -6), (-6, 0)):   # ~0.5 s each way: a held push
@@ -375,11 +383,14 @@ def menu(g, results):
     by_itself, with_mouse = shift(q0, q1)[2], shift(q1, q2)[2]
     still = with_mouse <= 2 * max(1.0, by_itself)
     paused = len(re.findall(r'\[mouse\] \S+ turn', g.text())) - before
+    pushed = PERSON in g.text()[at:]   # the mouse did reach the stick while paused
+    if pushed:
+        time.sleep(HUMAN_HOLD)
     g.press('0x%04X 4' % START); time.sleep(2.5)
     resumed = len(re.findall(r'\[mouse\] \S+ turn', g.text())) - before
     results.append(('pause menu', paused == 0 and resumed == 0 and still,
-                    'turns while paused %d, after resuming %d, menu change with the mouse %.1f (by itself %.1f)'
-                    % (paused, resumed, with_mouse, by_itself)))
+                    'turns while paused %d, after resuming %d, menu change with the mouse %.1f (by itself %.1f), stick push %s'
+                    % (paused, resumed, with_mouse, by_itself, 'yes' if pushed else 'no')))
 
 
 def main():
