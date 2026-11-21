@@ -21003,7 +21003,7 @@ index ecc53fc..e8d4ad6 100644
      const u8* ucode, u32 max_bytes, u32 vtex_mask, u32 input_mask,
      char* out, u32 out_size);
 diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
-index e2687b7..f926585 100644
+index e2687b79..f2680fae 100644
 --- a/libs/video/rsx_vulkan_backend.c
 +++ b/libs/video/rsx_vulkan_backend.c
 @@ -38,10 +38,13 @@
@@ -27405,7 +27405,22 @@ index e2687b7..f926585 100644
      if (vk_create_image(&s_vk.depth, s_vk.depth_format, s_vk.width, s_vk.height,
                          VK_IMAGE_USAGE_TRANSFER_DST_BIT |
                          VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_IMAGE_ASPECT_DEPTH_BIT)) return -1;
-@@ -3097,13 +7625,14 @@ int rsx_vulkan_backend_init(u32 width, u32 height, const char* title)
+@@ -3088,6 +7616,14 @@ int rsx_vulkan_backend_init(u32 width, u32 height, const char* title)
+         rsx_vulkan_backend_shutdown();
+         return -1;
+     }
++#if defined(__linux__) && !defined(__ANDROID__)
++    if (vk_env_on("PS3RECOMP_VK_WINDOW") && (!s_vk.windowed || !s_vk.swapchain)) {
++        VK_LOG("a Vulkan window was requested, but no swapchain is available\n");
++        rsx_vulkan_backend_shutdown();
++        return -1;
++    }
++#endif
++
+     /* One path at a time: the FIFO walker feeds both the rsx_state vtable
+      * and the register-file engine, so registering both would record every
+      * draw twice (the rule the Metal backend's init follows).
+@@ -3097,13 +7633,14 @@ int rsx_vulkan_backend_init(u32 width, u32 height, const char* title)
       * pipeline from the guest's programs, so without them it has nothing to
       * draw with, and the vtable's fixed-function path stays the default.
       * Either way PS3RECOMP_RSX_ENGINE=dispatch|vtable overrides. */
@@ -27422,7 +27437,7 @@ index e2687b7..f926585 100644
      VK_LOG("offscreen target %ux%u ready, depth format %d (%s)\n",
             s_vk.width, s_vk.height, (int)s_vk.depth_format, title ? title : "");
      return 0;
-@@ -3125,7 +7654,9 @@ void rsx_vulkan_backend_shutdown(void)
+@@ -3125,7 +7662,9 @@ void rsx_vulkan_backend_shutdown(void)
      }
      if (s_vk.windowed || s_vk.window) vk_window_drop(NULL);
      if (s_vk.device) {
@@ -27432,7 +27447,7 @@ index e2687b7..f926585 100644
          vk_guest_shutdown();
          for (int i = 0; i < VK_PIPELINE_SLOTS; i++)
              if (s_vk.pipelines[i]) pvkDestroyPipeline(s_vk.device, s_vk.pipelines[i], NULL);
-@@ -3145,6 +7676,7 @@ void rsx_vulkan_backend_shutdown(void)
+@@ -3145,6 +7684,7 @@ void rsx_vulkan_backend_shutdown(void)
          vk_destroy_image(&s_vk.color);
          vk_destroy_buffer(&s_vk.vertices);
          vk_destroy_buffer(&s_vk.readback);
@@ -27440,7 +27455,7 @@ index e2687b7..f926585 100644
          if (s_vk.fence) pvkDestroyFence(s_vk.device, s_vk.fence, NULL);
          if (s_vk.pool)  pvkDestroyCommandPool(s_vk.device, s_vk.pool, NULL);
          pvkDestroyDevice(s_vk.device, NULL);
-@@ -3160,9 +7692,10 @@ int rsx_vulkan_backend_pump_messages(void)
+@@ -3160,9 +7700,10 @@ int rsx_vulkan_backend_pump_messages(void)
      if (!s_vk.windowed) return 0;
      int quit = 0;
      SDL_Event e;
@@ -27452,7 +27467,7 @@ index e2687b7..f926585 100644
      }
      return quit ? -1 : 0;
  }
-@@ -3186,4 +7719,4 @@ u32 rsx_vulkan_backend_guest_draws(void)
+@@ -3186,4 +7727,4 @@ u32 rsx_vulkan_backend_guest_draws(void)
      return s_vk.eng_active ? rsx_draw_engine_guest_draws() : s_g.last_draws;
  }
  

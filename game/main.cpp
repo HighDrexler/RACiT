@@ -258,6 +258,10 @@ static int rsx_backend_init_linux(uint32_t w, uint32_t h, const char* title)
             g_rsx_name    = "Vulkan";
             return 0;
         }
+#    if defined(__linux__) && !defined(__ANDROID__)
+        const char* window = getenv("PS3RECOMP_VK_WINDOW");
+        if (window && *window && *window != '0') return -1;
+#    endif
         fprintf(stderr, "[rsx] Vulkan init failed -- falling back to the null backend\n");
     }
 #  endif
@@ -597,6 +601,14 @@ static DWORD WINAPI frame_clock(LPVOID)
 
     { char _hb[160]; snprintf(_hb, sizeof _hb, "[hosttid] %lu rsx frame clock / FIFO walker%c", (unsigned long)GetCurrentThreadId(), 10); fputs(_hb, stderr); }
     int rsx_ok = (rsx_backend_init(WINDOW_WIDTH, WINDOW_HEIGHT, title) == 0);
+#if defined(__linux__) && !defined(__ANDROID__) && defined(RACACIT_HAVE_VULKAN)
+    if (!rsx_ok) {
+        fputs("RACiT could not start Vulkan. See the [RSX vulkan] messages above.\n"
+              "Check the Vulkan driver and display session with vulkaninfo --summary.\n", stderr);
+        fflush(stderr);
+        _exit(3);
+    }
+#endif
     fprintf(stderr, "[rsx] %s backend init %s\n", RSX_BACKEND_NAME,
             rsx_ok ? "OK -- window open" : "FAILED");
 
