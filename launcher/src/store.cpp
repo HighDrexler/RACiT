@@ -39,13 +39,13 @@ extern char** environ;
 #ifdef __APPLE__
 const GameProfile kRacitProfile = { "racit", "A Crack in Time", "Ratchet & Clank Future: A Crack in Time", "RATCHET & CLANK FUTURE", L"",
     { { "BCUS98124", "USA", RACIT_GAME_EXE, L"RaCACiT_compat.exe", "406bded328d9dbdfa9684ed392554ca34c76f4ed95aa21685f622d3ab2b04592" },
-      { "BCES00511", "Europe", L"RaCACiT_BCES00511.exe", L"RaCACiT_BCES00511_compat.exe", "6debdca0f181f35d98ebe23faabe2531b697c558b4e3384b06630173400674c1" } }, true, { "BCUS98124", "BCES00511" }, "1.0.0" };
+      { "BCES00511", "Europe", L"RaCACiT_BCES00511.exe", L"RaCACiT_BCES00511_compat.exe", "6debdca0f181f35d98ebe23faabe2531b697c558b4e3384b06630173400674c1" } }, true, { "BCUS98124", "BCES00511" }, "1.0.1" };
 const GameProfile kNexusProfile = { "nexus", "Into the Nexus", "Ratchet & Clank: Into the Nexus", "RATCHET & CLANK", L"nexus",
     { { "BCUS99245", "USA", L"RaCNexus", nullptr, "ca1a1a293d211095fc834eaaa10cd5fa9248b0e0328919fdeadeed1675c52c3f" } }, false, { "BCUS99245", "NPUA80908" }, "0.1.0" };
 #else
 const GameProfile kRacitProfile = { "racit", "A Crack in Time", "Ratchet & Clank Future: A Crack in Time", "RATCHET & CLANK FUTURE", L"",
     { { "BCUS98124", "USA", L"RaCACiT.exe", L"RaCACiT_compat.exe", "406bded328d9dbdfa9684ed392554ca34c76f4ed95aa21685f622d3ab2b04592" },
-      { "BCES00511", "Europe", L"RaCACiT_BCES00511.exe", L"RaCACiT_BCES00511_compat.exe", "6debdca0f181f35d98ebe23faabe2531b697c558b4e3384b06630173400674c1" } }, true, { "BCUS98124", "BCES00511" }, "1.0.0" };
+      { "BCES00511", "Europe", L"RaCACiT_BCES00511.exe", L"RaCACiT_BCES00511_compat.exe", "6debdca0f181f35d98ebe23faabe2531b697c558b4e3384b06630173400674c1" } }, true, { "BCUS98124", "BCES00511" }, "1.0.1" };
 const GameProfile kNexusProfile = { "nexus", "Into the Nexus", "Ratchet & Clank: Into the Nexus", "RATCHET & CLANK", L"nexus",
     { { "BCUS99245", "USA", L"RaCNexus.exe", nullptr, "ca1a1a293d211095fc834eaaa10cd5fa9248b0e0328919fdeadeed1675c52c3f" } }, false, { "BCUS99245", "NPUA80908" }, "0.1.0" };
 #endif
