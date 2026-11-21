@@ -291,6 +291,85 @@ def check_mouse_camera_tables():
         sys.exit('patch_lift #22: mouse camera table incomplete for ' + ', '.join(bad))
 
 
+# 25. Skip puzzles (game/skip_puzzles.cpp; Settings > General > Puzzles, RACACIT_SKIP_PUZZLES).
+#     Each puzzle's hook sits where the game decides the puzzle is solved and, when the setting
+#     says so, gives that decision the solved answer, so everything after it is the game's own:
+#     completion flag, success event, the level script's reward and autosave. PUZZLE_HOOKS has
+#     the recipe per puzzle (places relative to the function start, so one recipe serves every
+#     executable); PUZZLE_FUNCS places it per profile (retarget.py converts the disc names for
+#     BCES00511). The build stops if a puzzle of the profile is missing its hook.
+PUZZLE_HOOKS = {
+    # Fix Time (Clank's planet repair consoles, Great Clock): the update's success check reads
+    # the run's result at +0x98 (2 = every ring in place) once the console is not already done
+    # (its completion bit) and nothing is pending (+0x12C). In the playing state (+0x60 == 2) the
+    # hook answers 2, and the game goes on to its own win state.
+    'fix_time': ('ctx->gpr[29] = vm_read32(ctx->gpr[31] + 0x98);',
+                 'if (vm_read16(ctx->gpr[31] + 0x60) == 2 && (int32_t)vm_read32(ctx->gpr[31] + 0x98) != 2 &&\n'
+                 '            racit_skip_puzzle_now("fix_time")) vm_write32(ctx->gpr[31] + 0x98, 2);'),
+}
+_DISC_PUZZLES = {'fix_time': 'func_0039CA18'}
+PUZZLE_FUNCS = {
+    'BCUS98124-1.00': _DISC_PUZZLES,
+    'BCES00511-1.00': _DISC_PUZZLES,
+    # Update 1.20 (same code, moved): written as numbers so retarget.py leaves them.
+    'BCUS98124-1.20': {name: 'func_%08X' % a for name, a in (('fix_time', 0x39cd50),)},
+}
+PUZZLE_DECL = 'extern "C" int racit_skip_puzzle_now(const char* puzzle);\n'
+
+
+def _func_span(src, name):
+    m = re.search(r'void %s\(ppu_context\* ctx\) \{\n' % name, src)
+    if not m:
+        return None
+    return m.start(), src.index('\n}\n', m.end())
+
+
+def check_puzzle_tables():
+    """Every known profile (versions/profiles.json) has a place for every puzzle hook."""
+    import json
+    with open(os.path.join(ROOT, 'versions', 'profiles.json'), encoding='utf-8') as f:
+        ids = [p['id'] for p in json.load(f)['profiles']]
+    bad = [i for i in ids if set(PUZZLE_FUNCS.get(i, ())) != set(PUZZLE_HOOKS)]
+    if bad:
+        sys.exit('patch_lift #25: puzzle hook table incomplete for ' + ', '.join(bad))
+
+
+def apply_puzzle_hooks(recomp, profile_id):
+    """Puts every puzzle's hook into the lift; stops the build if one is missing."""
+    check_puzzle_tables()
+    funcs = PUZZLE_FUNCS[profile_id]
+    done, failed = set(), []
+    for path in sorted(glob.glob(os.path.join(recomp, 'ppu_recomp_*.cpp'))):
+        src = open(path, encoding='utf-8').read()
+        changed = False
+        for name, func in sorted(funcs.items()):
+            sp = _func_span(src, func)
+            if not sp:
+                continue
+            fn = src[sp[0]:sp[1]]
+            tag = '/* racacit puzzle: %s */' % name
+            if tag in fn:
+                done.add(name); continue
+            anchor, code = PUZZLE_HOOKS[name]
+            hits = [m.start() for m in re.finditer(r'(?m)^ *' + re.escape(anchor) + r'\n', fn)]
+            if len(hits) != 1:
+                failed.append('%s (%s: anchor found %d times)' % (name, func, len(hits))); continue
+            fn = fn[:hits[0]] + '        ' + code + '   ' + tag + '\n' + fn[hits[0]:]
+            src = src[:sp[0]] + fn + src[sp[1]:]
+            done.add(name); changed = True
+        if changed:
+            if PUZZLE_DECL not in src:
+                i = src.index('\n', src.index('#include')) + 1
+                src = src[:i] + PUZZLE_DECL + src[i:]
+            open(path, 'w', encoding='utf-8').write(src)
+    missing = sorted(set(PUZZLE_HOOKS) - done)
+    if failed or missing:
+        sys.exit('patch_lift #25: puzzle hooks missing for %s: %s'
+                 % (profile_id, ', '.join(failed + ['%s (%s not found)' % (m, funcs[m]) for m in missing
+                                                    if not any(f.startswith(m + ' ') for f in failed)])))
+    print('patch_lift #25: puzzle hooks in all %d puzzles (%s)' % (len(done), profile_id))
+
+
 # An update of the same title can have a different code and data layout.
 # Check the decrypted executable before any generated source is touched.
 def check_game_profile(elf, selected='auto', require_buildable=True, quiet=False):
@@ -341,6 +420,7 @@ if options.elf:
         apply_update120_hooks(RECOMP, options.elf)
         check_mouse_camera_tables()
         apply_mouse_cameras(RECOMP, profile['id'])
+        apply_puzzle_hooks(RECOMP, profile['id'])
         import subprocess
         subprocess.run([sys.executable, os.path.join(ROOT, 'scripts', 'fix_vmx_alias.py'), RECOMP],
                        check=True)
@@ -1138,6 +1218,9 @@ print(f'{n} file(s) patched')
 # 22. The mouse cameras (MOUSE_CAMERAS above), checked for every profile.
 check_mouse_camera_tables()
 apply_mouse_cameras(RECOMP, profile['id'] if options.elf else BUILD_TITLE + '-1.00')
+
+# 25. The puzzle hooks (PUZZLE_HOOKS above), checked for every profile.
+apply_puzzle_hooks(RECOMP, profile['id'] if options.elf else BUILD_TITLE + '-1.00')
 
 # 13. v42-v62 hooked the SCREAM synth (nextsynth, EBOOT 0xBFD480: the lifts
 #     sub_BFD480_04000 and spu_0001_at_00BED400) to copy the controller's
