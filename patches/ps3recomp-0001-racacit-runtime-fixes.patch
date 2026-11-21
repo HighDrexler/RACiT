@@ -9249,6 +9249,7 @@ index d8506de..b8f00f6 100644
   * Main method dispatch
   * -----------------------------------------------------------------------*/
  
++extern u32 cellGcm_flip_request_count(void);
 +/* Running totals, printed as one [rsx-stats] line every 5 s of wall time. The
 + * per-method logs are capped at a handful each, so "how many draws so far" was
 + * unanswerable from the log -- and a capped count reads exactly like a stall. */
@@ -9263,7 +9264,6 @@ index d8506de..b8f00f6 100644
 +    if (!s_t0) { s_t0 = now; return; }
 +    if (now - s_t0 < 5) return;
 +    s_t0 = now;
-+    extern u32 cellGcm_flip_request_count(void);
 +    extern volatile unsigned long g_eng_tex_uploads, g_eng_tex_upload_bytes;
 +    extern unsigned long long ps3_qpc_us(void);
 +    fprintf(stderr, "[rsx-stats] methods=%llu draws=%llu flips=%llu gcmflips=%u clears=%llu texups=%lu texMB=%lu us=%llu\n",
