@@ -1365,7 +1365,11 @@ static void windows_setup(int* argc, char*** argv)
      * names the settings file; else settings.txt beside the exe. */
     if (const char* sf = getenv("RACACIT_SETTINGS_FILE"); sf && *sf) snprintf(path, sizeof path, "%s", sf);
     else snprintf(path, sizeof path, "%s\\settings.txt", dir);
-    if (FILE* f = fopen(path, "r")) {
+    /* The launcher has already loaded settings and applied its own paths and
+     * mod overrides. Only a standalone game needs to read this file here. */
+    const char* launched = getenv("RACACIT_LAUNCHER");
+    const bool from_launcher = launched && strcmp(launched, "1") == 0;
+    if (FILE* f = from_launcher ? nullptr : fopen(path, "r")) {
         char line[2048];
         while (fgets(line, sizeof line, f)) {
             char* e = line + strlen(line);
