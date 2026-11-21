@@ -419,8 +419,7 @@ bool Store::update_added() const
 
 bool Store::update_ready() const
 {
-    const std::string head = read_text(update_elf(), 4);
-    return update_added() && head.size() >= 4 && head.compare(0, 4, "\x7F" "ELF") == 0;
+    return update_added() && sha256_file(update_elf()) == kElf120;
 }
 
 bool Store::plays_update() const
@@ -471,16 +470,21 @@ std::string Store::import_update(const fs::path& picked, Progress* p, std::strin
     if (!r.empty()) return stop(r);
     // A decrypted EBOOT.elf in the update's folder (RPCS3 writes it beside EBOOT.BIN) is taken
     // as the 1.20 program, not kept with the update's data.
-    int v = 0; bool known = false;
     std::string elf_note;
+    const fs::path staged_elf = tmp / L"EBOOT.elf";
     const fs::path found = tmp / L"USRDIR" / L"EBOOT.elf";
-    if (fs::exists(found, ec) && check_elf(found, &known, &v).empty() && v == 120) {
-        fs::rename(found, tmp / L"EBOOT.elf", ec);
+    if (sha256_file(staged_elf) == kElf120) {
+        elf_note = " Its EBOOT.elf was there too.";
+    } else if (sha256_file(found) == kElf120) {
+        fs::rename(found, staged_elf, ec);
         if (ec) return stop("Could not stage the update's EBOOT.elf: " + ec.message());
         elf_note = " Its EBOOT.elf was there too.";
-    } else if (fs::exists(update_elf(), ec)) {
-        if (!fs::copy_file(update_elf(), tmp / L"EBOOT.elf", fs::copy_options::overwrite_existing, ec))
+    } else if (sha256_file(update_elf()) == kElf120) {
+        if (!fs::copy_file(update_elf(), staged_elf, fs::copy_options::overwrite_existing, ec))
             return stop("Could not keep the update's EBOOT.elf: " + ec.message());
+    } else {
+        fs::remove(staged_elf, ec);
+        if (ec) return stop("Could not remove the unmatched EBOOT.elf from the staged update: " + ec.message());
     }
     const bool replacing = fs::exists(update_dir(), ec);
     if (ec) return stop("Could not check the existing update: " + ec.message());
@@ -534,13 +538,17 @@ std::string Store::prepare_update_hdd()
             if (it->is_regular_file(ec) && !fs::exists(to, ec) && !clone_file(it->path(), to))
                 return "cannot copy " + u8(it->path()) + " into " + u8(to);
         }
-    ec.clear();
-    fs::create_directories(hdd() / L"home", ec);
+    if (ec) return "cannot read the disc's installed data: " + ec.message();
+    const fs::path disc_home = hdd() / L"home";
+    fs::create_directories(disc_home, ec);
+    if (ec) return "cannot open the disc's save folder: " + ec.message();
     const fs::path home = hdd_update() / L"home";
     if (!fs::exists(fs::symlink_status(home, ec))) {
         fs::create_directory_symlink(fs::path(L"..") / hdd().filename() / L"home", home, ec);   // relative: the folder can move
         if (ec) return "cannot link " + u8(home) + " to the saves: " + ec.message();
     }
+    if (!fs::equivalent(home, disc_home, ec))
+        return u8(home) + " is not linked to the disc's save folder. Move it aside or restore the link before playing update 1.20.";
     return {};
 }
 
