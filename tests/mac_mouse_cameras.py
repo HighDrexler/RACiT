@@ -348,10 +348,15 @@ def game_map(g, results):
     m0 = g.capture('map-0'); time.sleep(0.6); m1 = g.capture('map-1')
     opened = shift(before, m0)[2] > 4 * max(1.0, shift(m0, m1)[2])   # the picture changed, then held still
     still = shift(m0, m1)
+    # The scripted right stick first (before the mouse's push stands scripted input down):
+    # whether this map moves with the stick at all.
+    g.press('0 60 128 128 255 128'); time.sleep(1.5); s1 = g.capture('map-stick')
+    by_stick = shift(m1, s1)[2] > 4 * max(1.0, still[2])
+    time.sleep(0.5); m1 = g.capture('map-1b')
     turns_at = len(re.findall(r'\[mouse\] \S+ turn', g.text()))
     at = len(g.text())
-    for _ in range(60):   # ~1.5 s of steady motion to the right: a held push
-        g.mouse(6, 0); time.sleep(0.025)
+    for _ in range(120):   # ~1.5 s of steady motion to the right: a held push
+        g.mouse(12, 0); time.sleep(0.012)
     time.sleep(0.2); m2 = g.capture('map-2')
     pan = shift(m1, m2)
     vpan = vshift(m1, m2)
@@ -360,10 +365,14 @@ def game_map(g, results):
         time.sleep(HUMAN_HOLD)   # else the SELECT that closes the map is ignored
     g.press('0x%04X 4' % SELECT); time.sleep(2.5)
     after = len(re.findall(r'\[mouse\] \S+ turn', g.text())) - turns_at - turned
-    moved = (abs(pan[0]) >= max(4, 3 * abs(still[0])) and pan[1] < pan[2]) or (abs(vpan[0]) >= 3 and vpan[1] < vpan[2])
-    ok = None if not opened else (moved and turned == 0 and after == 0)
-    results.append(('map', ok, '%s, pan %d columns / %d rows (still %d), camera turns on the map %d, after closing %d'
-                    % ('opened' if opened else 'SELECT showed no map (untested)', pan[0], vpan[0], still[0], turned, after)))
+    # Moved: shifted, or changed (a zoom) more than it does by itself.
+    moved = ((abs(pan[0]) >= max(4, 3 * abs(still[0])) and pan[1] < pan[2]) or (abs(vpan[0]) >= 3 and vpan[1] < vpan[2])
+             or pan[2] > 4 * max(1.0, still[2]))
+    # Untested (None) when the map didn't open or doesn't move with the stick either.
+    ok = None if not (opened and by_stick) else (moved and turned == 0 and after == 0)
+    results.append(('map', ok, '%s, stick moves it %s, mouse: pan %d columns / %d rows, change %.1f (still %.1f), camera turns on the map %d, after closing %d'
+                    % ('opened' if opened else 'SELECT showed no map (untested)', 'yes' if by_stick else 'no (untested)',
+                       pan[0], vpan[0], pan[2], still[2], turned, after)))
 
 
 def menu(g, results):
