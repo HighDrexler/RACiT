@@ -21003,7 +21003,7 @@ index ecc53fc..e8d4ad6 100644
      const u8* ucode, u32 max_bytes, u32 vtex_mask, u32 input_mask,
      char* out, u32 out_size);
 diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
-index e2687b7..f926585 100644
+index e2687b79..9acf7dbb 100644
 --- a/libs/video/rsx_vulkan_backend.c
 +++ b/libs/video/rsx_vulkan_backend.c
 @@ -38,10 +38,13 @@
@@ -24909,7 +24909,7 @@ index e2687b7..f926585 100644
      default:     return VK_BLEND_FACTOR_ONE;
      }
  }
-@@ -2484,168 +5171,1310 @@ static VkStencilOp vk_gcm_stencil_op(u32 op)
+@@ -2484,168 +5171,1327 @@ static VkStencilOp vk_gcm_stencil_op(u32 op)
      default:     return VK_STENCIL_OP_KEEP;               /* GL_KEEP 0x1E00 */
      }
  }
@@ -25440,6 +25440,7 @@ index e2687b7..f926585 100644
 +}
 +
 +typedef struct { u64 hash; u32 words; long off; } vk_pw_spv;   /* off: its shader-cache record, -1 none */
++typedef struct { u32 words; u32 remaining; } vk_pw_word_count;
 +
 +static int vk_pw_spv_cmp(const void* a, const void* b)
 +{
@@ -25449,10 +25450,24 @@ index e2687b7..f926585 100644
 +    return x->words < y->words ? -1 : x->words > y->words;
 +}
 +
-+static int vk_pw_u32_cmp(const void* a, const void* b)
++static int vk_pw_word_count_cmp(const void* a, const void* b)
 +{
-+    const u32 x = *(const u32*)a, y = *(const u32*)b;
++    const u32 x = ((const vk_pw_word_count*)a)->words, y = ((const vk_pw_word_count*)b)->words;
 +    return x < y ? -1 : x > y;
++}
++
++static u32 vk_pw_count_words(vk_pw_word_count* counts, const vk_pw_spv* sp, u32 n)
++{
++    for (u32 i = 0; i < n; i++) counts[i] = (vk_pw_word_count){ sp[i].words, 1 };
++    qsort(counts, n, sizeof *counts, vk_pw_word_count_cmp);
++    u32 unique = 0;
++    for (u32 i = 0; i < n; i++) {
++        if (unique && counts[i].words == counts[unique - 1].words)
++            counts[unique - 1].remaining++;
++        else
++            counts[unique++] = counts[i];
++    }
++    return unique;
 +}
 +
 +static vk_pw_spv* vk_pw_find(vk_pw_spv* v, u32 n, u64 hash, u32 words)
@@ -25461,10 +25476,9 @@ index e2687b7..f926585 100644
 +    return (vk_pw_spv*)bsearch(&k, v, n, sizeof *v, vk_pw_spv_cmp);
 +}
 +
-+/* RSX_SHADER_CACHE's file, walked for the programs in `sp` (sorted; `wc` their
-+ * sorted sizes, a cheap first test: most records are skipped unread). Their
-+ * offsets go into sp[].off; returns the file, open, or NULL. */
-+static FILE* vk_pw_find_programs(vk_pw_spv* sp, u32 ns, const u32* wc, u32 nw, u32* buf, u32* found)
++/* Look up the programs in sp and record their offsets. A size with no
++ * remaining programs can be skipped without reading or hashing its payload. */
++static FILE* vk_pw_find_programs(vk_pw_spv* sp, u32 ns, vk_pw_word_count* wc, u32 nw, u32* buf, u32* found)
 +{
 +    /* The SPIR-V cache rewrites its file at its first use when the file is
 +     * torn or over its cap -- and on Windows cannot while another handle has
@@ -25484,14 +25498,21 @@ index e2687b7..f926585 100644
 +    }
 +    /* Records { u64 key[2], u32 words, u32 check, u32 spirv[words] }
 +     * (rsx_shader_spirv.cpp); a torn or growing tail ends the walk. */
-+    for (long off = 8; !SDL_AtomicGet(&s_pw.stop); ) {
++    for (long off = 8; *found < ns && !SDL_AtomicGet(&s_pw.stop); ) {
 +        u32 h[6];
 +        if (fread(h, 4, 6, f) != 6 || h[5] != (h[4] ^ 0x5350565Au) || !h[4]) break;
 +        const u32 w = h[4];
-+        if (w <= VK_SPV_WORDS && bsearch(&w, wc, nw, sizeof *wc, vk_pw_u32_cmp)) {
++        const vk_pw_word_count key = { .words = w };
++        vk_pw_word_count* count = w <= VK_SPV_WORDS ?
++            (vk_pw_word_count*)bsearch(&key, wc, nw, sizeof *wc, vk_pw_word_count_cmp) : NULL;
++        if (count && count->remaining) {
 +            if (fread(buf, 4, w, f) != w) break;
 +            vk_pw_spv* s = vk_pw_find(sp, ns, vk_spv_hash(buf, w), w);
-+            if (s && s->off < 0) { s->off = off; (*found)++; }
++            if (s && s->off < 0) {
++                s->off = off;
++                count->remaining--;
++                (*found)++;
++            }
 +        } else if (fseek(f, (long)w * 4L, SEEK_CUR) != 0) break;
 +        off += 24L + (long)w * 4L;
 +    }
@@ -25518,7 +25539,7 @@ index e2687b7..f926585 100644
 +    const u32 n = s_pw.n;
 +    u32 ns = 0, nw = 0, found = 0, built = 0, absent = 0, failed = 0;
 +    vk_pw_spv* sp = (vk_pw_spv*)malloc((size_t)n * 2u * sizeof *sp);
-+    u32* wc  = (u32*)malloc((size_t)n * 2u * sizeof *wc);
++    vk_pw_word_count* wc = (vk_pw_word_count*)malloc((size_t)n * 2u * sizeof *wc);
 +    u32* buf = (u32*)malloc(VK_SPV_WORDS * sizeof *buf);
 +    FILE* f = NULL;
 +    if (sp && wc && buf) {
@@ -25530,9 +25551,7 @@ index e2687b7..f926585 100644
 +        u32 k = 0;
 +        for (u32 i = 0; i < ns; i++) if (!k || vk_pw_spv_cmp(&sp[i], &sp[k - 1])) sp[k++] = sp[i];
 +        ns = k;
-+        for (u32 i = 0; i < ns; i++) wc[i] = sp[i].words;
-+        qsort(wc, ns, sizeof *wc, vk_pw_u32_cmp);
-+        for (u32 i = 0; i < ns; i++) if (!nw || wc[i] != wc[nw - 1]) wc[nw++] = wc[i];
++        nw = vk_pw_count_words(wc, sp, ns);
 +        f = vk_pw_find_programs(sp, ns, wc, nw, buf, &found);
 +        if (!f) VK_LOG("pipeline pre-warm: no shader cache file to read the programs from\n");
 +    }
@@ -26013,7 +26032,7 @@ index e2687b7..f926585 100644
 +    }
 +    rsx_hlsl_to_spirv_cache_open();                          /* a torn file is rewritten first */
 +    vk_pw_spv* sp = (vk_pw_spv*)malloc((size_t)n * 2u * sizeof *sp);
-+    u32* wc  = (u32*)malloc((size_t)n * 2u * sizeof *wc);
++    vk_pw_word_count* wc = (vk_pw_word_count*)malloc((size_t)n * 2u * sizeof *wc);
 +    u32* buf = (u32*)malloc(VK_SPV_WORDS * sizeof *buf);
 +    u32 ns = 0, nw = 0, found = 0;
 +    FILE* f = NULL;
@@ -26027,9 +26046,7 @@ index e2687b7..f926585 100644
 +        u32 k = 0;
 +        for (u32 i = 0; i < ns; i++) if (!k || vk_pw_spv_cmp(&sp[i], &sp[k - 1])) sp[k++] = sp[i];
 +        ns = k;
-+        for (u32 i = 0; i < ns; i++) wc[i] = sp[i].words;
-+        qsort(wc, ns, sizeof *wc, vk_pw_u32_cmp);
-+        for (u32 i = 0; i < ns; i++) if (!nw || wc[i] != wc[nw - 1]) wc[nw++] = wc[i];
++        nw = vk_pw_count_words(wc, sp, ns);
 +        f = vk_pw_find_programs(sp, ns, wc, nw, buf, &found);
 +    }
 +    free(buf); free(wc);
@@ -26360,7 +26377,7 @@ index e2687b7..f926585 100644
      }
      return P->variant[topo_idx];
  }
-@@ -2654,15 +6483,20 @@ static void vk_eng_bind_pipeline(void* user, u32 pipeline) { (void)user; s_e2.pi
+@@ -2654,15 +6500,20 @@ static void vk_eng_bind_pipeline(void* user, u32 pipeline) { (void)user; s_e2.pi
  
  static void vk_eng2_shutdown(void* user)
  {
@@ -26383,7 +26400,7 @@ index e2687b7..f926585 100644
  }
  
  /* Constants go straight into the shared UBO: vertex at 0, pixel at ps_off.
-@@ -2673,8 +6507,11 @@ static void vk_eng_bind_vs_constants(void* user, const void* data, u32 bytes)
+@@ -2673,8 +6524,11 @@ static void vk_eng_bind_vs_constants(void* user, const void* data, u32 bytes)
      if (!s_g.on || !data) { s_e2.vs_bytes = 0; return; }
      const u32 cap = (u32)s_g.ps_off;
      if (bytes > cap) { bytes = cap; if (!(s_e2.warned & 2u)) { VK_LOG("engine: VS constants truncated\n"); s_e2.warned |= 2u; } }
@@ -26396,7 +26413,7 @@ index e2687b7..f926585 100644
  }
  static void vk_eng_bind_ps_constants(void* user, const void* data, u32 bytes)
  {
-@@ -2682,17 +6519,31 @@ static void vk_eng_bind_ps_constants(void* user, const void* data, u32 bytes)
+@@ -2682,17 +6536,31 @@ static void vk_eng_bind_ps_constants(void* user, const void* data, u32 bytes)
      if (!s_g.on || !data) { s_e2.ps_bytes = 0; return; }
      const u32 cap = (u32)(s_g.ubo.size - s_g.ps_off);
      if (bytes > cap) { bytes = cap; if (!(s_e2.warned & 4u)) { VK_LOG("engine: PS constants truncated\n"); s_e2.warned |= 4u; } }
@@ -26431,7 +26448,7 @@ index e2687b7..f926585 100644
      }
      s_e2.tex_mask = mask;
  }
-@@ -2713,6 +6564,11 @@ static void vk_eng_set_scissor(void* user, u32 x, u32 y, u32 w, u32 h)
+@@ -2713,6 +6581,11 @@ static void vk_eng_set_scissor(void* user, u32 x, u32 y, u32 w, u32 h)
      s_e2.sc[0] = x; s_e2.sc[1] = y; s_e2.sc[2] = w; s_e2.sc[3] = h; s_e2.have_sc = 1;
  }
  static void vk_eng_set_stencil_ref(void* user, u32 ref) { (void)user; s_e2.stencil_ref = ref; }
@@ -26443,7 +26460,7 @@ index e2687b7..f926585 100644
  
  static VkFramebuffer vk_eng_framebuffer(VkRenderPass rp, const u32* rt, u32 n, VkImageView dview,
                                          u32 dkey, u32 w, u32 h)
-@@ -2730,7 +6586,7 @@ static VkFramebuffer vk_eng_framebuffer(VkRenderPass rp, const u32* rt, u32 n, V
+@@ -2730,7 +6603,7 @@ static VkFramebuffer vk_eng_framebuffer(VkRenderPass rp, const u32* rt, u32 n, V
                                      .renderPass = rp, .attachmentCount = n + 1, .pAttachments = views,
                                      .width = w, .height = h, .layers = 1 };
      VkFramebuffer fb = VK_NULL_HANDLE;
@@ -26452,7 +26469,7 @@ index e2687b7..f926585 100644
      memcpy(s_e2.fb[s_e2.fb_count].key, key, sizeof key);
      s_e2.fb[s_e2.fb_count++].fb = fb;
      return fb;
-@@ -2744,19 +6600,101 @@ static VkImageView vk_eng_scratch_depth(u32 w, u32 h)
+@@ -2744,19 +6617,101 @@ static VkImageView vk_eng_scratch_depth(u32 w, u32 h)
          return s_e2.scratch_depth.view;
      vk_eng_drop_framebuffers();
      vk_destroy_image(&s_e2.scratch_depth);
@@ -26558,7 +26575,7 @@ index e2687b7..f926585 100644
  static int vk_eng_ensure_indices(VkDeviceSize bytes)
  {
      if (s_e2.indices.buf && s_e2.indices.size >= bytes) return 0;
-@@ -2777,23 +6715,62 @@ static VkSampler vk_eng_sampler(const rsx_be_sampler_desc* d)
+@@ -2777,23 +6732,62 @@ static VkSampler vk_eng_sampler(const rsx_be_sampler_desc* d)
                    | ((u64)d->mip_present << 3) | ((u64)(d->wrap_s & 0xF) << 4)
                    | ((u64)(d->wrap_t & 0xF) << 8) | ((u64)(d->wrap_r & 0xF) << 12)
                    | ((u64)(lo >> 16) << 16) | ((u64)(hi >> 16) << 32);
@@ -26629,7 +26646,7 @@ index e2687b7..f926585 100644
      return smp;
  }
  
-@@ -2807,67 +6784,474 @@ static VkImageView vk_eng_sample_view(u32 handle)
+@@ -2807,67 +6801,474 @@ static VkImageView vk_eng_sample_view(u32 handle)
                 ? o->im.view : VK_NULL_HANDLE;
  }
  
@@ -27126,7 +27143,7 @@ index e2687b7..f926585 100644
      if (vk_ensure_vertex_buffer(vbytes)) return;
      memcpy(s_vk.vertices.ptr, vertices, (size_t)vbytes);
      if (indices && index_count) {
-@@ -2880,30 +7264,18 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
+@@ -2880,30 +7281,18 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
      /* Everything submitted before is complete (each submission is waited
       * on); this orders memory for the surfaces this draw touches. */
      for (u32 i = 0; i < n; i++)
@@ -27164,7 +27181,7 @@ index e2687b7..f926585 100644
      VkDeviceSize off = 0;
      pvkCmdBindVertexBuffers(s_vk.cmd, 0, 1, &s_vk.vertices.buf, &off);
      if (indices && index_count) {
-@@ -2916,6 +7288,28 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
+@@ -2916,6 +7305,28 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
      vk_submit_and_wait();
  }
  
@@ -27193,7 +27210,7 @@ index e2687b7..f926585 100644
  static const rsx_draw_backend s_vk_engine_backend = {
      .user                 = NULL,
      .init                 = vk_eng_init,
-@@ -2930,6 +7324,13 @@ static const rsx_draw_backend s_vk_engine_backend = {
+@@ -2930,6 +7341,13 @@ static const rsx_draw_backend s_vk_engine_backend = {
      .depth_target_create  = vk_eng_depth_target_create,
      .depth_target_release = vk_eng_release,
      .depth_snapshot       = vk_eng_depth_snapshot,
@@ -27207,7 +27224,7 @@ index e2687b7..f926585 100644
      .pipeline_create      = vk_eng_pipeline_create,
      .pipeline_release     = vk_eng_pipeline_release,
      .bind_targets         = vk_eng_bind_targets,
-@@ -2941,6 +7342,8 @@ static const rsx_draw_backend s_vk_engine_backend = {
+@@ -2941,6 +7359,8 @@ static const rsx_draw_backend s_vk_engine_backend = {
      .set_viewport         = vk_eng_set_viewport,
      .set_scissor          = vk_eng_set_scissor,
      .set_stencil_ref      = vk_eng_set_stencil_ref,
@@ -27216,7 +27233,7 @@ index e2687b7..f926585 100644
      .draw                 = vk_eng_draw,
      .clear_color          = vk_eng_clear_color,
      .clear_depth_stencil  = vk_eng_clear_depth_stencil,
-@@ -2969,8 +7372,33 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+@@ -2969,8 +7389,33 @@ static int vk_init_all(u32 width, u32 height, const char* title)
      s_vk.height = height ? height : 720;
      s_vk.dump_path = getenv("PS3RECOMP_VK_DUMP");
  
@@ -27250,7 +27267,7 @@ index e2687b7..f926585 100644
  
      VkApplicationInfo app = { .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
                                .pApplicationName = "ps3recomp", .pEngineName = "ps3recomp RSX",
-@@ -2981,11 +7409,35 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+@@ -2981,11 +7426,35 @@ static int vk_init_all(u32 width, u32 height, const char* title)
          ci.enabledExtensionCount   = s_vk.inst_ext_count;
          ci.ppEnabledExtensionNames = s_vk.inst_exts;
      }
@@ -27286,7 +27303,7 @@ index e2687b7..f926585 100644
          ir = pvkCreateInstance(&ci, NULL, &s_vk.instance);
      }
      if (ir != VK_SUCCESS) { VK_LOG("vkCreateInstance failed (VkResult %d)\n", (int)ir); return -1; }
-@@ -3004,25 +7456,97 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+@@ -3004,25 +7473,97 @@ static int vk_init_all(u32 width, u32 height, const char* title)
          vk_window_drop("no device can present to the window");
          if (vk_pick_device()) return -1;
      }
@@ -27388,7 +27405,7 @@ index e2687b7..f926585 100644
      if (vk_load_device_functions()) return -1;
      if (s_vk.windowed && vk_load_wsi_device_functions())
          vk_window_drop("the driver has no swapchain functions");
-@@ -3039,11 +7563,15 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+@@ -3039,11 +7580,15 @@ static int vk_init_all(u32 width, u32 height, const char* title)
      VK_CHECK(pvkAllocateCommandBuffers(s_vk.device, &cai, &s_vk.cmd), "vkAllocateCommandBuffers");
      VkFenceCreateInfo fci = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
      VK_CHECK(pvkCreateFence(s_vk.device, &fci, NULL, &s_vk.fence), "vkCreateFence");
@@ -27405,7 +27422,7 @@ index e2687b7..f926585 100644
      if (vk_create_image(&s_vk.depth, s_vk.depth_format, s_vk.width, s_vk.height,
                          VK_IMAGE_USAGE_TRANSFER_DST_BIT |
                          VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_IMAGE_ASPECT_DEPTH_BIT)) return -1;
-@@ -3097,13 +7625,14 @@ int rsx_vulkan_backend_init(u32 width, u32 height, const char* title)
+@@ -3097,13 +7642,14 @@ int rsx_vulkan_backend_init(u32 width, u32 height, const char* title)
       * pipeline from the guest's programs, so without them it has nothing to
       * draw with, and the vtable's fixed-function path stays the default.
       * Either way PS3RECOMP_RSX_ENGINE=dispatch|vtable overrides. */
@@ -27422,7 +27439,7 @@ index e2687b7..f926585 100644
      VK_LOG("offscreen target %ux%u ready, depth format %d (%s)\n",
             s_vk.width, s_vk.height, (int)s_vk.depth_format, title ? title : "");
      return 0;
-@@ -3125,7 +7654,9 @@ void rsx_vulkan_backend_shutdown(void)
+@@ -3125,7 +7671,9 @@ void rsx_vulkan_backend_shutdown(void)
      }
      if (s_vk.windowed || s_vk.window) vk_window_drop(NULL);
      if (s_vk.device) {
@@ -27432,7 +27449,7 @@ index e2687b7..f926585 100644
          vk_guest_shutdown();
          for (int i = 0; i < VK_PIPELINE_SLOTS; i++)
              if (s_vk.pipelines[i]) pvkDestroyPipeline(s_vk.device, s_vk.pipelines[i], NULL);
-@@ -3145,6 +7676,7 @@ void rsx_vulkan_backend_shutdown(void)
+@@ -3145,6 +7693,7 @@ void rsx_vulkan_backend_shutdown(void)
          vk_destroy_image(&s_vk.color);
          vk_destroy_buffer(&s_vk.vertices);
          vk_destroy_buffer(&s_vk.readback);
@@ -27440,7 +27457,7 @@ index e2687b7..f926585 100644
          if (s_vk.fence) pvkDestroyFence(s_vk.device, s_vk.fence, NULL);
          if (s_vk.pool)  pvkDestroyCommandPool(s_vk.device, s_vk.pool, NULL);
          pvkDestroyDevice(s_vk.device, NULL);
-@@ -3160,9 +7692,10 @@ int rsx_vulkan_backend_pump_messages(void)
+@@ -3160,9 +7709,10 @@ int rsx_vulkan_backend_pump_messages(void)
      if (!s_vk.windowed) return 0;
      int quit = 0;
      SDL_Event e;
@@ -27452,7 +27469,7 @@ index e2687b7..f926585 100644
      }
      return quit ? -1 : 0;
  }
-@@ -3186,4 +7719,4 @@ u32 rsx_vulkan_backend_guest_draws(void)
+@@ -3186,4 +7736,4 @@ u32 rsx_vulkan_backend_guest_draws(void)
      return s_vk.eng_active ? rsx_draw_engine_guest_draws() : s_g.last_draws;
  }
  
