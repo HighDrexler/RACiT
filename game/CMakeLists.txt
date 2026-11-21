@@ -380,7 +380,8 @@ if(WIN32)
 endif()
 # main.cpp's CPU check asks for what this build was compiled for.
 if(RACACIT_CPU_COMPAT)
-    set_property(SOURCE main.cpp APPEND PROPERTY COMPILE_DEFINITIONS RACACIT_CPU_COMPAT=1)
+    # The source actually compiled: game/main.cpp for the disc, the generated copy for 1.20.
+    set_property(SOURCE "${HOST_DIR}/main.cpp" APPEND PROPERTY COMPILE_DEFINITIONS RACACIT_CPU_COMPAT=1)
 endif()
 
 # ---------------------------------------------------------------------------

@@ -28,14 +28,10 @@ def rewrite_host(source, functions, addresses):
     return token.sub(replace, source)
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('elf')
-    parser.add_argument('output')
-    parser.add_argument('--profile', default='auto')
-    options = parser.parse_args()
-    profile = identify_profile(options.elf, options.profile, require_buildable=False)
-    update = profile['id'] == UPDATE
+def host_sources(profile_id):
+    """The version's main.cpp, stubs.cpp and game_version.h, from the shared sources.
+    Needs no executable: a missing 1.20 mapping raises ValueError here."""
+    update = profile_id == UPDATE
     functions, addresses = {}, {}
     if update:
         functions = {row['disc_function']: row['update120_function']
@@ -45,16 +41,22 @@ def main():
             if old in addresses and addresses[old] != new:
                 raise ValueError('Conflicting host address binding')
             addresses[old] = new
-    elif profile['id'] != 'BCUS98124-1.00':
-        raise ValueError('No host source implementation for ' + profile['id'])
+    elif profile_id != 'BCUS98124-1.00':
+        raise ValueError('No host source implementation for ' + profile_id)
     header = '#pragma once\n#include <stdint.h>\n'
-    header += '#define RACACIT_GAME_PROFILE_ID "%s"\n' % profile['id']
+    header += '#define RACACIT_GAME_PROFILE_ID "%s"\n' % profile_id
     for old, new in sorted(addresses.items()):
         header += 'static constexpr uint32_t racit_addr_%08X = 0x%08Xu;\n' % (old, new)
     prepared = {'game_version.h': header}
     for name in ('main.cpp', 'stubs.cpp'):
         source = (ROOT / 'game' / name).read_text(encoding='utf-8')
         if update:
+            if name == 'stubs.cpp':
+                # Disc-only ports of 1.20's own fixes: they name disc functions 1.20 has no
+                # host mapping for, and the update build never calls them.
+                begin, finish = '// Disc-only 1.20 fixes begin.', '// Disc-only 1.20 fixes end.'
+                start = source.index(begin)
+                source = source[:start] + source[source.index(finish, start) + len(finish):]
             source = rewrite_host(source, functions, addresses)
             if name == 'stubs.cpp':
                 start = source.index('extern "C" void racacit_skin_armor_selected(')
@@ -62,6 +64,17 @@ def main():
                 source = source[:start] + (ROOT / 'versions' / (UPDATE + '-skin.inc')).read_text(encoding='utf-8') + source[end:]
         source = source.replace('"../tools/ps3recomp/runtime/ppu/ppu_context.h"', '"ppu_context.h"')
         prepared[name] = '#include "game_version.h"\n' + source
+    return prepared
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('elf')
+    parser.add_argument('output')
+    parser.add_argument('--profile', default='auto')
+    options = parser.parse_args()
+    profile = identify_profile(options.elf, options.profile, require_buildable=False)
+    prepared = host_sources(profile['id'])
     output = Path(options.output)
     output.mkdir(parents=True, exist_ok=True)
     for name, source in prepared.items():

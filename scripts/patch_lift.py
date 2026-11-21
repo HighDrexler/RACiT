@@ -85,7 +85,7 @@ if options.elf:
         from update120_hooks import apply_update120_hooks
         apply_update120_hooks(RECOMP, options.elf)
         import subprocess
-        subprocess.run([sys.executable, os.path.join(ROOT, 'scripts', 'fix_vmx_alias.py'), RECOMP],
+        subprocess.run([sys.executable, '-X', 'utf8', os.path.join(ROOT, 'scripts', 'fix_vmx_alias.py'), RECOMP],
                        check=True)
         sys.exit(0)
     # A disc 1.00: the USA one here, the European one in scripts/retarget.py's copy.
@@ -148,7 +148,10 @@ def func_span(src, name):
 
 
 def patch_file(path):
-    src = open(path).read()
+    # Lifted sources are UTF-8 whatever the locale (Windows defaults to cp1252),
+    # and bytes that aren't UTF-8 are written back unchanged.
+    with open(path, encoding='utf-8', errors='surrogateescape') as f:
+        src = f.read()
     changed = False
 
     # Each half is tested on its own function: the lifter may put the setjmp
@@ -916,7 +919,8 @@ def patch_file(path):
         src = src[:i] + DECLS + src[i:]
         changed = True
     if changed:
-        open(path, 'w').write(src)
+        with open(path, 'w', encoding='utf-8', errors='surrogateescape') as f:
+            f.write(src)
     return changed
 
 
@@ -949,4 +953,4 @@ for lift in ('sub_BFD480_04000', 'spu_0001_at_00BED400'):
 #     high-resolution textures, and VRAM compaction then drew the striped ones).
 #     The current ppu_lifter.py does this itself; on its output this is a no-op.
 import subprocess
-subprocess.run([sys.executable, os.path.join(ROOT, 'scripts', 'fix_vmx_alias.py'), RECOMP], check=False)
+subprocess.run([sys.executable, '-X', 'utf8', os.path.join(ROOT, 'scripts', 'fix_vmx_alias.py'), RECOMP], check=False)
