@@ -239,9 +239,11 @@ GameInfo Store::game() const
     const fs::path eb = g.root / L"PS3_GAME" / L"USRDIR" / L"EBOOT.elf";
     const std::string head = read_text(eb, 4);
     // Update 1.20 with its own EBOOT.elf needs only the disc's data.
-    if ((head.size() < 4 || head.compare(0, 4, "\x7F" "ELF") != 0) && plays_update()) { g.ok = true; g.status = "Ready"; return g; }
-    if (head.size() < 4) { g.need_decrypt = true; g.status = "No EBOOT.elf yet"; return g; }
-    if (head.compare(0, 4, "\x7F" "ELF") != 0) { g.need_decrypt = true; g.status = "EBOOT.elf is still encrypted"; return g; }
+    if (head.compare(0, 4, "\x7F" "ELF") != 0 && !plays_update(g.title_id)) {
+        g.need_decrypt = true;
+        g.status = head.size() < 4 ? "No EBOOT.elf yet" : "EBOOT.elf is still encrypted";
+        return g;
+    }
     g.ok = true;
     g.status = "Ready";
     return g;
@@ -414,7 +416,13 @@ bool Store::update_ready() const
 
 bool Store::plays_update() const
 {
-    return ini.get("play_version", "1.20") != "1.00" && update_ready() && build_for(true).version != 0;
+    return plays_update(game().title_id);
+}
+
+bool Store::plays_update(const std::string& title_id) const
+{
+    return title_id == "BCUS98124" && ini.get("play_version", "1.20") != "1.00"
+        && update_ready() && build_for(true, title_id).version != 0;
 }
 
 std::string Store::import_update(const fs::path& picked, Progress* p, std::string* summary)
@@ -793,16 +801,22 @@ BuildInfo Store::current_build() const
 
 BuildInfo Store::build_for(bool update120) const
 {
+    return build_for(update120, game().title_id);
+}
+
+BuildInfo Store::build_for(bool update120, const std::string& title_id) const
+{
     // ...that has this disc's program; a build may hold only one of them.
     std::error_code ec;
-    const wchar_t* program = game_program(game().title_id);
-    const BuildInfo* any = nullptr;
-    for (const auto& b : builds()) {
+    const wchar_t* program = game_program(title_id);
+    const auto installed = builds();
+    const BuildInfo* fallback = nullptr;
+    for (const auto& b : installed) {
         if (b.update120 != update120) continue;
         if (fs::exists(b.dir / program, ec)) return b;
-        if (!any) any = &b;
+        if (!update120 && !fallback) fallback = &b;
     }
-    return any ? *any : BuildInfo{};
+    return fallback ? *fallback : BuildInfo{};
 }
 
 bool Store::set_current(int version) { return write_text_atomic(builds_dir() / L"current.txt", std::to_string(version) + "\r\n"); }
@@ -1665,8 +1679,8 @@ std::string Store::launch(void** process, bool prepare)
     reload();
     const GameInfo g = game();
     if (!g.ok) return "The game is not ready: " + g.status;
-    const bool u120 = plays_update();
-    const BuildInfo b = build_for(u120);
+    const bool u120 = plays_update(g.title_id);
+    const BuildInfo b = build_for(u120, g.title_id);
     if (!b.version) return "No build installed: reinstall the launcher.";
     std::error_code ec;
     fs::create_directories(hdd(), ec); fs::create_directories(cache(), ec);

@@ -224,6 +224,8 @@ public:
     void collect_log();
     fs::path launched_dir;
 private:
+    bool plays_update(const std::string& title_id) const;
+    BuildInfo build_for(bool update120, const std::string& title_id) const;
     std::string prepare_update_hdd();   // update files and the disc's installed data into hdd_update()
 #ifdef __APPLE__
 private:
