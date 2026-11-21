@@ -1116,7 +1116,9 @@ static bool release_part(const std::string& rel_name)
     if (n.rfind("mods/", 0) == 0) return n.size() > 5 && n.find('/', 5) != std::string::npos;
     if (n.rfind("builds/v", 0) == 0) {
         const size_t e = n.find('/', 8);
-        return e != std::string::npos && e > 8 && n.find_first_not_of("0123456789", 8) == e;
+        const size_t digits_end = n.find_first_not_of("0123456789", 8);
+        return e != std::string::npos && digits_end > 8 &&
+            (digits_end == e || (digits_end + 5 == e && n.compare(digits_end, 5, "-u120") == 0));
     }
     return false;
 }
@@ -1272,20 +1274,21 @@ std::string Store::install_release(const ReleaseInfo& rel, Progress* p, std::str
         return stop("A file could not be replaced (is something using this folder?), so your install was put back as it was.");
     }
 
-    // 5. In. Only the new build and the one before it stay (Play always starts the newest here).
+    // 5. Keep the new build, the previous build, and the latest build for each disc and game version.
     if (top_build) {
         set_current(top_build);
         int before = 0;
-        for (const auto& b : builds()) if (b.version < top_build) before = std::max(before, b.version);
-        // And the newest with each disc's program, or an update could leave a disc with none.
-        int newest_usa = 0, newest_eu = 0;
-        for (const auto& b : builds()) {
-            if (fs::exists(b.dir / RACIT_GAME_EXE, ec)) newest_usa = std::max(newest_usa, b.version);
-            if (fs::exists(b.dir / L"RaCACiT_BCES00511.exe", ec)) newest_eu = std::max(newest_eu, b.version);
+        const auto installed = builds();
+        for (const auto& b : installed) if (b.version < top_build) before = std::max(before, b.version);
+        std::set<std::pair<std::string, bool>> has_newest;
+        for (const auto& b : installed) {
+            bool keep = b.version == top_build || b.version == before;
+            for (const auto& disc : prof->discs) {
+                if (fs::exists(b.dir / disc.exe, ec) && has_newest.emplace(disc.id, b.update120).second)
+                    keep = true;
+            }
+            if (!keep) delete_tree(b.dir);
         }
-        for (const auto& b : builds())
-            if (b.version != top_build && b.version != before && b.version != newest_usa && b.version != newest_eu)
-                delete_tree(b.dir);
     }
     write_text_atomic(builds_dir() / L"release.txt", rel.tag + "\r\n");
     *restart = !new_launcher.empty();
