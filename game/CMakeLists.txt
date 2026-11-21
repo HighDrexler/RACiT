@@ -227,6 +227,7 @@ target_sources(${PROJECT_NAME} PRIVATE
     button_prompts.cpp
     menu_archive.cpp
     desktop_mouse.cpp
+    skip_puzzles.cpp
     discord_rpc.cpp
     ${LIBSRE_SOURCES}
     ${PS3RECOMP_SCAFFOLD}
