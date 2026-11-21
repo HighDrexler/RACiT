@@ -394,6 +394,8 @@ static void import_screen()
     const bool wrong = gi.status.rfind("This is", 0) == 0 || gi.status.rfind("PS3_GAME not found", 0) == 0;
     const bool have_game = fs::is_directory(gi.root / L"PS3_GAME", ec) && !wrong;
     const bool have_elf = gi.ok || fs::exists(S->pending_elf(), ec);
+    const bool show_update120 = S->supports_update120() &&
+        (gi.title_id.empty() || gi.title_id == "BCUS98124");
     const GameProfile& P = *S->prof;
     std::string discs;
     for (size_t k = 0; k < P.discs.size(); k++) discs += (k ? ", or " : "") + std::string(P.discs[k].region) + " " + P.discs[k].id;
@@ -407,10 +409,11 @@ static void import_screen()
                                           "its USRDIR. A Redump .iso is encrypted: keep its .dkey file beside it, "
                                           "with the same name, and the launcher unlocks it.\n"
                                           "2. EBOOT.elf, the game's main program unlocked with RPCS3. Already in "
-                                          "USRDIR? Then it is found by itself.\n"
+                                          "USRDIR? Then it is found by itself." + (show_update120 ?
+                                          "\n"
                                           "3. Optional, update 1.20 (USA disc): install its .pkg in RPCS3, pick the folder it "
                                           "makes (dev_hdd0/game/BCUS98124), and add its EBOOT.elf (its USRDIR/EBOOT.BIN "
-                                          "unlocked with RPCS3) in step 2. Then Play runs 1.20." });
+                                          "unlocked with RPCS3) in step 2. Then Play runs 1.20." : "") });
     scr.info.push_back({ "Making EBOOT.elf", "You must provide your own legally dumped copy of " + std::string(P.full_name) +
                                              ", and the EBOOT.elf file from your dump. If your EBOOT.elf "
                                              "reads as encrypted, RPCS3 has a decryption tool available. RACiT does "
@@ -457,6 +460,7 @@ static void import_screen()
         const fs::path usrdir = gi.root / L"PS3_GAME" / L"USRDIR";
         scr.items.push_back(button("Show EBOOT.BIN", "Its folder, to decrypt it in RPCS3", [usrdir] { shell_open(usrdir); }));
     }
+    if (show_update120) {
     // Update 1.20 (Store::import_update): the installed update's folder and its EBOOT.elf.
     const bool upd = S->update_added(), upd_elf = fs::exists(S->update_elf(), ec);
     Item u = button(upd ? (S->update_ready() ? "3. Update 1.20 added" : "3. Update 1.20 added (add its EBOOT.elf in step 2)")
@@ -477,6 +481,7 @@ static void import_screen()
         const bool on = S->ini.get("play_version", "1.20") != "1.00";
         scr.items.push_back(button(on ? "Play version: 1.20 (update)" : "Play version: 1.00 (disc)", "Switch",
                                    [on] { S->ini.put("play_version", on ? "1.00" : "1.20"); S->ini.save(); set_screen(import_screen); }));
+    }
     }
     if (gi.ok) { Item pl = button("Play", "", [] { set_screen(home); play(); }); pl.accent = true; scr.items.push_back(pl); }
     // The way most players arrive: from their 0.8 launcher, its saves, settings and game in one step.
