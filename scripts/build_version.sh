@@ -18,12 +18,14 @@ export PATH="$ROOT/tools/venv/Scripts:$PATH"
 cd "$WORK"
 PY="$PYTHON -I" SKIP_DESKTOP=1 bash scripts/pipeline.sh
 
+# The lift's hooks are checked against versions/<TITLE>-1.00-hook-symbols.txt (game/CMakeLists.txt).
 configure() {   # configure <build dir> [extra cmake args]
     local dir="$1"; shift
     cmake -S windows -B "$dir" -G Ninja -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_TOOLCHAIN_FILE="$WORK/windows/toolchain/zig-windows.cmake" \
         -DSDL2_DIR="$ROOT/tools/sdl2-win/lib/cmake/SDL2" \
-        -DPython3_EXECUTABLE="$PYTHON.exe" "$@"
+        -DPython3_EXECUTABLE="$PYTHON.exe" \
+        -DRACACIT_GAME_PROFILE="$TITLE-1.00" -DRACACIT_ELF="$ROOT/input/$TITLE/EBOOT.ELF" "$@"
 }
 configure game/build-win
 cmake --build game/build-win -j"$JOBS"

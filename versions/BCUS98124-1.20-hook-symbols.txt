@@ -1,0 +1,41 @@
+# Hook calls the patched BCUS98124-1.20 lift must contain: symbol and minimum count of
+# call sites. scripts/check_lift_hooks.py checks it at build time (game/CMakeLists.txt).
+# Add a line with every new hook in scripts/patch_lift.py or versions/*-hooks.json.
+# @function lines name functions only this executable's lift has: a lift without
+# them is another version's, and is left alone.
+@function 0066AD24
+@function 004A2DF4
+racacit_armor_look 1
+racacit_bink_opened 2
+racacit_caster_box 1
+racacit_clock_tick 1
+racacit_equip_skin 1
+racacit_follow_dist 2
+racacit_follow_dist_unscale 1
+racacit_follow_fov 1
+racacit_follow_fov_unscale 1
+racacit_force_abort 3
+racacit_frame60_at 48
+racacit_frame_limit 1
+racacit_front_end_cards 1
+racacit_front_end_menu 1
+racacit_gcm_put_moved 2
+racacit_jb_pop 1
+racacit_jb_push 1
+racacit_level_change 1
+racacit_longjmp 1
+racacit_lua_exec_hook 1
+racacit_lua_throw_hook 1
+racacit_luac_trace 43
+racacit_movie_update_hook 1
+racacit_new60 23
+racacit_skin_armor_rows 1
+racacit_skin_armor_selected 1
+racacit_snd_play_hook 4
+racacit_snd_start_end 1
+racacit_snd_stop_hook 2
+racacit_stream_pause_hook 1
+racacit_wait_begin 3
+racacit_wait_end 3
+racit_camera_take 1
+racit_publish_menu_keyboard 3
