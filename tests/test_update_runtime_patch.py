@@ -68,6 +68,17 @@ class Cases:
         self.assertFalse((self.rt / self.created).exists(), 'the earlier patch\'s own file was left behind')
         self.assert_holds(self.p2)
 
+    def test_unusable_replacement_keeps_the_current_patch(self):
+        self.assertEqual(self.run_script(self.p1).returncode, 0)
+        current = self.status()
+        bad = self.p2.with_name('unusable.patch')
+        bad.write_text('this is not a patch\n', encoding='utf-8')
+        result = self.run_script(bad)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('current patch was kept', result.stderr)
+        self.assertEqual(self.status(), current)
+        self.assert_holds(self.p1)
+
     def test_patch_left_half_after_a_restore_stops_then_reset_works(self):
         self.assertEqual(self.run_script(self.p1).returncode, 0)
         git(self.rt, 'restore', '.')            # tracked files back; the created file stays
