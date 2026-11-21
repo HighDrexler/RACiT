@@ -110,6 +110,11 @@ class Verdicts(Guards):
         result = self.run_script(Path(self.tmp.name) / 'w', '--seconds', '4', '--cap', '6')
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
 
+    def test_drawing_during_loading_is_inconclusive_at_the_cap(self):
+        self.fake('n=0; while :; do n=$((n+10)); %s; echo "[fs] read fd=3"; sleep 1; done\n' % STATS)
+        code, out = self.verdict('--cap', '10')
+        self.assertEqual(code, 2, out)
+
 
 if __name__ == '__main__':
     unittest.main()

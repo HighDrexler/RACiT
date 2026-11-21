@@ -172,10 +172,10 @@ def main():
               'signal %d' % -exited if exited < 0 else 'exit %d' % exited))
     print('log: ' + log)
     # Fails: stopped by itself (an error, a crash), never drew, or stopped drawing (a hang).
-    if exited is None and verdict == 'INCONCLUSIVE' and not (path and tex > 0 and drawing_at is not None):
+    if exited is None and verdict == 'INCONCLUSIVE' and (drawing_at is None or alive):
         print('INCONCLUSIVE (still loading or not drawing at %.0f s)' % o.cap)
         return 2
-    ok = path and tex > 0 and exited is None and alive and drawing_at is not None
+    ok = verdict is None and path and tex > 0 and exited is None and alive and drawing_at is not None
     print('PASS' if ok else 'FAIL')
     return 0 if ok else 1
 
