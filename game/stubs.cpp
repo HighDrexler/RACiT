@@ -184,7 +184,7 @@ extern "C" void racacit_longjmp(uint32_t guest_buf)
  * no file, no licence. (There are no .rap licences in a disc dump, so an
  * .edat that does exist cannot be decrypted either; report it as unlicensed.)
  * -----------------------------------------------------------------------*/
-#include "../tools/ps3recomp/runtime/ppu/ppu_context.h"
+#include "ppu_context.h"
 extern "C" void ps3_hle_register_ctx(uint32_t nid, const char* name, void (*fn)(ppu_context*));
 extern "C" uint8_t* vm_base;
 static void racacit_npdrm_is_available(ppu_context* ctx)

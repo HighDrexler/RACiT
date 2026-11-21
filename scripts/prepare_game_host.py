@@ -62,7 +62,6 @@ def host_sources(profile_id):
                 start = source.index('extern "C" void racacit_skin_armor_selected(')
                 end = source.index("/* EquipSkin's value", start)
                 source = source[:start] + (ROOT / 'versions' / (UPDATE + '-skin.inc')).read_text(encoding='utf-8') + source[end:]
-        source = source.replace('"../tools/ps3recomp/runtime/ppu/ppu_context.h"', '"ppu_context.h"')
         prepared[name] = '#include "game_version.h"\n' + source
     return prepared
 

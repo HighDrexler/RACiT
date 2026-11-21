@@ -40,8 +40,7 @@ class Update120HostSources(unittest.TestCase):
     def test_disc_sources_are_unchanged(self):
         disc = prepare_game_host.host_sources('BCUS98124-1.00')
         for name in ('main.cpp', 'stubs.cpp'):
-            self.assertTrue(disc[name].endswith((ROOT / 'game' / name).read_text(encoding='utf-8')
-                                                .replace('"../tools/ps3recomp/runtime/ppu/ppu_context.h"', '"ppu_context.h"')))
+            self.assertTrue(disc[name].endswith((ROOT / 'game' / name).read_text(encoding='utf-8')))
 
 
 if __name__ == '__main__':
