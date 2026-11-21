@@ -531,9 +531,9 @@ std::string Store::prepare_update_hdd()
     std::string r = copy_tree(update_dir() / L"USRDIR", inst / L"USRDIR", &p);
     if (!r.empty()) return r;
     const fs::path disc = hdd() / L"game" / L"BCUS98124";
-    if (fs::is_directory(disc, ec))
+    if (fs::exists(disc, ec) && fs::is_directory(disc, ec))
         for (auto it = fs::recursive_directory_iterator(disc, ec); !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
-            const fs::path to = inst / fs::relative(it->path(), disc, ec);
+            const fs::path to = inst / it->path().lexically_relative(disc);
             if (it->is_directory(ec)) { fs::create_directories(to, ec); continue; }
             if (it->is_regular_file(ec) && !fs::exists(to, ec) && !clone_file(it->path(), to))
                 return "cannot copy " + u8(it->path()) + " into " + u8(to);
