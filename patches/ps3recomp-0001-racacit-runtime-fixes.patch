@@ -32286,7 +32286,7 @@ index fd2c2078..9c89ac12 100644
  }
  
 diff --git a/runtime/spu/spu_channels.c b/runtime/spu/spu_channels.c
-index 84b7ac96..24b18bee 100644
+index 84b7ac9..24b18be 100644
 --- a/runtime/spu/spu_channels.c
 +++ b/runtime/spu/spu_channels.c
 @@ -23,7 +23,7 @@
@@ -33539,10 +33539,13 @@ index 84b7ac96..24b18bee 100644
      /* One-shot: the FMOD null-handler DSP node carries a PPU descriptor EA at
       * node+0x14 (observed 0x93C3C0). Dump it to identify which plugin/unit
       * type never got its SPU code streamed (env SPU_DSPDESC=<hex ea>). */
-@@ -3407,3 +4330,43 @@ void spu_trace_rt(spu_context* ctx, uint32_t rt)
+@@ -3406,4 +4329,44 @@ void spu_trace_rt(spu_context* ctx, uint32_t rt)
+ 
  #ifdef __cplusplus
  }
- #endif
+-#endif
+\ No newline at end of file
++#endif
 +/* racacit: see spu_ls_write128. Names the lifted function (by its LS entry
 + * and image) whose code issued the store, from the caller's host address:
 + * the registry entry with the nearest host start at or below it. */
