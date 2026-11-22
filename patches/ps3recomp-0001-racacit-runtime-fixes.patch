@@ -354,7 +354,7 @@ index 00000000..68a27955
 +
 +#endif /* AUDIO_STRETCH_H */
 diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
-index f231ea26..ebae79fd 100644
+index f231ea26..65efbcac 100644
 --- a/libs/audio/cellAudio.c
 +++ b/libs/audio/cellAudio.c
 @@ -13,12 +13,17 @@
@@ -758,7 +758,7 @@ index f231ea26..ebae79fd 100644
  }
  
  static void audio_backend_wait(void) { SDL_Delay(1); }
-@@ -230,6 +545,15 @@ static u32 audio_backend_queued_samples(void)
+@@ -230,6 +545,28 @@ static u32 audio_backend_queued_samples(void)
      return 0;
  }
  
@@ -771,10 +771,23 @@ index f231ea26..ebae79fd 100644
 +    return d > 0.0 ? d / CELL_AUDIO_BLOCK_SAMPLES : 0.0;
 +}
 +
++/* Count the device backlog beyond its minimum alongside the staged audio. */
++static double audio_buffered_blocks(void)
++{
++    double have = audio_st_blocks();
++#if AUDIO_DEV_MAX_BLOCKS > AUDIO_DEV_BLOCKS
++    if (!audio_legacy()) {
++        const double queued = (double)audio_backend_queued_samples() / CELL_AUDIO_BLOCK_SAMPLES;
++        if (queued > s_dev_min) have += queued - s_dev_min;
++    }
++#endif
++    return have;
++}
++
  #endif /* AUDIO_BACKEND_SDL2 */
  
  #if AUDIO_BACKEND_WASAPI
-@@ -436,10 +760,37 @@ static inline float ld_be_f32(const float* p)
+@@ -436,10 +773,37 @@ static inline float ld_be_f32(const float* p)
      return f;
  }
  
@@ -812,7 +825,7 @@ index f231ea26..ebae79fd 100644
  
      mutex_lock(&s_audio_mutex);
  
-@@ -473,15 +824,21 @@ static void audio_mix_one_block(void)
+@@ -473,15 +837,21 @@ static void audio_mix_one_block(void)
  
          /* Read one block at the current read_index */
          u32 block_idx = (u32)(port->read_index % nblock);
@@ -837,7 +850,7 @@ index f231ea26..ebae79fd 100644
                  char map[36]; u32 b;
                  for (b = 0; b < nblock && b < 32; b++) {
                      const float* bp = port->buffer + b * CELL_AUDIO_BLOCK_SAMPLES * nch;
-@@ -491,11 +848,10 @@ static void audio_mix_one_block(void)
+@@ -491,11 +861,10 @@ static void audio_mix_one_block(void)
                      map[b] = nz ? '#' : '.';
                  }
                  map[b] = 0;
@@ -851,7 +864,7 @@ index f231ea26..ebae79fd 100644
          /* AUDIO_RATE: a block with nothing in it right after one with sound is a hole, the guest's audio engine late
           * with it (what the mix then plays is a click or a gap, whatever the device does). */
          { static int hole_on = -1; static u32 prev_nz[CELL_AUDIO_PORT_MAX];
-@@ -504,7 +860,6 @@ static void audio_mix_one_block(void)
+@@ -504,7 +873,6 @@ static void audio_mix_one_block(void)
              for (u32 s2 = 0; s2 < CELL_AUDIO_BLOCK_SAMPLES * nch; s2 += 2) if (src[s2] != 0.0f) { nz = 1; break; }
              if (!nz && prev_nz[p]) g_audio_holes[p]++;
              prev_nz[p] = nz; } }
@@ -859,7 +872,7 @@ index f231ea26..ebae79fd 100644
  
          for (u32 s = 0; s < CELL_AUDIO_BLOCK_SAMPLES; s++) {
              float left, right;
-@@ -532,17 +887,37 @@ static void audio_mix_one_block(void)
+@@ -532,17 +900,37 @@ static void audio_mix_one_block(void)
              s_mix_buffer[s * 2 + 1] += right;
          }
  
@@ -899,7 +912,7 @@ index f231ea26..ebae79fd 100644
      }
  
      mutex_unlock(&s_audio_mutex);
-@@ -552,6 +927,145 @@ static void audio_mix_one_block(void)
+@@ -552,6 +940,145 @@ static void audio_mix_one_block(void)
          if (s_mix_buffer[i] > 1.0f) s_mix_buffer[i] = 1.0f;
          if (s_mix_buffer[i] < -1.0f) s_mix_buffer[i] = -1.0f;
      }
@@ -1001,7 +1014,7 @@ index f231ea26..ebae79fd 100644
 +        u32 skipped = 0; int paced = 0;
 +        const int late = audio_game_late(&skipped, &paced);
 +        if (skipped) s_late_skips++;
-+        if (late || (paced && audio_st_blocks() >= (double)s_q_target)) return;
++        if (late || (paced && audio_buffered_blocks() >= (double)s_q_target)) return;
 +        audio_mix_one_block();
 +        ds_audio_submit();
 +        ast_push(&s_st, s_mix_buffer, CELL_AUDIO_BLOCK_SAMPLES);
@@ -1045,7 +1058,7 @@ index f231ea26..ebae79fd 100644
  }
  
  /* ---------------------------------------------------------------------------
-@@ -560,6 +1074,15 @@ static void audio_mix_one_block(void)
+@@ -560,6 +1087,15 @@ static void audio_mix_one_block(void)
  
  static void audio_notify_event_queues(void)
  {
@@ -1061,7 +1074,7 @@ index f231ea26..ebae79fd 100644
      /* Push the audio-period event (data1 = CELL_AUDIO_EVENT_MIX = 0) to each
       * registered notify queue, so the game's audio loop (blocked on
       * sys_event_queue_receive) wakes once per block and writes the next one.
-@@ -567,12 +1090,67 @@ static void audio_notify_event_queues(void)
+@@ -567,11 +1103,66 @@ static void audio_notify_event_queues(void)
      for (int i = 0; i < CELL_AUDIO_MAX_NOTIFY_EVENT_QUEUES; i++) {
          if (!s_notify_queues[i].in_use) continue;
          uint32_t qid = sys_event_find_queue_by_key(s_notify_queues[i].key);
@@ -1072,9 +1085,9 @@ index f231ea26..ebae79fd 100644
                                         0 /*CELL_AUDIO_EVENT_MIX*/, 0, 0);
 +            if (rc == 0) g_audio_push_ok++; else g_audio_push_fail++;
 +        } else g_audio_push_fail++;
-     }
- }
- 
++    }
++}
++
 +/* The clock of what the game sees: one step per block in real time, with the
 + * period event its frame waits on. The step leans 1% to keep what is buffered
 + * (device queue + stretcher + finished unread blocks) near the target: the device's clock
@@ -1124,14 +1137,13 @@ index f231ea26..ebae79fd 100644
 +        }
 +        t_next += step;
 +        audio_notify_event_queues();
-+    }
-+}
+     }
+ }
 +#endif
-+
+ 
  /* The loudest sample of the block just mixed (AUDIO_PEAK). */
  static float audio_mix_peak(void)
- {
-@@ -584,23 +1162,89 @@ static float audio_mix_peak(void)
+@@ -584,23 +1175,85 @@ static float audio_mix_peak(void)
      return pk;
  }
  
@@ -1165,11 +1177,7 @@ index f231ea26..ebae79fd 100644
 +    static float out[CELL_AUDIO_BLOCK_SAMPLES * 2];
 +    static double smooth = 1.0;
 +    static int filling;
-+    double have = audio_st_blocks();
-+#if AUDIO_DEV_MAX_BLOCKS > AUDIO_DEV_BLOCKS
-+    if (!audio_legacy()) { const double dq = (double)audio_backend_queued_samples() / CELL_AUDIO_BLOCK_SAMPLES;
-+      if (dq > s_dev_min) have += dq - s_dev_min; }
-+#endif
++    const double have = audio_buffered_blocks();
 +    const double err = (double)s_q_target - have;
 +    double r = 1.0;
 +#ifdef __APPLE__
@@ -1229,7 +1237,7 @@ index f231ea26..ebae79fd 100644
      /* The device deadline is every few ms and the guest threads keep every
       * core busy: run this one ahead of them (MMCSS "Pro Audio" when the
       * service is there, the highest normal priority anyway). avrt.dll is
-@@ -612,6 +1256,7 @@ static unsigned __stdcall audio_mix_thread_func(void* arg)
+@@ -612,6 +1265,7 @@ static unsigned __stdcall audio_mix_thread_func(void* arg)
        DWORD task = 0;
        if (set_mm && !set_mm(L"Pro Audio", &task))
            fprintf(stderr, "[cellAudio] MMCSS Pro Audio unavailable (%lu)%c", (unsigned long)GetLastError(), 10); }
@@ -1237,7 +1245,7 @@ index f231ea26..ebae79fd 100644
  
      /* Pace to the device clock. The PS3 consumes one block every 5.33 ms;
       * the old Sleep(2)/Sleep(5) loop keyed on a queue depth the 1056-frame
-@@ -623,6 +1268,29 @@ static unsigned __stdcall audio_mix_thread_func(void* arg)
+@@ -623,6 +1277,29 @@ static unsigned __stdcall audio_mix_thread_func(void* arg)
      unsigned long long blocks = 0;
      while (s_mix_thread_running) {
          const int room = audio_backend_room();
@@ -1267,7 +1275,7 @@ index f231ea26..ebae79fd 100644
          if (room >= 0 && room < CELL_AUDIO_BLOCK_SAMPLES) { audio_backend_wait(); continue; }
  #if AUDIO_BACKEND_WASAPI
          /* Device queue under half a block: it is about to play silence (an
-@@ -650,7 +1318,7 @@ static unsigned __stdcall audio_mix_thread_func(void* arg)
+@@ -650,7 +1327,7 @@ static unsigned __stdcall audio_mix_thread_func(void* arg)
            if (_ap) { static unsigned _n = 0; const float pk = audio_mix_peak();
              if ((++_n % 200) == 0 || (pk > 0.001f && _n < 40))
                  fprintf(stderr, "[audio-peak] block#%u peak=%.4f\n", _n, pk); } }
@@ -1276,7 +1284,7 @@ index f231ea26..ebae79fd 100644
          audio_backend_submit(s_mix_buffer, CELL_AUDIO_BLOCK_SAMPLES);
          /* AUDIO_RATE=1: blocks mixed vs real time, and frames dropped. */
          { static int on = -1; if (on < 0) on = getenv("AUDIO_RATE") ? 1 : 0;
-@@ -675,43 +1343,28 @@ static unsigned __stdcall audio_mix_thread_func(void* arg)
+@@ -675,43 +1352,28 @@ static unsigned __stdcall audio_mix_thread_func(void* arg)
      }
  
      printf("[cellAudio] Mixing thread stopped\n");
@@ -1331,7 +1339,7 @@ index f231ea26..ebae79fd 100644
  
  #ifdef _WIN32
      s_mix_thread = (HANDLE)_beginthreadex(NULL, 0, audio_mix_thread_func,
-@@ -782,15 +1435,9 @@ s32 cellAudioInit(void)
+@@ -782,15 +1444,9 @@ s32 cellAudioInit(void)
      }
  
  
@@ -1350,7 +1358,7 @@ index f231ea26..ebae79fd 100644
      if (audio_start_mix_thread() < 0) {
          printf("[cellAudio] WARNING: Could not start mixing thread\n");
      }
-@@ -868,7 +1515,13 @@ s32 cellAudioPortOpen(const CellAudioPortParam* param, u32* portNum)
+@@ -868,7 +1524,13 @@ s32 cellAudioPortOpen(const CellAudioPortParam* param, u32* portNum)
      port->param.nChannel = nch;
      port->param.nBlock   = nblk;
      port->read_index  = 0;
@@ -1364,7 +1372,7 @@ index f231ea26..ebae79fd 100644
  
      /* Allocate the audio buffer in GUEST memory so portAddr/readIndexAddr are
       * real guest addresses (the game's mixer -- FMOD here -- writes PCM there
-@@ -973,6 +1626,10 @@ s32 cellAudioPortStop(u32 portNum)
+@@ -973,6 +1635,10 @@ s32 cellAudioPortStop(u32 portNum)
  
  s32 cellAudioGetPortBlockTag(u32 portNum, u64 blockNo, u64* tag)
  {
@@ -1375,7 +1383,7 @@ index f231ea26..ebae79fd 100644
      uint32_t tag_ea = (uint32_t)(uintptr_t)tag;
      if (!s_audio_initialized)
          return CELL_AUDIO_ERROR_NOT_INIT;
-@@ -990,8 +1647,8 @@ s32 cellAudioGetPortBlockTag(u32 portNum, u64 blockNo, u64* tag)
+@@ -990,8 +1656,8 @@ s32 cellAudioGetPortBlockTag(u32 portNum, u64 blockNo, u64* tag)
          mutex_unlock(&s_audio_mutex);
          return CELL_AUDIO_ERROR_PARAM;
      }
@@ -1386,7 +1394,7 @@ index f231ea26..ebae79fd 100644
      mutex_unlock(&s_audio_mutex);
  
      vm_write64(tag_ea, t);
-@@ -1000,6 +1657,10 @@ s32 cellAudioGetPortBlockTag(u32 portNum, u64 blockNo, u64* tag)
+@@ -1000,6 +1666,10 @@ s32 cellAudioGetPortBlockTag(u32 portNum, u64 blockNo, u64* tag)
  
  s32 cellAudioGetPortTimestamp(u32 portNum, u64 tag, u64* stamp)
  {
@@ -1397,7 +1405,7 @@ index f231ea26..ebae79fd 100644
      uint32_t stamp_ea = (uint32_t)(uintptr_t)stamp;
      if (!s_audio_initialized)
          return CELL_AUDIO_ERROR_NOT_INIT;
-@@ -1011,7 +1672,7 @@ s32 cellAudioGetPortTimestamp(u32 portNum, u64 tag, u64* stamp)
+@@ -1011,7 +1681,7 @@ s32 cellAudioGetPortTimestamp(u32 portNum, u64 tag, u64* stamp)
          return CELL_AUDIO_ERROR_PARAM;
  
      mutex_lock(&s_audio_mutex);
@@ -9179,7 +9187,7 @@ index c4e4d849..0ed12868 100644
  /* ---- decoded state getters -------------------------------------------- */
  
 diff --git a/libs/video/rsx_draw_engine.c b/libs/video/rsx_draw_engine.c
-index 19548e0a..e6fe4853 100644
+index 19548e0a..caf1145f 100644
 --- a/libs/video/rsx_draw_engine.c
 +++ b/libs/video/rsx_draw_engine.c
 @@ -11,6 +11,7 @@
@@ -9664,7 +9672,7 @@ index 19548e0a..e6fe4853 100644
  #undef ENG_HASH_FIELD
      return hash;
  }
-@@ -723,110 +1025,336 @@ static const void* eng_surface_seed(u32 location, u32 offset, u32 w, u32 h,
+@@ -723,110 +1025,337 @@ static const void* eng_surface_seed(u32 location, u32 offset, u32 w, u32 h,
      return g.tex_staging;
  }
  
@@ -9778,9 +9786,15 @@ index 19548e0a..e6fe4853 100644
 +            return s_retired[i].why;
 +    return NULL;
 +}
-+/* Returns nonzero only when the pixels could not be read back (the target
-+ * should then stay): 0 when they are in guest memory now, were already, or
-+ * cannot be put there (the reason is noted). */
++/* The game reuses main-memory ranges for other data, including SPU code.
++ * Without write watch, the GPU copy must stay until it is superseded. */
++static int eng_surface_has_unbacked_main_pixels(const eng_surface* s)
++{
++    return s->location == 1 && s->handle && s->color_written &&
++           s->synced_serial != s->last_write && !rsx_ww_on();
++}
++
++/* Nonzero keeps the surface because write-back failed or would be unsafe. */
 +static int eng_surface_retire(u32 slot)
 +{
 +    eng_surface* s = &g.surfaces[slot];
@@ -9789,6 +9803,7 @@ index 19548e0a..e6fe4853 100644
 +    /* Guest memory has its last drawing already (a CPU copy or blit read it
 +     * back): no second readback, each of which waits for the GPU. */
 +    if (s->synced_serial == s->last_write) return 0;
++    if (eng_surface_has_unbacked_main_pixels(s)) { n_skip++; return -1; }
 +    const unsigned long long age = (unsigned long long)(g.surf_serial - s->last_use);
 +    const int swz = s->raster == 2;
 +    const char* why = NULL;
@@ -9806,13 +9821,6 @@ index 19548e0a..e6fe4853 100644
 +                s->location, s->offset, s->w, s->h, swz ? " swizzled" : "", age, n_ret, 10);
 +    if (why) { eng_retired_note(s, span ? span : s->w * s->h * 4u, why); return 0; }
 +    if (rsx_ww_on() && rsx_ww_guest_written_since(dst, span, s->ww_epoch)) { n_skip++; return 0; }
-+    /* Without the write watch (macOS, or RACACIT_NO_WRITE_WATCH) the engine
-+     * cannot tell whether the game has reused this memory since the target
-+     * was drawn. In main memory the game recycles such ranges for other data
-+     * (SPU job code and buffers among it), and writing stale pixels over them
-+     * hung Zolar Forest: an SPU job then branched into the pixels. Leave main
-+     * memory alone; local (video) memory only ever holds graphics. */
-+    if (!rsx_ww_on() && s->location == 1) { n_skip++; return 0; }
 +    u8* px = (u8*)malloc((size_t)s->w * s->h * 4u);
 +    if (!px) return -1;
 +    /* A failed readback writes nothing: the buffer is not pixels. */
@@ -10014,8 +10022,6 @@ index 19548e0a..e6fe4853 100644
 -        } else {
 -            slot = eng_oldest_slot("surface", &g.surfaces[0].last_use, sizeof(eng_surface),
 -                                   g.n_surfaces, g.last_present_surface);
--            if (slot == ENG_INVALID) return ENG_INVALID;
--            evicted = 1;
 +        if (logs++ < 8)
 +            fprintf(stderr, "[rsx engine] rejected implausible surface 0x%X %ux%u%c",
 +                    offset, want_w, want_h, 10);
@@ -10026,10 +10032,12 @@ index 19548e0a..e6fe4853 100644
 +        slot = g.n_surfaces;
 +    } else {
 +        slot = eng_surface_victim();
-+        if (slot == ENG_INVALID) {                 /* least recently bound */
-+            slot = 0;
-+            for (u32 i = 1; i < g.n_surfaces; i++)
-+                if (g.surfaces[i].last_use < g.surfaces[slot].last_use) slot = i;
++        if (slot == ENG_INVALID) {                 /* least recently bound that can be evicted */
++            for (u32 i = 0; i < g.n_surfaces; i++)
++                if (!eng_surface_has_unbacked_main_pixels(&g.surfaces[i]) &&
++                    (slot == ENG_INVALID || g.surfaces[i].last_use < g.surfaces[slot].last_use)) slot = i;
+             if (slot == ENG_INVALID) return ENG_INVALID;
+-            evicted = 1;
 +            eng_surface_retire(slot);
          }
      }
@@ -10074,7 +10082,7 @@ index 19548e0a..e6fe4853 100644
          fprintf(stderr, "[rsx engine] surface %u:0x%08X %ux%u fmt %d%s\n",
                  location, offset, want_w, want_h, (int)want_fmt,
                  seed ? " (seeded from guest memory)" : ""); }
-@@ -839,10 +1367,29 @@ static u32 eng_surface_get(u32 location, u32 offset, u32 want_w, u32 want_h,
+@@ -839,10 +1368,29 @@ static u32 eng_surface_get(u32 location, u32 offset, u32 want_w, u32 want_h,
   * vtable path's target_for binds by. Resolution stops at the first member
   * that cannot be created, as that path stops at the first gap. Returns how
   * many were resolved, or 0. */
@@ -10105,7 +10113,7 @@ index 19548e0a..e6fe4853 100644
      /* SET_SURFACE_COLOR_TARGET 2 selects B alone; every other value starts at
       * A, and the MRT selectors add B, C and D on top of it. */
      const u32 sel = (sf.color_target == CELL_GCM_SURFACE_TARGET_1) ? 1u : 0u;
-@@ -852,6 +1399,9 @@ static u32 eng_current_target_set(u32 slots[RSX_BE_MAX_COLOR_TARGETS])
+@@ -852,6 +1400,9 @@ static u32 eng_current_target_set(u32 slots[RSX_BE_MAX_COLOR_TARGETS])
                                        sf.clip_w, sf.clip_h, fmt, sf.color_pitch[sel], aa_grid);
      if (first == ENG_INVALID) return 0;
      g.surfaces[first].pitch = sf.color_pitch[sel];
@@ -10115,7 +10123,7 @@ index 19548e0a..e6fe4853 100644
      slots[0] = first;
      u32 n = 1;
  
-@@ -1073,69 +1623,197 @@ static void eng_zdepth_extend(eng_zdepth* z, u32 rt_w, u32 rt_h)
+@@ -1073,69 +1624,197 @@ static void eng_zdepth_extend(eng_zdepth* z, u32 rt_w, u32 rt_h)
      if (rt_h > z->ext_h) z->ext_h = rt_h < z->h ? rt_h : z->h;
  }
  
@@ -10339,7 +10347,7 @@ index 19548e0a..e6fe4853 100644
      return slot;
  }
  
-@@ -1143,38 +1821,209 @@ static u32 eng_zdepth_get(u32 location, u32 offset, u32 rt_w, u32 rt_h)
+@@ -1143,38 +1822,209 @@ static u32 eng_zdepth_get(u32 location, u32 offset, u32 rt_w, u32 rt_h)
   * a depth-WRITING draw: a write-enable bit alone does not prove the pass
   * produced a usable depth map, and a clear-only zeta falls through to guest
   * memory instead (rsx_live_draw.c:6016-6018, 6265-6269). */
@@ -10572,7 +10580,7 @@ index 19548e0a..e6fe4853 100644
  
  /* PS3RECOMP_ENG_DEPTH_VIA_GUEST=1 (read at engine init): a depth target read
   * as A8R8G8B8 or DEPTH16 goes through guest memory even when the backend can
-@@ -1197,7 +2046,7 @@ static int s_depth_via_guest;
+@@ -1197,7 +2047,7 @@ static int s_depth_via_guest;
   * shadow map, takes the same way: without it every read of a freshly
   * rendered shadow map is a wait for the GPU plus a decode and an upload of
   * up to 2 MB. Returns the view, or 0 for the store through guest memory. */
@@ -10581,7 +10589,7 @@ index 19548e0a..e6fe4853 100644
  {
      eng_zdepth* z = &g.zdepths[slot];
      const u32 base_fmt = t->format & RSX_TEX_FMT_BASE_MASK & ~(u32)RSX_TEX_FMT_UNNORM;
-@@ -1310,6 +2159,9 @@ static void eng_unvtc_3d_slice(u8* dst, const u8* src, u32 blocks, u32 d, u32 z,
+@@ -1310,6 +2160,9 @@ static void eng_unvtc_3d_slice(u8* dst, const u8* src, u32 blocks, u32 d, u32 z,
  /* One hash per cached texture per presented frame. Word-at-a-time FNV over
   * the whole span is deliberately cheap: this is a mutation detector, not a
   * content id (rsx_live_draw.c:2002-2026). */
@@ -10591,7 +10599,7 @@ index 19548e0a..e6fe4853 100644
  static u64 eng_texture_content_hash(u32 location, u32 offset, u32 span,
                                      int* readable)
  {
-@@ -1317,15 +2169,10 @@ static u64 eng_texture_content_hash(u32 location, u32 offset, u32 span,
+@@ -1317,15 +2170,10 @@ static u64 eng_texture_content_hash(u32 location, u32 offset, u32 span,
      if (rsx_tiling_active()) rsx_tiling_footprint(location, offset, span, &offset, &span);
      const u8* src = span ? eng_guest_ptr(NULL, location, offset, span) : NULL;
      if (!src) { *readable = 0; return 0; }
@@ -10611,7 +10619,7 @@ index 19548e0a..e6fe4853 100644
      *readable = 1;
      return hash;
  }
-@@ -1381,13 +2228,93 @@ static int eng_staging_reserve(u32 bytes)
+@@ -1381,13 +2229,93 @@ static int eng_staging_reserve(u32 bytes)
  }
  
  /* Decode a guest texture out of guest memory and hand every face and level to
@@ -10710,7 +10718,7 @@ index 19548e0a..e6fe4853 100644
      rsx_tex_level lv[RSX_MAX_TEXTURE_LEVELS];
      const u32 nlv = rsx_texture_mip_chain(fmt, w, h, levels, pitch, lv);
      if (!nlv || !lv[0].tl.face_bytes) return 0;
-@@ -1446,14 +2373,39 @@ static u32 eng_texture_upload(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
+@@ -1446,14 +2374,39 @@ static u32 eng_texture_upload(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
      const u32 span = eng_texture_span(fmt, w, h, levels, pitch, cube);
      const u8* src = eng_guest_linear(location, offset, span);
      if (!src) return 0;
@@ -10753,7 +10761,7 @@ index 19548e0a..e6fe4853 100644
              const rsx_tex_layout* tl = &lv[m].tl;
              if (!eng_staging_reserve(tl->dst_row_bytes * tl->rows)) {
                  if (!into) g.be->texture_release(g.be->user, handle);
-@@ -1462,7 +2414,12 @@ static u32 eng_texture_upload(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
+@@ -1462,7 +2415,12 @@ static u32 eng_texture_upload(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
              rsx_texture_decode(g.tex_staging, tl->dst_row_bytes,
                                 face + lv[m].offset, lv[m].w, lv[m].h, tl,
                                 rsx_texture_argb_is_rgba());
@@ -10767,7 +10775,7 @@ index 19548e0a..e6fe4853 100644
                                   g.tex_staging, tl->dst_row_bytes, tl->rows);
          }
      }
-@@ -1476,114 +2433,241 @@ static u32 eng_texture_upload(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
+@@ -1476,114 +2434,241 @@ static u32 eng_texture_upload(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
   * cache full evicts the least recently used entry rather than returning
   * nothing: returning white "made the recovered orphanage render as flat
   * green/black geometry" (rsx_live_draw.c:2326-2334). */
@@ -10810,7 +10818,7 @@ index 19548e0a..e6fe4853 100644
 + * reuse against a fresh conversion), 8 texture units a program samples that
 + * end up with nothing bound. A mismatch is also repaired (converted again). */
 +static int eng_verify(int bit)
-+{
+ {
 +    static int v = -1;
 +    if (v < 0) { const char* e = getenv("RSX_ENG_VERIFY"); v = e ? (int)strtol(e, 0, 0) : 0; }
 +    return (v & bit) != 0;
@@ -10825,7 +10833,7 @@ index 19548e0a..e6fe4853 100644
 +
 +static u32 eng_texture_slot_core(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
 +                                 u32 levels, u32 pitch, int cube, u32 remap, u32 depth)
- {
++{
 +    /* RACiT: a volume only where the backend takes one (upstream's
 +     * texture_create_3d); otherwise depth 1 and the stacked-slices path
 +     * (eng_tex3d_ok) as before. The cache identity does not hold `depth`. */
@@ -11081,7 +11089,7 @@ index 19548e0a..e6fe4853 100644
  }
  
  /* ---- surfaces read through guest memory --------------------------------- */
-@@ -1748,40 +2832,269 @@ static void eng_surfaces_wrote(const u32* targets, u32 n_targets)
+@@ -1748,35 +2833,264 @@ static void eng_surfaces_wrote(const u32* targets, u32 n_targets)
      }
  }
  
@@ -11153,11 +11161,7 @@ index 19548e0a..e6fe4853 100644
 -                               rsx_be_sampler_desc* out)
 +/* 1 when [off, off + n) at `loc` overlaps the parked source, 2 the copy, 0 neither. */
 +static int eng_park_range(u32 loc, u32 off, u32 n)
- {
--    const u32 minf = (filter >> 16) & 7u;
--    const u32 magf = (filter >> 24) & 7u;
--    out->min_linear  = (u8)(minf == 2 || minf == 4 || minf == 6);
--    out->mag_linear  = (u8)(magf == 2);
++{
 +    if (!s_park.flips_left) return 0;
 +    const u64 lo = off, hi = (u64)off + n;
 +    if (loc == s_park.src_loc && lo < (u64)s_park.src_off + s_park.bytes && hi > s_park.src_off) return 1;
@@ -11372,15 +11376,10 @@ index 19548e0a..e6fe4853 100644
 +
 +static void eng_decode_sampler(u32 filter, u32 wrap, u32 control0,
 +                               rsx_be_sampler_desc* out)
-+{
-+    const u32 minf = (filter >> 16) & 7u;
-+    const u32 magf = (filter >> 24) & 7u;
-+    out->min_linear  = (u8)(minf == 2 || minf == 4 || minf == 6);
-+    out->mag_linear  = (u8)(magf == 2);
-     out->mip_present = (u8)(minf >= 3);
-     out->mip_linear  = (u8)(minf == 5 || minf == 6);
-     out->wrap_s = (u8)(wrap & 0xFu);
-@@ -1844,6 +3157,121 @@ static u32 eng_volume_mask(void)
+ {
+     const u32 minf = (filter >> 16) & 7u;
+     const u32 magf = (filter >> 24) & 7u;
+@@ -1844,6 +3158,121 @@ static u32 eng_volume_mask(void)
      return mask;
  }
  
@@ -11502,7 +11501,7 @@ index 19548e0a..e6fe4853 100644
  static u32 eng_cube_mask(void)
  {
      u32 mask = 0;
-@@ -1864,6 +3292,10 @@ static u32 eng_cube_mask(void)
+@@ -1864,6 +3293,10 @@ static u32 eng_cube_mask(void)
   * layout and by the pipeline, because they must not disagree: the built-in
   * program declares all sixteen inputs, so narrowing the layout for it would
   * leave the pipeline's vertex descriptor short of what the shader reads. */
@@ -11513,7 +11512,7 @@ index 19548e0a..e6fe4853 100644
  static int eng_guest_programs(const u8** out_vp, u32* out_vp_instrs,
                                const u8** out_fp, u32* out_fp_size)
  {
-@@ -1872,8 +3304,16 @@ static int eng_guest_programs(const u8** out_vp, u32* out_vp_instrs,
+@@ -1872,8 +3305,16 @@ static int eng_guest_programs(const u8** out_vp, u32* out_vp_instrs,
      const u32 start = rsx_dsp_vp_start(&g.rsx);
      if (start < RSX_DSP_VP_INSTR) {
          vp_uc = (const u8*)(g.rsx.vp + start * 4);
@@ -11532,7 +11531,7 @@ index 19548e0a..e6fe4853 100644
      }
  
      /* A zero SET_SHADER_PROGRAM is "none", not "the program at offset 0": the
-@@ -1881,16 +3321,27 @@ static int eng_guest_programs(const u8** out_vp, u32* out_vp_instrs,
+@@ -1881,16 +3322,27 @@ static int eng_guest_programs(const u8** out_vp, u32* out_vp_instrs,
       * never read back as zero. */
      const u8* fp_uc = NULL;
      u32 fp_size = 0;
@@ -11570,7 +11569,7 @@ index 19548e0a..e6fe4853 100644
      }
  
      if (out_vp) *out_vp = vp_uc;
-@@ -1908,10 +3359,17 @@ static void eng_vertex_layout(rsx_vertex_layout_plan* layout)
+@@ -1908,10 +3360,17 @@ static void eng_vertex_layout(rsx_vertex_layout_plan* layout)
      const u8* uc = NULL;
      u32 instrs = 0;
      if (eng_guest_programs(&uc, &instrs, NULL, NULL)) {
@@ -11592,7 +11591,7 @@ index 19548e0a..e6fe4853 100644
      }
      rsx_vertex_layout_plan_init(layout, mask);
  }
-@@ -1988,6 +3446,47 @@ static u32 eng_sampled_units(const char* ps)
+@@ -1988,6 +3447,47 @@ static u32 eng_sampled_units(const char* ps)
      return mask;
  }
  
@@ -11640,7 +11639,7 @@ index 19548e0a..e6fe4853 100644
  /* The pipeline for this draw, built once per distinct key. A negative result
   * is cached too (handle 0), so a program pair that will not translate is not
   * retried on every draw of every frame. `out_tex_used` gets the units the
-@@ -2109,6 +3608,9 @@ static int eng_depth_bounds_on(void)
+@@ -2109,6 +3609,9 @@ static int eng_depth_bounds_on(void)
  static void eng_depth_bounds_prepare(u32 zslot, const rsx_be_render_state* rs)
  {
      s_dbz.unit = 0; s_dbz.copy = 0;
@@ -11650,7 +11649,7 @@ index 19548e0a..e6fe4853 100644
      if (g.be->set_depth_bounds || !g.be->depth_snapshot || !rs->depth_bounds_test ||
          zslot == ENG_INVALID || !eng_depth_bounds_on())
          return;
-@@ -2148,11 +3650,110 @@ static void eng_depth_bounds_prepare(u32 zslot, const rsx_be_render_state* rs)
+@@ -2148,11 +3651,110 @@ static void eng_depth_bounds_prepare(u32 zslot, const rsx_be_render_state* rs)
      s_dbz.mn = mn; s_dbz.mx = mx;
  }
  
@@ -11761,7 +11760,7 @@ index 19548e0a..e6fe4853 100644
      *out_fixed = 1;
      *out_tex_used = 0;
      *out_fp_hash = 0;
-@@ -2161,69 +3762,73 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
+@@ -2161,69 +3763,73 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
      u32 vp_instrs = 0, fp_size = 0;
      /* No resident program pair means the built-in one; see kEngFixedVS. */
      const int fixed = !eng_guest_programs(&vp_uc, &vp_instrs, &fp_uc, &fp_size);
@@ -11887,7 +11886,7 @@ index 19548e0a..e6fe4853 100644
      const u32 wpos_grid[2] = { sf.aa_sx ? sf.aa_sx : 1u, sf.aa_sy ? sf.aa_sy : 1u };
      const int wpos_scaled = !fixed && (wpos_grid[0] > 1u || wpos_grid[1] > 1u);
  
-@@ -2233,31 +3838,51 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
+@@ -2233,31 +3839,51 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
       * SHADER_CONTROL, the cube and vertex-texture masks, the input layout,
       * and the structural render state. */
      u64 key = 1469598103934665603ull;
@@ -11953,7 +11952,7 @@ index 19548e0a..e6fe4853 100644
      }
      key = eng_fnv1a(&layout->mask, sizeof layout->mask, key);
      key = eng_fnv1a(&layout->stride, sizeof layout->stride, key);
-@@ -2267,69 +3892,130 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
+@@ -2267,69 +3893,130 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
      key = eng_fnv1a(&rt_count, sizeof rt_count, key);
      key = rsx_draw_engine_hash_render_state(rs, key);
  
@@ -12053,8 +12052,7 @@ index 19548e0a..e6fe4853 100644
 +        memcpy(pin.shadow_func, shadow_func, sizeof pin.shadow_func);
 +        pin.vol_mask = vol_mask; pin.ucp = ucp; pin.dbz = dbz;
 +        if (wpos_scaled) { pin.wpos_grid[0] = wpos_grid[0]; pin.wpos_grid[1] = wpos_grid[1]; }
-     }
--    if (vi > 0 && fi > 0)
++    }
 +    rsx_draw_engine_gen_hlsl(&pin, vp_uc, fp_uc, s_vs_hlsl, sizeof s_vs_hlsl,
 +                             s_ps_hlsl, sizeof s_ps_hlsl, &vi, &fi, &nconst, &dbz_bit);
 +    if (!fixed && fi > 0 && nconst != g.fp_constants.count) fi = -1;
@@ -12104,7 +12102,8 @@ index 19548e0a..e6fe4853 100644
 +                 while (s_nskip < 512 && fgets(ln, sizeof ln, f)) {
 +                     u64 k = strtoull(ln, 0, 16); if (k) s_skip[s_nskip++] = k; }
 +                 fclose(f); }
-+    }
+     }
+-    if (vi > 0 && fi > 0)
 +    int key_drop = 0;
 +    for (int i = 0; i < s_nskip; i++) if (s_skip[i] == key) { key_drop = 1; break; }
 +    const int dbg_drop = (s_plimit >= 0 && (long)g.n_pipelines >= s_plimit) ||
@@ -12135,7 +12134,7 @@ index 19548e0a..e6fe4853 100644
      const u64 fp_hash = fixed ? 0 : eng_fp_debug_hash(fp_uc, fp_size);
      /* RSX_ENGINE_SHADER_DUMP=<existing dir>: each new pipeline's two programs
       * as <dir>/pipe<handle>.vs.hlsl and .ps.hlsl, the handle being the one
-@@ -2362,13 +4048,57 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
+@@ -2362,13 +4049,57 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
              }
          }
      }
@@ -12200,7 +12199,7 @@ index 19548e0a..e6fe4853 100644
      g.pipelines[g.n_pipelines].key = key;
      g.pipelines[g.n_pipelines].fp_hash = fp_hash;
      g.pipelines[g.n_pipelines].handle = handle;
-@@ -2377,7 +4107,7 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
+@@ -2377,7 +4108,7 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
          (u16)(fixed ? 0xFFFFu : (eng_sampled_units(s_ps_hlsl) | dbz_bit));
      *out_tex_used = g.pipelines[g.n_pipelines].tex_used;
      *out_fp_hash = fp_hash;
@@ -12209,7 +12208,7 @@ index 19548e0a..e6fe4853 100644
      g.n_pipelines++;
      *out_fixed = fixed;
      return handle;
-@@ -2580,14 +4310,846 @@ static void dc_fetch(const rsx_vertex_layout_plan* layout, int allow_remap)
+@@ -2580,14 +4311,846 @@ static void dc_fetch(const rsx_vertex_layout_plan* layout, int allow_remap)
          dc.fetch_ok = 0;
          return;
      }
@@ -13060,7 +13059,7 @@ index 19548e0a..e6fe4853 100644
  /* ---- sink ---------------------------------------------------------------- */
  
  static void sink_begin(void* user, const rsx_dispatch* r, u32 prim)
-@@ -2628,11 +5190,26 @@ static void sink_immediate_vertex(void* user, const rsx_dispatch* r)
+@@ -2628,11 +5191,26 @@ static void sink_immediate_vertex(void* user, const rsx_dispatch* r)
      dc.n_immediate++;
  }
  
@@ -13088,7 +13087,7 @@ index 19548e0a..e6fe4853 100644
      dc.arr[dc.n_arr].first = first;
      dc.arr[dc.n_arr].count = count;
      dc.n_arr++;
-@@ -2652,201 +5229,567 @@ static void sink_inline_array(void* user, const rsx_dispatch* r,
+@@ -2652,201 +5230,567 @@ static void sink_inline_array(void* user, const rsx_dispatch* r,
      const u32 stride = rsx_vertex_inline_layout(r, NULL);
      if (!stride || bytes < stride) return;
      dc.n_packets++;
@@ -13812,7 +13811,7 @@ index 19548e0a..e6fe4853 100644
      }
      return mask;
  }
-@@ -3147,7 +6090,7 @@ static void pd_note(const u32* targets, u32 n_targets, u32 zslot,
+@@ -3147,7 +6091,7 @@ static void pd_note(const u32* targets, u32 n_targets, u32 zslot,
  
      rsx_dsp_surface sf;
      rsx_dsp_viewport vp;
@@ -13821,7 +13820,7 @@ index 19548e0a..e6fe4853 100644
      rsx_dsp_get_viewport(&g.rsx, &vp);
      size_t at = strlen(s_pd.first);
      at += (size_t)snprintf(s_pd.first + at, sizeof s_pd.first - at,
-@@ -3272,8 +6215,129 @@ static void eng_log_rect_clear(const char* what, const u32 rc[4], u32 w, u32 h)
+@@ -3272,8 +6216,129 @@ static void eng_log_rect_clear(const char* what, const u32 rc[4], u32 w, u32 h)
                  what, rc[0], rc[1], rc[2], rc[3], w, h);
  }
  
@@ -13951,7 +13950,7 @@ index 19548e0a..e6fe4853 100644
      (void)user; (void)r;
      if (!g.ready || !dc.n_packets || !dc.fetch_ok) return;
      eng_arena_reset();
-@@ -3283,6 +6347,29 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -3283,6 +6348,29 @@ static void sink_end(void* user, const rsx_dispatch* r)
                            r->inline_dropped != dc.inline_dropped_at_begin)) return;
  
      const u32 prim = g.rsx.current_primitive;
@@ -13981,7 +13980,7 @@ index 19548e0a..e6fe4853 100644
      /* Everything that becomes triangles -- lists, strips, fans, quads, quad
       * strips and polygons -- is REBUILT into one triangle list through an
       * index buffer. A host strip topology cannot express a restart cut, which
-@@ -3295,41 +6382,68 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -3295,41 +6383,68 @@ static void sink_end(void* user, const rsx_dispatch* r)
      int scratch = 0;
      const int rebuild = eng_topology_rebuild(prim, 0, &scratch) != 0;
      if (!rebuild) {
@@ -14069,7 +14068,7 @@ index 19548e0a..e6fe4853 100644
  
      /* A guest program pair that will not translate has no fallback: the draw
       * is dropped, as the reference engine drops it. Substituting the built-in
-@@ -3343,7 +6457,7 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -3343,7 +6458,7 @@ static void sink_end(void* user, const rsx_dispatch* r)
                                            eng_surface_format(sf.color_format),
                                            n_targets, &pipeline_is_fixed, &tex_used,
                                            &fp_hash);
@@ -14078,7 +14077,7 @@ index 19548e0a..e6fe4853 100644
      if (fp_hash && eng_debug_fp(fp_hash, pipeline)) return;
  
      /* Textures before any pipeline or target binding: a cache refresh can
-@@ -3356,27 +6470,46 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -3356,27 +6471,46 @@ static void sink_end(void* user, const rsx_dispatch* r)
      memset(samplers, 0, sizeof samplers);
      memset(vtextures, 0, sizeof vtextures);
      memset(vsamplers, 0, sizeof vsamplers);
@@ -14137,7 +14136,7 @@ index 19548e0a..e6fe4853 100644
  
      /* The transform constant block, then the viewport epilogue the vertex
       * program's tail multiplies by: RSX window coordinates mapped into the
-@@ -3396,14 +6529,219 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -3396,14 +6530,219 @@ static void sink_end(void* user, const rsx_dispatch* r)
          xf[5] = -((vp.translate[1] - Hv * 0.5f) / (Hv * 0.5f));
          xf[6] = vp.translate[2];
      }
@@ -14361,7 +14360,7 @@ index 19548e0a..e6fe4853 100644
      if (g.fp_cb_cap < fp_bytes) {
          u8* n = (u8*)realloc(g.fp_cb, fp_bytes);
          if (!n) return;
-@@ -3415,17 +6753,50 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -3415,17 +6754,50 @@ static void sink_end(void* user, const rsx_dispatch* r)
          memcpy(g.fp_cb, g.fp_constants.values, g.fp_constants.count * 16u);
      { float* alpha = (float*)(g.fp_cb + nslots * 16u);
        alpha[0] = rsx_fp_alpha_ref(rs.alpha_ref_raw, rs.alpha_ref_format);
@@ -14419,7 +14418,7 @@ index 19548e0a..e6fe4853 100644
      /* The depth attachment is cleared the first time it is bound, so a title
       * that never clears its shadow zeta still tests against something. */
      const u32 depth_handle = (zslot != ENG_INVALID) ? g.zdepths[zslot].handle : 0;
-@@ -3437,20 +6808,68 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -3437,20 +6809,68 @@ static void sink_end(void* user, const rsx_dispatch* r)
          g.zdepths[zslot].had_write = 0;
      }
  
@@ -14495,7 +14494,7 @@ index 19548e0a..e6fe4853 100644
      }
      /* Dynamic, and deliberately outside the pipeline key. */
      g.be->set_stencil_ref(g.be->user,
-@@ -3466,29 +6885,315 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -3466,29 +6886,315 @@ static void sink_end(void* user, const rsx_dispatch* r)
          g.be->set_depth_bounds(g.be->user, fmin, fmax);
      }
  
@@ -14833,7 +14832,7 @@ index 19548e0a..e6fe4853 100644
      /* Counted only when the draw ran the guest's OWN programs, which is what
       * the test hook means: a draw through the built-in pair is a draw, not
       * evidence that the decompile-translate-compile path worked. */
-@@ -3496,9 +7201,32 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -3496,9 +7202,32 @@ static void sink_end(void* user, const rsx_dispatch* r)
  
      if (rs.color_mask) eng_surfaces_wrote(targets, n_targets);
      if (zslot != ENG_INVALID && rs.depth_test && rs.depth_write) {
@@ -14867,7 +14866,7 @@ index 19548e0a..e6fe4853 100644
  }
  
  static void sink_clear(void* user, const rsx_dispatch* r, u32 mask)
-@@ -3507,17 +7235,25 @@ static void sink_clear(void* user, const rsx_dispatch* r, u32 mask)
+@@ -3507,17 +7236,25 @@ static void sink_clear(void* user, const rsx_dispatch* r, u32 mask)
      if (!g.ready) return;
      u32 targets[RSX_BE_MAX_COLOR_TARGETS];
      const u32 n_targets = eng_current_target_set(targets);
@@ -14895,7 +14894,7 @@ index 19548e0a..e6fe4853 100644
      if (mask & (RSX_CLEAR_COLOR_R | RSX_CLEAR_COLOR_G |
                  RSX_CLEAR_COLOR_B | RSX_CLEAR_COLOR_A)) {
          const u32 c = rsx_dsp_clear_color(&g.rsx);
-@@ -3529,79 +7265,64 @@ static void sink_clear(void* user, const rsx_dispatch* r, u32 mask)
+@@ -3529,79 +7266,64 @@ static void sink_clear(void* user, const rsx_dispatch* r, u32 mask)
          };
          /* Every target the set names, not only A: a deferred pass clears its
           * whole G-buffer in one CLEAR_SURFACE, and B, C and D would otherwise
@@ -15020,7 +15019,7 @@ index 19548e0a..e6fe4853 100644
          }
      }
  }
-@@ -3612,22 +7333,540 @@ static void sink_clear(void* user, const rsx_dispatch* r, u32 mask)
+@@ -3612,22 +7334,541 @@ static void sink_clear(void* user, const rsx_dispatch* r, u32 mask)
   * scene's draws having executed (rsx_live_draw.c:7557-7570). */
  static u32 eng_present_surface(u32 buffer_id)
  {
@@ -15212,6 +15211,7 @@ index 19548e0a..e6fe4853 100644
 + * later read decodes them: dropping it loses nothing. */
 +static int eng_surface_writes_back(const eng_surface* s)
 +{
++    if (eng_surface_has_unbacked_main_pixels(s)) return 0;
 +    if (!g.be->readback || s->fmt != RSX_BE_FMT_R8G8B8A8) return 0;
 +    if (!(s->rsx_fmt == 4 || s->rsx_fmt == 5 || s->rsx_fmt == 8)) return 0;
 +    const int swz = s->raster == 2;
@@ -15566,7 +15566,7 @@ index 19548e0a..e6fe4853 100644
      if (getenv("PS3RECOMP_METAL_FRAME_DUMP") && g.frames % 120 == 0) {
          u32 current = eng_current_surface();
          fprintf(stderr, "[rsx capture] frame=%u buffer=%u selected=%u current=%u draws=%u surfaces=%u\n",
-@@ -3638,9 +7877,46 @@ static void eng_present(u32 buffer_id)
+@@ -3638,9 +7879,46 @@ static void eng_present(u32 buffer_id)
                      g.surfaces[i].w, g.surfaces[i].h, g.surfaces[i].handle);
      }
      pd_present(target);
@@ -15613,7 +15613,7 @@ index 19548e0a..e6fe4853 100644
      g.last_guest_draws = g.guest_draws;
      g.guest_draws = 0;
  }
-@@ -3694,6 +7970,8 @@ int rsx_draw_engine_init(u32 width, u32 height)
+@@ -3694,6 +7972,8 @@ int rsx_draw_engine_init(u32 width, u32 height)
        s_depth_via_guest = e && *e && strcmp(e, "0") != 0; }
      g.vp_cb = (u8*)calloc(1, ENG_VP_CB_BYTES);
      if (!g.vp_cb) return -1;
@@ -15622,7 +15622,7 @@ index 19548e0a..e6fe4853 100644
      if (g.be->init && g.be->init(g.be->user, g.width, g.height) != 0) {
          free(g.vp_cb); g.vp_cb = NULL;
          return -1;
-@@ -3738,8 +8016,13 @@ void rsx_draw_engine_shutdown(void)
+@@ -3738,8 +8018,13 @@ void rsx_draw_engine_shutdown(void)
      if (g.ready && g.be->shutdown) g.be->shutdown(g.be->user);
  
      rsx_draw_engine_set_guest_memory(NULL, NULL);
@@ -15637,7 +15637,7 @@ index 19548e0a..e6fe4853 100644
      memset(&dc, 0, sizeof dc);
      free(g.tex_staging); free(g.vp_cb); free(g.fp_cb); free(g.indices);
      const rsx_draw_backend* be = g.be;
-@@ -3760,6 +8043,25 @@ void rsx_draw_engine_method(u32 method, u32 arg)
+@@ -3760,6 +8045,25 @@ void rsx_draw_engine_method(u32 method, u32 arg)
      rsx_dispatch_method(&g.rsx, m, arg);
  }
  
@@ -15663,7 +15663,7 @@ index 19548e0a..e6fe4853 100644
  void rsx_draw_engine_set_display_buffer(u32 buffer_id, u32 location, u32 offset,
                                          u32 pitch, u32 width, u32 height)
  {
-@@ -3786,10 +8088,363 @@ void rsx_draw_engine_present(void)
+@@ -3786,10 +8090,363 @@ void rsx_draw_engine_present(void)
       * a runner that both consumes 0xE944 and calls here would otherwise
       * re-present a double-buffered title's OTHER scanout. Presenting twice is
       * harmless either way -- the engine never clears the surface, so a second
@@ -20873,7 +20873,7 @@ index ba6c18eb..ce97e038 100644
          "    Out.t0=o[7];  Out.t1=o[8];  Out.t2=o[9];  Out.t3=o[10];\n"
          "    Out.t4=o[11]; Out.t5=o[12]; Out.t6=o[13]; Out.t7=o[14];\n"
 diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
-index f78c66f2..0365f54f 100644
+index f78c66f2..7a6927d0 100644
 --- a/libs/video/rsx_vulkan_backend.c
 +++ b/libs/video/rsx_vulkan_backend.c
 @@ -38,10 +38,13 @@
@@ -22369,7 +22369,7 @@ index f78c66f2..0365f54f 100644
 +static SDL_atomic_t s_pw_dirty;          /* the pre-warm built pipelines: save the cache */
 +static void* s_pw_blob; static size_t s_pw_blob_n;   /* vk_prewarm_thread */
 +static VkPipelineCache s_pw_cache[8];      /* the pre-warm workers' own (keep mode) */
-+static volatile int s_pw_merge;            /* 1: the workers are done, their caches wait for vk_ap_merge */
++static SDL_atomic_t s_pw_merge;            /* 1: the workers are done, their caches wait for vk_ap_merge */
 +/* macOS: MoltenVK's pipeline cache holds MSL, and creating a cache from a
 + * file compiles every Metal library in it, one after another, before
 + * vkCreatePipelineCache returns: 53 s for a 15 MB file on an M1 Pro, on the
@@ -25306,7 +25306,7 @@ index f78c66f2..0365f54f 100644
  /* ---- E2: pipelines and draws ---------------------------------------------
   * A pipeline handle carries the two translated modules and the render state
   * the engine keyed it on. Topology is not part of that key (Metal sets it on
-@@ -2915,38 +4929,76 @@ static int vk_eng_depth_readback(void* user, u32 depth, u32 x, u32 y, u32 w, u32
+@@ -2915,38 +4929,78 @@ static int vk_eng_depth_readback(void* user, u32 depth, u32 x, u32 y, u32 w, u32
   * vtable guest path already creates. Vertex inputs are the engine's compact
   * layout: slot n is a float4 at n*16, at location n, as Metal reads it.
   * Known gaps, stated rather than guessed: vertex-texture units (their
@@ -25368,13 +25368,15 @@ index f78c66f2..0365f54f 100644
 + * destination, so not while the pre-warm builds into it. */
 +static void vk_ap_merge(void)
 +{
-+    if (s_pw_merge == 1) {                     /* render thread: the only user of the main cache */
-+        SDL_MemoryBarrierAcquire();
++    if (SDL_AtomicCAS(&s_pw_merge, 1, 2)) {
++        VkPipelineCache sources[8];
 +        u32 m = 0;
-+        for (u32 i = 0; i < 8; i++) if (s_pw_cache[i]) s_pw_cache[m++] = s_pw_cache[i];
-+        if (m && pvkMergePipelineCaches(s_vk.device, s_g.pcache, m, s_pw_cache) == VK_SUCCESS) s_g.pcache_dirty++;
-+        for (u32 i = 0; i < m; i++) { pvkDestroyPipelineCache(s_vk.device, s_pw_cache[i], NULL); s_pw_cache[i] = VK_NULL_HANDLE; }
-+        s_pw_merge = 2;
++        for (u32 i = 0; i < 8; i++) if (s_pw_cache[i]) sources[m++] = s_pw_cache[i];
++        if (m && pvkMergePipelineCaches(s_vk.device, s_g.pcache, m, sources) == VK_SUCCESS) s_g.pcache_dirty++;
++        for (u32 i = 0; i < 8; i++) if (s_pw_cache[i]) {
++            pvkDestroyPipelineCache(s_vk.device, s_pw_cache[i], NULL);
++            s_pw_cache[i] = VK_NULL_HANDLE;
++        }
 +    }
 +    if (!s_ap.cache || s_ap.merged == s_ap.built || s_pw_running) return;
 +    if (pvkMergePipelineCaches(s_vk.device, s_g.pcache, 1, &s_ap.cache) == VK_SUCCESS) s_ap.merged = s_ap.built;
@@ -25394,7 +25396,7 @@ index f78c66f2..0365f54f 100644
      u32          tex[RSX_BE_MAX_TEXTURES];
      rsx_be_sampler_desc samp[RSX_BE_MAX_TEXTURES];
      u32          tex_mask;
-@@ -2954,49 +5006,131 @@ static struct {
+@@ -2954,49 +5008,131 @@ static struct {
      u32          sc[4];
      int          have_vp, have_sc;
      u32          stencil_ref;
@@ -25549,7 +25551,7 @@ index f78c66f2..0365f54f 100644
              .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_LOAD,
              .stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE,
              .initialLayout = VK_IMAGE_LAYOUT_GENERAL, .finalLayout = VK_IMAGE_LAYOUT_GENERAL };
-@@ -3009,10 +5143,23 @@ static VkRenderPass vk_eng_render_pass(VkFormat cf, u32 n)
+@@ -3009,10 +5145,23 @@ static VkRenderPass vk_eng_render_pass(VkFormat cf, u32 n)
      VkRenderPassCreateInfo rci = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
                                     .attachmentCount = n + 1, .pAttachments = att,
                                     .subpassCount = 1, .pSubpasses = &sub };
@@ -25575,7 +25577,7 @@ index f78c66f2..0365f54f 100644
  
  /* Tables carried from the Metal backend, itself copied from the D3D12 live
   * draw engine a title has shipped on. */
-@@ -3030,6 +5177,10 @@ static VkBlendFactor vk_gcm_blend_factor(u32 f)
+@@ -3030,6 +5179,10 @@ static VkBlendFactor vk_gcm_blend_factor(u32 f)
      case 0x0306: return VK_BLEND_FACTOR_DST_COLOR;
      case 0x0307: return VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR;
      case 0x0308: return VK_BLEND_FACTOR_SRC_ALPHA_SATURATE;
@@ -25586,7 +25588,7 @@ index f78c66f2..0365f54f 100644
      default:     return VK_BLEND_FACTOR_ONE;
      }
  }
-@@ -3071,85 +5222,210 @@ static VkStencilOpState vk_gcm_stencil_face(u32 func, u32 fail, u32 zfail, u32 z
+@@ -3071,85 +5224,210 @@ static VkStencilOpState vk_gcm_stencil_face(u32 func, u32 fail, u32 zfail, u32 z
      return s;
  }
  
@@ -25780,7 +25782,8 @@ index f78c66f2..0365f54f 100644
 +            }
 +        }
 +        fclose(f);
-+    }
+     }
+-    return mask;
 +    free(buf);
 +    if (fresh) {
 +        s_pg.f = fopen(path, "wb");
@@ -25824,8 +25827,7 @@ index f78c66f2..0365f54f 100644
 +        VK_LOG("program list: write failed; no more programs recorded this run%c", 10);
 +        fclose(s_pg.f); s_pg.f = NULL;
 +        return;
-     }
--    return mask;
++    }
 +    s_pg.bytes += add;
  }
  
@@ -25851,7 +25853,7 @@ index f78c66f2..0365f54f 100644
          if (!(s_e2.warned & 1u)) { VK_LOG("engine: colour format %d not supported yet\n", (int)rt_fmt); s_e2.warned |= 1u; }
          return 0;
      }
-@@ -3158,183 +5434,1239 @@ static u32 vk_eng_pipeline_create(void* user, const char* vs_hlsl, const char* p
+@@ -3158,183 +5436,1240 @@ static u32 vk_eng_pipeline_create(void* user, const char* vs_hlsl, const char* p
      u32 slot = VK_ENG_MAX_PIPE;
      for (u32 i = 0; i < VK_ENG_MAX_PIPE; i++) if (!s_epipe[i].used) { slot = i; break; }
      if (slot == VK_ENG_MAX_PIPE) {
@@ -26333,9 +26335,9 @@ index f78c66f2..0365f54f 100644
 +        VK_LOG("pipeline pre-warm: %s, %d of %u variants built in %.1f s (%d without their programs, %d failed)\n",
 +               SDL_AtomicGet(&s_pw.stop) ? "stopped" : "done", built, n, (ps3_qpc_us() - s_pwj.t0) / 1e6,
 +               SDL_AtomicGet(&s_pw_absent), SDL_AtomicGet(&s_pw_failed));
-+        if (built && !s_pw_keep) SDL_AtomicSet(&s_pw_dirty, 1);
 +        if (built && !SDL_AtomicGet(&s_pw.stop)) vk_shaders_state("ok");
-+        if (s_pw_keep) { SDL_MemoryBarrierRelease(); s_pw_merge = 1; }
++        if (s_pw_keep) SDL_AtomicSet(&s_pw_merge, 1);
++        if (built) SDL_AtomicSet(&s_pw_dirty, 1);
 +        s_pw_running = 0;
 +    }
 +    return 0;
@@ -26529,6 +26531,7 @@ index f78c66f2..0365f54f 100644
 +        if (s_pwk[j].pipe && SDL_AtomicGet(&s_pwk[j].st) == 2) pvkDestroyPipeline(s_vk.device, s_pwk[j].pipe, NULL);
 +    free(s_pwk); s_pwk = NULL; s_pwk_cap = 0;
 +    for (u32 i = 0; i < 8; i++) if (s_pw_cache[i]) { pvkDestroyPipelineCache(s_vk.device, s_pw_cache[i], NULL); s_pw_cache[i] = VK_NULL_HANDLE; }
++    SDL_AtomicSet(&s_pw_merge, 0);
 +    free(s_pw_blob); s_pw_blob = NULL; s_pw_blob_n = 0;
 +    if (s_pl.f) fclose(s_pl.f);
 +    free(s_pl.seen);
@@ -27247,7 +27250,7 @@ index f78c66f2..0365f54f 100644
      }
      return P->variant[topo_idx];
  }
-@@ -3343,59 +6675,67 @@ static void vk_eng_bind_pipeline(void* user, u32 pipeline) { (void)user; s_e2.pi
+@@ -3343,59 +6678,67 @@ static void vk_eng_bind_pipeline(void* user, u32 pipeline) { (void)user; s_e2.pi
  
  static void vk_eng2_shutdown(void* user)
  {
@@ -27338,7 +27341,7 @@ index f78c66f2..0365f54f 100644
      }
      s_e2.tex_mask = mask;
  }
-@@ -3416,20 +6756,10 @@ static void vk_eng_set_scissor(void* user, u32 x, u32 y, u32 w, u32 h)
+@@ -3416,20 +6759,10 @@ static void vk_eng_set_scissor(void* user, u32 x, u32 y, u32 w, u32 h)
      s_e2.sc[0] = x; s_e2.sc[1] = y; s_e2.sc[2] = w; s_e2.sc[3] = h; s_e2.have_sc = 1;
  }
  static void vk_eng_set_stencil_ref(void* user, u32 ref) { (void)user; s_e2.stencil_ref = ref; }
@@ -27362,7 +27365,7 @@ index f78c66f2..0365f54f 100644
  }
  
  static VkFramebuffer vk_eng_framebuffer(VkRenderPass rp, const u32* rt, u32 n, VkImageView dview,
-@@ -3448,7 +6778,7 @@ static VkFramebuffer vk_eng_framebuffer(VkRenderPass rp, const u32* rt, u32 n, V
+@@ -3448,7 +6781,7 @@ static VkFramebuffer vk_eng_framebuffer(VkRenderPass rp, const u32* rt, u32 n, V
                                      .renderPass = rp, .attachmentCount = n + 1, .pAttachments = views,
                                      .width = w, .height = h, .layers = 1 };
      VkFramebuffer fb = VK_NULL_HANDLE;
@@ -27371,7 +27374,7 @@ index f78c66f2..0365f54f 100644
      memcpy(s_e2.fb[s_e2.fb_count].key, key, sizeof key);
      s_e2.fb[s_e2.fb_count++].fb = fb;
      return fb;
-@@ -3462,19 +6792,101 @@ static VkImageView vk_eng_scratch_depth(u32 w, u32 h)
+@@ -3462,19 +6795,101 @@ static VkImageView vk_eng_scratch_depth(u32 w, u32 h)
          return s_e2.scratch_depth.view;
      vk_eng_drop_framebuffers();
      vk_destroy_image(&s_e2.scratch_depth);
@@ -27477,7 +27480,7 @@ index f78c66f2..0365f54f 100644
  static int vk_eng_ensure_indices(VkDeviceSize bytes)
  {
      if (s_e2.indices.buf && s_e2.indices.size >= bytes) return 0;
-@@ -3495,383 +6907,600 @@ static VkSampler vk_eng_sampler(const rsx_be_sampler_desc* d)
+@@ -3495,383 +6910,600 @@ static VkSampler vk_eng_sampler(const rsx_be_sampler_desc* d)
                    | ((u64)d->mip_present << 3) | ((u64)(d->wrap_s & 0xF) << 4)
                    | ((u64)(d->wrap_t & 0xF) << 8) | ((u64)(d->wrap_r & 0xF) << 12)
                    | ((u64)(lo >> 16) << 16) | ((u64)(hi >> 16) << 32);
@@ -28375,7 +28378,7 @@ index f78c66f2..0365f54f 100644
  }
  
  static const rsx_draw_backend s_vk_engine_backend = {
-@@ -3881,14 +7510,20 @@ static const rsx_draw_backend s_vk_engine_backend = {
+@@ -3881,14 +7513,20 @@ static const rsx_draw_backend s_vk_engine_backend = {
      .submit_and_wait      = vk_eng_submit_and_wait,
      .texture_create       = vk_eng_texture_create,
      .texture_upload       = vk_eng_texture_upload,
@@ -28399,7 +28402,7 @@ index f78c66f2..0365f54f 100644
      .pipeline_create      = vk_eng_pipeline_create,
      .pipeline_release     = vk_eng_pipeline_release,
      .bind_targets         = vk_eng_bind_targets,
-@@ -3900,17 +7535,13 @@ static const rsx_draw_backend s_vk_engine_backend = {
+@@ -3900,17 +7538,13 @@ static const rsx_draw_backend s_vk_engine_backend = {
      .set_viewport         = vk_eng_set_viewport,
      .set_scissor          = vk_eng_set_scissor,
      .set_stencil_ref      = vk_eng_set_stencil_ref,
@@ -28419,7 +28422,7 @@ index f78c66f2..0365f54f 100644
  };
  
  static rsx_backend s_vulkan_backend = {
-@@ -3930,19 +7561,41 @@ static rsx_backend s_vulkan_backend = {
+@@ -3930,19 +7564,41 @@ static rsx_backend s_vulkan_backend = {
   * -------------------------------------------------------------------------*/
  static int vk_init_all(u32 width, u32 height, const char* title)
  {
@@ -28468,7 +28471,7 @@ index f78c66f2..0365f54f 100644
  
      VkApplicationInfo app = { .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
                                .pApplicationName = "ps3recomp", .pEngineName = "ps3recomp RSX",
-@@ -3953,11 +7606,35 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+@@ -3953,11 +7609,35 @@ static int vk_init_all(u32 width, u32 height, const char* title)
          ci.enabledExtensionCount   = s_vk.inst_ext_count;
          ci.ppEnabledExtensionNames = s_vk.inst_exts;
      }
@@ -28504,7 +28507,7 @@ index f78c66f2..0365f54f 100644
          ir = pvkCreateInstance(&ci, NULL, &s_vk.instance);
      }
      if (ir != VK_SUCCESS) { VK_LOG("vkCreateInstance failed (VkResult %d)\n", (int)ir); return -1; }
-@@ -3971,45 +7648,106 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+@@ -3971,45 +7651,106 @@ static int vk_init_all(u32 width, u32 height, const char* title)
              vk_window_drop(why);
          }
      }
@@ -28628,7 +28631,7 @@ index f78c66f2..0365f54f 100644
      if (vk_load_device_functions()) return -1;
      if (s_vk.windowed && vk_load_wsi_device_functions())
          vk_window_drop("the driver has no swapchain functions");
-@@ -4026,24 +7764,23 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+@@ -4026,24 +7767,23 @@ static int vk_init_all(u32 width, u32 height, const char* title)
      VK_CHECK(pvkAllocateCommandBuffers(s_vk.device, &cai, &s_vk.cmd), "vkAllocateCommandBuffers");
      VkFenceCreateInfo fci = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
      VK_CHECK(pvkCreateFence(s_vk.device, &fci, NULL, &s_vk.fence), "vkCreateFence");
@@ -28660,7 +28663,7 @@ index f78c66f2..0365f54f 100644
      if (vk_guest_init()) {
          VK_LOG("guest programs: setup failed, fixed-function path only\n");
          vk_guest_shutdown();
-@@ -4056,14 +7793,15 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+@@ -4056,14 +7796,15 @@ static int vk_init_all(u32 width, u32 height, const char* title)
       * null backend makes the same choice). */
      if (vk_begin()) return -1;
      vk_barrier_image(s_vk.color.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED);
@@ -28678,7 +28681,7 @@ index f78c66f2..0365f54f 100644
  
      if (s_vk.windowed) {
          VkSemaphoreCreateInfo semi = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
-@@ -4074,9 +7812,43 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+@@ -4074,9 +7815,43 @@ static int vk_init_all(u32 width, u32 height, const char* title)
      return 0;
  }
  
@@ -28722,7 +28725,7 @@ index f78c66f2..0365f54f 100644
      if (vk_init_all(width, height, title)) {
          rsx_vulkan_backend_shutdown();
          return -1;
-@@ -4090,13 +7862,14 @@ int rsx_vulkan_backend_init(u32 width, u32 height, const char* title)
+@@ -4090,13 +7865,14 @@ int rsx_vulkan_backend_init(u32 width, u32 height, const char* title)
       * pipeline from the guest's programs, so without them it has nothing to
       * draw with, and the vtable's fixed-function path stays the default.
       * Either way PS3RECOMP_RSX_ENGINE=dispatch|vtable overrides. */
@@ -28739,7 +28742,7 @@ index f78c66f2..0365f54f 100644
      VK_LOG("offscreen target %ux%u ready, depth format %d (%s)\n",
             s_vk.width, s_vk.height, (int)s_vk.depth_format, title ? title : "");
      return 0;
-@@ -4104,7 +7877,6 @@ int rsx_vulkan_backend_init(u32 width, u32 height, const char* title)
+@@ -4104,7 +7880,6 @@ int rsx_vulkan_backend_init(u32 width, u32 height, const char* title)
  
  void rsx_vulkan_backend_shutdown(void)
  {
@@ -28747,7 +28750,7 @@ index f78c66f2..0365f54f 100644
      if (rsx_get_backend() == &s_vulkan_backend) rsx_set_backend(NULL);
      if (s_vk.eng_active) { rsx_draw_engine_shutdown(); s_vk.eng_active = 0; }
      rsx_draw_engine_set_backend(NULL);
-@@ -4119,7 +7891,9 @@ void rsx_vulkan_backend_shutdown(void)
+@@ -4119,7 +7894,9 @@ void rsx_vulkan_backend_shutdown(void)
      }
      if (s_vk.windowed || s_vk.window) vk_window_drop(NULL);
      if (s_vk.device) {
@@ -28758,7 +28761,7 @@ index f78c66f2..0365f54f 100644
          vk_guest_shutdown();
          for (int i = 0; i < VK_PIPELINE_SLOTS; i++)
              if (s_vk.pipelines[i]) pvkDestroyPipeline(s_vk.device, s_vk.pipelines[i], NULL);
-@@ -4139,72 +7913,37 @@ void rsx_vulkan_backend_shutdown(void)
+@@ -4139,72 +7916,37 @@ void rsx_vulkan_backend_shutdown(void)
          vk_destroy_image(&s_vk.color);
          vk_destroy_buffer(&s_vk.vertices);
          vk_destroy_buffer(&s_vk.readback);
@@ -28837,7 +28840,7 @@ index f78c66f2..0365f54f 100644
  }
  
  u32 rsx_vulkan_backend_debug_color(void) { return s_vk.clear_argb; }
-@@ -4220,9 +7959,14 @@ u32 rsx_vulkan_backend_guest_draws(void)
+@@ -4220,9 +7962,14 @@ u32 rsx_vulkan_backend_guest_draws(void)
      return s_vk.eng_active ? rsx_draw_engine_guest_draws() : s_g.last_draws;
  }
  
