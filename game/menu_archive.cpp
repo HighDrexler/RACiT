@@ -430,15 +430,17 @@ void remove_old_temporaries(const std::filesystem::path& folder)
     static const std::regex name_pattern(
         R"(^\.global_cached-[0-9]+-[0-9a-f]{1,16}-[0-9a-f]{8}\.psarc\.([0-9]+)-[0-9]+\.tmp(\.ok)?$)");
     std::error_code error;
-    for (const auto& entry : std::filesystem::directory_iterator(folder, error)) {
-        const std::string n = entry.path().filename().string();
+    for (std::filesystem::directory_iterator it(folder, error), end; !error && it != end; it.increment(error)) {
+        const std::string n = it->path().filename().string();
         std::smatch match;
         if (!std::regex_match(n, match, name_pattern)) continue;
         const char* first = n.data() + match.position(1);
         int pid = 0;
         const auto parsed = std::from_chars(first, first + match.length(1), pid);
-        if (parsed.ec == std::errc() && pid > 0 && !process_alive(pid))
-            std::filesystem::remove(entry.path(), error);
+        if (parsed.ec == std::errc() && pid > 0 && !process_alive(pid)) {
+            std::error_code ignored;
+            std::filesystem::remove(it->path(), ignored);
+        }
     }
 }
 
@@ -455,7 +457,10 @@ std::string prepare(const std::filesystem::path& original)
     std::snprintf(name, sizeof name, "global_cached-%llu-%llx-%08lx.psarc", (unsigned long long)size,
                   (unsigned long long)stamp, (unsigned long)actions_crc);
     const fs::path destination = s_menu_cache / name;
-    if (trusted_archive(destination, size)) return destination.string();
+    if (trusted_archive(destination, size)) {
+        remove_old_temporaries(s_menu_cache);
+        return destination.string();
+    }
     if (fs::exists(destination, error))   // torn, changed or not ours: made again, then renamed over it
         std::printf("[menu-keycaps] %s isn't one this game checked; preparing it again\n", destination.string().c_str());
 
@@ -545,10 +550,12 @@ bool racit_menu_archive_init()
 #endif
         if (!wanted) return true;
         const char* settings = std::getenv("RACACIT_SETTINGS_FILE");
-        const char* hdd = std::getenv("PS3_HDD0_ROOT");
+        const char* location = settings && *settings ? settings : std::getenv("PS3_HDD0_ROOT");
         std::filesystem::path base;
-        if (settings && *settings) base = std::filesystem::path(settings).parent_path();
-        else if (hdd && *hdd) base = std::filesystem::path(hdd).parent_path();
+        if (location && *location) {
+            std::error_code error;
+            base = std::filesystem::absolute(location, error).parent_path();
+        }
         if (base.empty()) {
             std::printf("[menu-keycaps] no settings file or HDD folder to keep the prepared archive in; off\n");
             return true;
