@@ -22,7 +22,7 @@
 #include "gfx.h"
 #include "store.h"
 
-static const char* kLauncherVersion = "1.0.0";
+static const char* kLauncherVersion = "1.0.1";
 const char* g_launcher_version = kLauncherVersion;
 enum { WM_APP_TASK = WM_APP + 1, WM_APP_GAME_EXIT, WM_APP_UPDATE, TIMER_TICK = 1 };
 
@@ -916,7 +916,27 @@ static bool g_update_bad = false;
 static bool g_restart = false;                  // a new launcher is in place: start it on the way out
 static void updates_screen();
 
-static bool release_newer(const std::string& tag) { return Store::compare_versions(tag, R->installed_release(kLauncherVersion)) > 0; }
+/* The Into the Nexus build that ships with this launcher version. A 1.0.0 launcher updating to
+ * 1.0.1 installs the launcher and A Crack in Time but not nexus\builds (its installer did not
+ * know that part), so the same release is offered once more, and this launcher installs it. */
+static const int kNexusBuild = 97;
+static bool nexus_behind()
+{
+    std::error_code ec;
+    int top = 0;
+    for (auto& d : fs::directory_iterator(exe_dir() / kNexusProfile.folder / L"builds", ec)) {
+        const std::string n = u8(d.path().filename());
+        if (!d.is_directory(ec) || n.size() < 2 || n[0] != 'v') continue;
+        for (const auto& disc : kNexusProfile.discs)
+            if (fs::exists(d.path() / disc.exe, ec)) { top = std::max(top, atoi(n.c_str() + 1)); break; }
+    }
+    return top > 0 && top < kNexusBuild;
+}
+static bool release_newer(const std::string& tag)
+{
+    const int c = Store::compare_versions(tag, R->installed_release(kLauncherVersion));
+    return c > 0 || (c == 0 && nexus_behind());
+}
 
 static void remember_release(const ReleaseInfo& rel)
 {
@@ -1931,7 +1951,10 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
         if (g_update_ready && !g_update_asked && !prog && !game_proc && !g_rel.url.empty()) {
             g_update_asked = true;
             const ReleaseInfo r = g_rel;
-            confirm("Update available: " + r.name,
+            const bool finish = Store::compare_versions(r.tag, R->installed_release(kLauncherVersion)) == 0;
+            confirm(finish ? "Finish the update: " + r.name : "Update available: " + r.name,
+                    (finish ? std::string("The launcher you updated from could not install Into the Nexus's new build. Download ") + r.name +
+                              " once more to put it in.\n\n" : std::string()) +
                     (r.notes.empty() ? std::string() : r.notes + "\n\n") + "Download it now" + (r.size ? " (" + format_size(r.size) + ")" : std::string()) +
                     "? You confirm again before anything is installed; your saves are backed up first.",
                     "Download", [r] { download_update(r); });

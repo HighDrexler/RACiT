@@ -1,4 +1,4 @@
-RACiT Launcher 1.0.0 -- Ratchet & Clank Future: A Crack in Time (PC), Windows
+RACiT Launcher 1.0.1 -- Ratchet & Clank Future: A Crack in Time (PC), Windows
 ================================================================================
 
 Everything the game needs comes in this folder: the launcher, the game build
@@ -6,6 +6,20 @@ Everything the game needs comes in this folder: the launcher, the game build
 A Crack in Time (USA BCUS98124, or Europe BCES00511):
   1. the game: its disc image (.iso), or the dumped game's folder (USRDIR)
   2. EBOOT.elf, the game's main program, unlocked with RPCS3
+
+NEW IN 1.0.1
+Into the Nexus test build 0.1.1 (nexus\builds\v97): fixes for freezes of about
+a second (sometimes several) when the game reached a new area, for levels
+drawn in flat bright colours with the sky and ground missing on some
+graphics cards (seen on Intel Arc), two graphics errors that stricter drivers
+(AMD, Intel) could trip over, and a shorter stutter when a level starts.
+Details: nexus\builds\v97\README.txt.
+A Crack in Time is unchanged (build v124).
+Updating from 1.0.0 inside the launcher takes two steps: the 1.0.0 launcher
+puts in the new launcher and starts it again; the new launcher then offers
+1.0.1 once more ("Finish the update") to put in Into the Nexus's new build.
+Accept that one too. Or copy what is in this zip's RACiT_1.0.1 folder over your
+RACiT_1.0.0 folder (your saves, settings and game are not in the zip).
 
 TWO GAMES: A CRACK IN TIME AND INTO THE NEXUS (TEST)
 The bar down the left edge switches games: click a tile, press Tab, or L1 / R1

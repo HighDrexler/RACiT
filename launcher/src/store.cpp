@@ -31,13 +31,13 @@ const GameProfile kRacitProfile = { "racit", "A Crack in Time", "Ratchet & Clank
     { { "BCUS98124", "USA", RACIT_GAME_EXE, L"RaCACiT_compat.exe", "406bded328d9dbdfa9684ed392554ca34c76f4ed95aa21685f622d3ab2b04592" },
       { "BCES00511", "Europe", L"RaCACiT_BCES00511.exe", L"RaCACiT_BCES00511_compat.exe", "6debdca0f181f35d98ebe23faabe2531b697c558b4e3384b06630173400674c1" } }, true, { "BCUS98124", "BCES00511" }, "1.0.0" };
 const GameProfile kNexusProfile = { "nexus", "Into the Nexus", "Ratchet & Clank: Into the Nexus", "RATCHET & CLANK", L"nexus",
-    { { "BCUS99245", "USA", L"RaCNexus", nullptr, "ca1a1a293d211095fc834eaaa10cd5fa9248b0e0328919fdeadeed1675c52c3f" } }, false, { "BCUS99245", "NPUA80908" }, "0.1.0" };
+    { { "BCUS99245", "USA", L"RaCNexus", nullptr, "ca1a1a293d211095fc834eaaa10cd5fa9248b0e0328919fdeadeed1675c52c3f" } }, false, { "BCUS99245", "NPUA80908" }, "0.1.1" };
 #else
 const GameProfile kRacitProfile = { "racit", "A Crack in Time", "Ratchet & Clank Future: A Crack in Time", "RATCHET & CLANK FUTURE", L"",
     { { "BCUS98124", "USA", L"RaCACiT.exe", L"RaCACiT_compat.exe", "406bded328d9dbdfa9684ed392554ca34c76f4ed95aa21685f622d3ab2b04592" },
       { "BCES00511", "Europe", L"RaCACiT_BCES00511.exe", L"RaCACiT_BCES00511_compat.exe", "6debdca0f181f35d98ebe23faabe2531b697c558b4e3384b06630173400674c1" } }, true, { "BCUS98124", "BCES00511" }, "1.0.0" };
 const GameProfile kNexusProfile = { "nexus", "Into the Nexus", "Ratchet & Clank: Into the Nexus", "RATCHET & CLANK", L"nexus",
-    { { "BCUS99245", "USA", L"RaCNexus.exe", nullptr, "ca1a1a293d211095fc834eaaa10cd5fa9248b0e0328919fdeadeed1675c52c3f" } }, false, { "BCUS99245", "NPUA80908" }, "0.1.0" };
+    { { "BCUS99245", "USA", L"RaCNexus.exe", nullptr, "ca1a1a293d211095fc834eaaa10cd5fa9248b0e0328919fdeadeed1675c52c3f" } }, false, { "BCUS99245", "NPUA80908" }, "0.1.1" };
 #endif
 const GameProfile* g_prof = &kRacitProfile;
 
@@ -898,20 +898,32 @@ std::string Store::download_release(const ReleaseInfo& rel, Progress* p)
 }
 
 // Which part of a release a zip entry is, under the folder it is packed in (or none): the
-// launcher exe, README.txt, mods\<id>\... and builds\vNN\.... Everything else -- a data\, game\,
-// backups\ or launcher.ini by mistake among it -- is never even unpacked.
+// launcher exe, README.txt, mods\<id>\..., builds\vNN\... and (since 1.0.1) Into the Nexus's
+// nexus\builds\vNN\.... Everything else -- a data\, game\, backups\ or launcher.ini by mistake
+// among it -- is never even unpacked. (1.0.0 took no nexus\ part: a 1.0.0 launcher updating to
+// 1.0.1 leaves Into the Nexus as it was, and 1.0.1 offers the release again to finish it --
+// app.cpp nexus_behind.)
+static bool build_folder_part(const std::string& n, size_t at)   /* n[at..] = "vNN/..." */
+{
+    if (n.size() <= at || n[at] != 'v') return false;
+    const size_t e = n.find('/', at + 1);
+    return e != std::string::npos && e > at + 1 && n.find_first_not_of("0123456789", at + 1) == e;
+}
 static bool release_part(const std::string& rel_name)
 {
     const std::string n = lower(rel_name);
     if (n == "readme.txt") return true;
     if (n.find('/') == std::string::npos) return n.size() > 4 && n.compare(n.size() - 4, 4, ".exe") == 0 && n.find("launcher") != std::string::npos;
     if (n.rfind("mods/", 0) == 0) return n.size() > 5 && n.find('/', 5) != std::string::npos;
-    if (n.rfind("builds/v", 0) == 0) {
-        const size_t e = n.find('/', 8);
-        return e != std::string::npos && e > 8 && n.find_first_not_of("0123456789", 8) == e;
-    }
+    if (n.rfind("builds/", 0) == 0) return build_folder_part(n, 7);
+    if (n.rfind("nexus/builds/", 0) == 0) return build_folder_part(n, 13);
     return false;
 }
+#ifdef __APPLE__
+static const wchar_t* const kNexusProgram = L"RaCNexus";
+#else
+static const wchar_t* const kNexusProgram = L"RaCNexus.exe";
+#endif
 
 static bool looks_like_program(const fs::path& p)
 {
@@ -925,7 +937,8 @@ std::string Store::install_release(const ReleaseInfo& rel, Progress* p, std::str
     std::error_code ec;
     const fs::path dir = root / L".update", zip = dir / L"release.zip", fresh = dir / L"new", aside = dir / L"old";
     auto stop = [&](const std::string& why) { delete_tree(dir); return why; };
-    if (process_running_under(builds_dir())) return stop("The game is running. Close it, then install the update.");
+    const fs::path nexus_builds = root / L"nexus" / L"builds";
+    if (process_running_under(builds_dir()) || process_running_under(nexus_builds)) return stop("The game is running. Close it, then install the update.");
 
     // 1. Unpack beside everything.
     p->set_line("Reading the release");
@@ -933,7 +946,7 @@ std::string Store::install_release(const ReleaseInfo& rel, Progress* p, std::str
     std::string r = zip_list(zip, &all);
     if (!r.empty()) return stop("The release could not be read: " + r + ". Nothing was changed.");
     std::string base;   // the folder everything is packed in, if any
-    auto is_main = [](const std::string& s) { return lower(s).rfind("builds/", 0) == 0 || (s.find('/') == std::string::npos && release_part(s) && lower(s) != "readme.txt"); };
+    auto is_main = [](const std::string& s) { return lower(s).rfind("builds/", 0) == 0 || lower(s).rfind("nexus/builds/", 0) == 0 || (s.find('/') == std::string::npos && release_part(s) && lower(s) != "readme.txt"); };
     for (const auto& e : all) {
         if (is_main(e.name)) { base.clear(); break; }
         const size_t s = e.name.find('/');
@@ -968,12 +981,21 @@ std::string Store::install_release(const ReleaseInfo& rel, Progress* p, std::str
     }
     for (const auto& b : new_builds)
         if (!looks_like_program(b / RACIT_GAME_EXE) && !looks_like_program(b / L"RaCACiT_BCES00511.exe")) return stop("The release's build " + u8(b.filename()) + " has no game program. Nothing was changed.");
+    std::vector<fs::path> new_nexus;
+    int top_nexus = 0;
+    for (auto& d : fs::directory_iterator(fresh / L"nexus" / L"builds", ec)) {
+        const int v = atoi(u8(d.path().filename()).c_str() + 1);
+        if (!d.is_directory(ec) || v <= 0) continue;
+        if (!looks_like_program(d.path() / kNexusProgram)) return stop("The release's Into the Nexus build " + u8(d.path().filename()) + " has no game program. Nothing was changed.");
+        new_nexus.push_back(d.path());
+        top_nexus = std::max(top_nexus, v);
+    }
     fs::path new_launcher;
 #ifdef __APPLE__
     // The launcher is the .app; its program is Contents/MacOS/RaCACiT Launcher.
     auto program_of = [](const fs::path& app) { return app / L"Contents" / L"MacOS" / L"RaCACiT Launcher"; };
     if (fs::is_directory(fresh / RACIT_LAUNCHER_FILE, ec)) new_launcher = fresh / RACIT_LAUNCHER_FILE;
-    if (new_builds.empty() && new_launcher.empty()) return stop("That release holds no game build and no launcher. Nothing was changed.");
+    if (new_builds.empty() && new_nexus.empty() && new_launcher.empty()) return stop("That release holds no game build and no launcher. Nothing was changed.");
     const fs::path self = app_bundle_path().parent_path() == root ? app_bundle_path() : root / RACIT_LAUNCHER_FILE;
     if (!new_launcher.empty() && sha256_file(program_of(new_launcher)) == sha256_file(program_of(self))) new_launcher.clear();   // the same one
     if (!new_launcher.empty()) {
@@ -982,7 +1004,7 @@ std::string Store::install_release(const ReleaseInfo& rel, Progress* p, std::str
 #else
     for (auto& f : fs::directory_iterator(fresh, ec))
         if (f.is_regular_file(ec) && lower(u8(f.path().extension())) == ".exe") new_launcher = f.path();
-    if (new_builds.empty() && new_launcher.empty()) return stop("That release holds no game build and no launcher. Nothing was changed.");
+    if (new_builds.empty() && new_nexus.empty() && new_launcher.empty()) return stop("That release holds no game build and no launcher. Nothing was changed.");
     // The launcher in the zip must at least start on this PC before it replaces this one.
     const fs::path self = exe_path().parent_path() == root ? exe_path() : root / RACIT_LAUNCHER_FILE;
     if (!new_launcher.empty() && sha256_file(new_launcher) == sha256_file(self)) new_launcher.clear();   // the same one
@@ -996,7 +1018,7 @@ std::string Store::install_release(const ReleaseInfo& rel, Progress* p, std::str
 
     // 3. The saves, first. No backup, no update.
     if (p->cancel) return stop("cancelled");
-    if (process_running_under(builds_dir())) return stop("The game is running. Close it, then install the update.");
+    if (process_running_under(builds_dir()) || process_running_under(nexus_builds)) return stop("The game is running. Close it, then install the update.");
     p->set_line("Backing up your saves");
     fs::path made;
     r = backup_saves("before-update", &made);
@@ -1032,6 +1054,7 @@ std::string Store::install_release(const ReleaseInfo& rel, Progress* p, std::str
     };
     bool ok = true;
     for (const auto& b : new_builds) ok = ok && put(b, builds_dir() / b.filename());
+    for (const auto& b : new_nexus) ok = ok && put(b, nexus_builds / b.filename());
     for (auto& m : fs::directory_iterator(fresh / L"mods", ec)) ok = ok && put(m.path(), mods_dir() / m.path().filename());
     if (fs::exists(fresh / L"README.txt", ec)) ok = ok && put(fresh / L"README.txt", root / L"README.txt");
     fs::path self_old = self; self_old += L".old";
@@ -1061,10 +1084,24 @@ std::string Store::install_release(const ReleaseInfo& rel, Progress* p, std::str
             if (b.version != top_build && b.version != before && b.version != newest_usa && b.version != newest_eu)
                 delete_tree(b.dir);
     }
+    if (top_nexus) {
+        // Into the Nexus: Play starts its newest build (Store::current_build); the one before stays.
+        std::vector<std::pair<int, fs::path>> nb;
+        for (auto& d : fs::directory_iterator(nexus_builds, ec)) {
+            const std::string n = u8(d.path().filename());
+            if (!d.is_directory(ec) || n.size() < 2 || n[0] != 'v' || !fs::exists(d.path() / kNexusProgram, ec)) continue;
+            const int v = atoi(n.c_str() + 1);
+            if (v > 0) nb.push_back({ v, d.path() });
+        }
+        int before = 0;
+        for (const auto& b : nb) if (b.first < top_nexus) before = std::max(before, b.first);
+        for (const auto& b : nb) if (b.first != top_nexus && b.first != before) delete_tree(b.second);
+    }
     write_text_atomic(builds_dir() / L"release.txt", rel.tag + "\r\n");
     *restart = !new_launcher.empty();
     std::string s = rel.name + " is installed.";
     if (top_build) s += " Play starts build v" + std::to_string(top_build) + ".";
+    if (top_nexus) s += " Into the Nexus starts build v" + std::to_string(top_nexus) + ".";
     s += " Your saves, settings, shader caches and game were left as they were";
     s += made.empty() ? "." : "; a save backup was made first (" + u8(made.filename()) + ").";
     if (summary) *summary = s;
