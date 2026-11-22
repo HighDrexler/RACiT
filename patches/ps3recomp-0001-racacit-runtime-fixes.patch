@@ -9116,7 +9116,7 @@ index c4e4d849..0ed12868 100644
  /* ---- decoded state getters -------------------------------------------- */
  
 diff --git a/libs/video/rsx_draw_engine.c b/libs/video/rsx_draw_engine.c
-index 19548e0a..873bb7a6 100644
+index 19548e0a..2c9ab975 100644
 --- a/libs/video/rsx_draw_engine.c
 +++ b/libs/video/rsx_draw_engine.c
 @@ -11,6 +11,7 @@
@@ -14977,7 +14977,7 @@ index 19548e0a..873bb7a6 100644
          }
      }
  }
-@@ -3612,22 +7366,562 @@ static void sink_clear(void* user, const rsx_dispatch* r, u32 mask)
+@@ -3612,22 +7366,561 @@ static void sink_clear(void* user, const rsx_dispatch* r, u32 mask)
   * scene's draws having executed (rsx_live_draw.c:7557-7570). */
  static u32 eng_present_surface(u32 buffer_id)
  {
@@ -15209,10 +15209,9 @@ index 19548e0a..873bb7a6 100644
 +
 +    const u32 span = eng_surface_dense_span(s);
 +    if (!span) return 0;
-+    for (u32 j = 0; j < g.n_surfaces; j++) {
++    for (u32 j = eng_surf_first(s->location, s->offset); j != ENG_INVALID; j = eng_surf_next(j)) {
 +        const eng_surface* o = &g.surfaces[j];
-+        if (o->handle && o->location == s->location && o->offset == s->offset &&
-+            o->full_clear_serial > s->last_write && o->full_clear_span >= span &&
++        if (o->full_clear_serial > s->last_write && o->full_clear_span >= span &&
 +            o->full_clear_span == eng_surface_dense_span(o))
 +            return 1;
 +    }
@@ -15545,7 +15544,7 @@ index 19548e0a..873bb7a6 100644
      if (getenv("PS3RECOMP_METAL_FRAME_DUMP") && g.frames % 120 == 0) {
          u32 current = eng_current_surface();
          fprintf(stderr, "[rsx capture] frame=%u buffer=%u selected=%u current=%u draws=%u surfaces=%u\n",
-@@ -3638,9 +7932,46 @@ static void eng_present(u32 buffer_id)
+@@ -3638,9 +7931,46 @@ static void eng_present(u32 buffer_id)
                      g.surfaces[i].w, g.surfaces[i].h, g.surfaces[i].handle);
      }
      pd_present(target);
@@ -15592,7 +15591,7 @@ index 19548e0a..873bb7a6 100644
      g.last_guest_draws = g.guest_draws;
      g.guest_draws = 0;
  }
-@@ -3694,6 +8025,8 @@ int rsx_draw_engine_init(u32 width, u32 height)
+@@ -3694,6 +8024,8 @@ int rsx_draw_engine_init(u32 width, u32 height)
        s_depth_via_guest = e && *e && strcmp(e, "0") != 0; }
      g.vp_cb = (u8*)calloc(1, ENG_VP_CB_BYTES);
      if (!g.vp_cb) return -1;
@@ -15601,7 +15600,7 @@ index 19548e0a..873bb7a6 100644
      if (g.be->init && g.be->init(g.be->user, g.width, g.height) != 0) {
          free(g.vp_cb); g.vp_cb = NULL;
          return -1;
-@@ -3738,8 +8071,13 @@ void rsx_draw_engine_shutdown(void)
+@@ -3738,8 +8070,13 @@ void rsx_draw_engine_shutdown(void)
      if (g.ready && g.be->shutdown) g.be->shutdown(g.be->user);
  
      rsx_draw_engine_set_guest_memory(NULL, NULL);
@@ -15616,7 +15615,7 @@ index 19548e0a..873bb7a6 100644
      memset(&dc, 0, sizeof dc);
      free(g.tex_staging); free(g.vp_cb); free(g.fp_cb); free(g.indices);
      const rsx_draw_backend* be = g.be;
-@@ -3760,6 +8098,25 @@ void rsx_draw_engine_method(u32 method, u32 arg)
+@@ -3760,6 +8097,25 @@ void rsx_draw_engine_method(u32 method, u32 arg)
      rsx_dispatch_method(&g.rsx, m, arg);
  }
  
@@ -15642,7 +15641,7 @@ index 19548e0a..873bb7a6 100644
  void rsx_draw_engine_set_display_buffer(u32 buffer_id, u32 location, u32 offset,
                                          u32 pitch, u32 width, u32 height)
  {
-@@ -3786,10 +8143,365 @@ void rsx_draw_engine_present(void)
+@@ -3786,10 +8142,365 @@ void rsx_draw_engine_present(void)
       * a runner that both consumes 0xE944 and calls here would otherwise
       * re-present a double-buffered title's OTHER scanout. Presenting twice is
       * harmless either way -- the engine never clears the surface, so a second
