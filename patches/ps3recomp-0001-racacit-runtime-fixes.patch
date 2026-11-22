@@ -1,5 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index a39405d6..cfed7af3 100644
+index a39405d..8b01952 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -47,12 +47,9 @@ list(FILTER HLE_SOURCES EXCLUDE REGEX "/tests/")
@@ -90,7 +90,7 @@ index a39405d6..cfed7af3 100644
  
      # spirv-cross's C API. Debian ships it as a shared library and Homebrew as
      # a static one, under different pkg-config names -- and pkg-config itself
-@@ -313,6 +348,11 @@ endif()
+@@ -313,10 +348,27 @@ endif()
  # libs/video/rsx_shader_spirv.cpp is a stub and the Vulkan backend stays on
  # its fixed-function path.
  if(PS3RECOMP_RSX_VULKAN)
@@ -100,9 +100,26 @@ index a39405d6..cfed7af3 100644
 +        set(glslang_FOUND TRUE)
 +    endif()
      if(glslang_FOUND AND TARGET glslang::glslang AND TARGET glslang::SPIRV)
++        # Keep unchanged translations cached across builds. The per-file
++        # cache header records the glslang version separately.
++        set(_spirv_sources libs/video/rsx_shader_spirv.cpp libs/video/rsx_shader_spirv.h)
++        set(_spirv_text "")
++        foreach(f IN LISTS _spirv_sources)
++            file(SHA256 "${CMAKE_CURRENT_SOURCE_DIR}/${f}" _h)
++            string(APPEND _spirv_text "${_h}")
++        endforeach()
++        string(SHA256 _spirv_id "${_spirv_text}")
++        string(SUBSTRING "${_spirv_id}" 0 23 _spirv_id)
++        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_spirv_sources})
          set_source_files_properties(
              "${CMAKE_CURRENT_SOURCE_DIR}/libs/video/rsx_shader_spirv.cpp"
-@@ -343,15 +383,26 @@ if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+-            PROPERTIES COMPILE_DEFINITIONS PS3RECOMP_HAVE_SPIRV_TRANSLATION=1)
++            PROPERTIES COMPILE_DEFINITIONS
++                "PS3RECOMP_HAVE_SPIRV_TRANSLATION=1;PS3RECOMP_SPIRV_TRANSLATOR_ID=\"${_spirv_id}\"")
+         target_link_libraries(ps3recomp_runtime PRIVATE glslang::glslang glslang::SPIRV)
+         if(TARGET glslang::glslang-default-resource-limits)
+             target_link_libraries(ps3recomp_runtime PRIVATE
+@@ -343,15 +395,26 @@ if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
          # the base ISA and Clang fuses by default there. A PPC fmadd is
          # spelt as one where the lifter means one.
          -ffp-contract=off
@@ -131,7 +148,7 @@ index a39405d6..cfed7af3 100644
      # SSE4.1 (any x86-64 since ~2008): pshufb/blendv for spu_shufb, the
      # hottest SPU op in lifted audio code. Probed rather than assumed: recent
      # Apple clang rejects the flag outright for arm64 ("unsupported option
-@@ -363,6 +414,17 @@ if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+@@ -363,6 +426,17 @@ if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
          # the runtime's existing ISA requirement so their fast path agrees.
          target_compile_options(ps3recomp_runtime PUBLIC -msse4.1)
      endif()
@@ -149,7 +166,7 @@ index a39405d6..cfed7af3 100644
  elseif(MSVC)
      # Real cl.exe -- clang-cl reports its id as Clang and is handled above.
      #
-@@ -568,7 +630,7 @@ endif()
+@@ -568,7 +642,7 @@ endif()
  # run. Builds on any POSIX host: it picks Metal on Apple and the null backend's
  # headless software path everywhere else, so Linux -- which has no real backend
  # yet -- can still run the whole guest command stream end to end in CI.
@@ -158,7 +175,7 @@ index a39405d6..cfed7af3 100644
      add_executable(ps3recomp_host
          runtime/host/host_posix.c
          runtime/host/host_stubs.c
-@@ -716,7 +778,7 @@ endif()
+@@ -716,7 +790,7 @@ endif()
  #
  # The HLE NID table is generated exactly as a port generates it, so the smoke
  # title's firmware imports resolve through the same bridge a game's do.
@@ -19856,7 +19873,7 @@ index 00000000..809a855d
 +    }
 +}
 diff --git a/libs/video/rsx_shader_spirv.cpp b/libs/video/rsx_shader_spirv.cpp
-index 4aa4a176..46028368 100644
+index 4aa4a17..431b950 100644
 --- a/libs/video/rsx_shader_spirv.cpp
 +++ b/libs/video/rsx_shader_spirv.cpp
 @@ -30,18 +30,26 @@
@@ -19905,7 +19922,21 @@ index 4aa4a176..46028368 100644
          return -1;
      }
      glslang::TProgram program;
-@@ -228,7 +247,7 @@ void cache_store(const std::string& path, const std::string& key,
+@@ -121,10 +140,9 @@ int translate(const char* hlsl, int stage, std::vector<unsigned int>& spirv,
+ 
+ const u32 kCacheFormat = 1;
+ const u32 kCacheMagic = 0x56505352u;   /* "RSPV" */
+-/* This file's compile time stands for translate()'s options and the binding
+- * contract in rsx_shader_spirv.h: when either changes, this file is rebuilt,
+- * and the files an older build wrote become misses. */
+-const char kTranslatorBuild[24] = __DATE__ " " __TIME__;
++/* CMake fingerprints the translator implementation and binding contract.
++ * An unchanged rebuild keeps disk cache hits. */
++const char kTranslatorBuild[24] = PS3RECOMP_SPIRV_TRANSLATOR_ID;
+ 
+ struct Cache {
+     std::mutex lock;
+@@ -228,7 +246,7 @@ void cache_store(const std::string& path, const std::string& key,
  
  extern "C" int rsx_hlsl_to_spirv_available(void) { return 1; }
  
@@ -19914,7 +19945,7 @@ index 4aa4a176..46028368 100644
                                   u32* words, u32 max_words, u32* out_words,
                                   char* log, u32 log_size)
  {
-@@ -275,20 +294,290 @@ extern "C" int rsx_hlsl_to_spirv(const char* hlsl, int stage,
+@@ -275,20 +293,290 @@ extern "C" int rsx_hlsl_to_spirv(const char* hlsl, int stage,
      return 0;
  }
  
@@ -20213,7 +20244,7 @@ index 4aa4a176..46028368 100644
  }
  
  #else /* !PS3RECOMP_HAVE_SPIRV_TRANSLATION */
-@@ -312,5 +601,6 @@ extern "C" void rsx_hlsl_to_spirv_cache_stats(RsxSpirvCacheStats* out)
+@@ -312,5 +600,6 @@ extern "C" void rsx_hlsl_to_spirv_cache_stats(RsxSpirvCacheStats* out)
  }
  
  extern "C" void rsx_hlsl_to_spirv_cache_reset(void) {}
