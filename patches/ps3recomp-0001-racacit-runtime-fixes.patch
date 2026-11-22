@@ -20819,7 +20819,7 @@ index ba6c18eb..ce97e038 100644
          "    Out.t0=o[7];  Out.t1=o[8];  Out.t2=o[9];  Out.t3=o[10];\n"
          "    Out.t4=o[11]; Out.t5=o[12]; Out.t6=o[13]; Out.t7=o[14];\n"
 diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
-index f78c66f2..7a6927d0 100644
+index f78c66f2..2098b193 100644
 --- a/libs/video/rsx_vulkan_backend.c
 +++ b/libs/video/rsx_vulkan_backend.c
 @@ -38,10 +38,13 @@
@@ -22401,7 +22401,7 @@ index f78c66f2..7a6927d0 100644
 + * pipeline cache's data needs no external synchronisation against pipeline
 + * creation, so the render thread carries on. */
 +static SDL_atomic_t s_pcache_busy;
-+static volatile int s_pw_running;      /* the pre-warm builds into the main cache */
++static SDL_atomic_t s_pw_running;      /* pre-warm has not finished using its caches */
 +static void vk_ap_merge(void);
 +static int SDLCALL vk_pcache_save_thread(void* arg)
 +{
@@ -25324,7 +25324,7 @@ index f78c66f2..7a6927d0 100644
 +            s_pw_cache[i] = VK_NULL_HANDLE;
 +        }
 +    }
-+    if (!s_ap.cache || s_ap.merged == s_ap.built || s_pw_running) return;
++    if (!s_ap.cache || s_ap.merged == s_ap.built || SDL_AtomicGet(&s_pw_running)) return;
 +    if (pvkMergePipelineCaches(s_vk.device, s_g.pcache, 1, &s_ap.cache) == VK_SUCCESS) s_ap.merged = s_ap.built;
 +}
  
@@ -26284,7 +26284,7 @@ index f78c66f2..7a6927d0 100644
 +        if (built && !SDL_AtomicGet(&s_pw.stop)) vk_shaders_state("ok");
 +        if (s_pw_keep) SDL_AtomicSet(&s_pw_merge, 1);
 +        if (built) SDL_AtomicSet(&s_pw_dirty, 1);
-+        s_pw_running = 0;
++        SDL_AtomicSet(&s_pw_running, 0);
 +    }
 +    return 0;
 +}
@@ -26350,7 +26350,7 @@ index f78c66f2..7a6927d0 100644
 +        vk_prewarm_worker((void*)(uintptr_t)0);
 +        for (u32 i = 1; i < nth; i++) if (extra[i]) SDL_WaitThread(extra[i], NULL);
 +    } else {
-+        s_pw_running = 0;
++        SDL_AtomicSet(&s_pw_running, 0);
 +        if (s_pw_keep) for (u32 j = 0; j < s_pwk_cap; j++) if (s_pwk[j].key) SDL_AtomicCAS(&s_pwk[j].st, 0, 3);
 +    }
 +    free(sp); s_pwj.sp = NULL; s_pwj.ns = 0;
@@ -26452,13 +26452,13 @@ index f78c66f2..7a6927d0 100644
 +    if (rebuild && n) {
 +        s_pw.recs = recs; s_pw.n = n;
 +        SDL_AtomicSet(&s_pw.stop, 0);
-+        s_pw_running = 1;
++        SDL_AtomicSet(&s_pw_running, 1);
 +        s_pw.thread = SDL_CreateThread(vk_prewarm_thread, "pipeline-prewarm", NULL);
 +        if (s_pw.thread) {
 +            VK_LOG("pipeline pre-warm: rebuilding the %u listed variants in the background\n", n);
 +            return;
 +        }
-+        s_pw.recs = NULL; s_pw.n = 0; s_pw_running = 0;
++        s_pw.recs = NULL; s_pw.n = 0; SDL_AtomicSet(&s_pw_running, 0);
 +    } else if (rebuild) {
 +        VK_LOG("pipeline pre-warm: nothing listed yet; expect shader-compile stutter the first time each area is seen\n");
 +    }
