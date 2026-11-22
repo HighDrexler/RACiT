@@ -16,14 +16,41 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 mkdir -p tools input
 
-# pin <dir> <repository> <commit or tag>
+# pin <dir> <repository> <commit>
 pin() {
-    [ -d "tools/$1/.git" ] && return 0
-    git init -q "tools/$1"
-    git -C "tools/$1" remote add origin "https://github.com/$2"
-    git -C "tools/$1" -c core.autocrlf=false fetch -q --depth 1 origin "$3"
-    git -C "tools/$1" -c core.autocrlf=false checkout -q FETCH_HEAD
-    echo "tools/$1: $2 at $3"
+    local dir="tools/$1" repository="$2" revision="$3"
+    if [ ! -e "$dir/.git" ]; then
+        if [ -d "$dir" ] && [ -n "$(ls -A "$dir")" ]; then
+            echo "$dir is not a Git checkout. Use an empty directory or the pinned checkout." >&2
+            return 1
+        fi
+        git init -q "$dir"
+        git -C "$dir" remote add origin "https://github.com/$repository"
+    fi
+    if ! git -C "$dir" rev-parse --verify HEAD >/dev/null 2>&1; then
+        git -C "$dir" -c core.autocrlf=false fetch -q --depth 1 origin "$revision"
+        git -C "$dir" -c core.autocrlf=false checkout -q --detach FETCH_HEAD
+    fi
+    local actual
+    actual=$(git -C "$dir" rev-parse HEAD)
+    if [ "$actual" != "$revision" ]; then
+        echo "$dir is at $actual. Use the pinned checkout at $revision." >&2
+        return 1
+    fi
+    echo "$dir: $repository at $revision"
+}
+
+apply_dependency_patch() {
+    local dir="tools/$1" patch="$ROOT/patches/$2"
+    if git -C "$dir" apply --reverse --check --ignore-whitespace "$patch" 2>/dev/null; then
+        echo "$dir: $2 already applied"
+        return
+    fi
+    if ! git -C "$dir" apply --ignore-whitespace "$patch"; then
+        echo "$dir requires a clean pinned checkout for $2." >&2
+        return 1
+    fi
+    echo "$dir: $2 applied"
 }
 
 echo "== Python tools (the lift: scripts/pipeline.sh)"
@@ -33,23 +60,13 @@ tools/venv/Scripts/python.exe -m pip install -q --disable-pip-version-check \
     pycryptodome==3.24.1 tabulate==0.10.0 tqdm==4.70.1
 
 echo "== Sources"
-fresh_runtime=0; fresh_sdl=0
-[ -d tools/ps3recomp/.git ] || fresh_runtime=1
-[ -d tools/SDL2-src/.git ] || fresh_sdl=1
 pin ps3recomp      sp00nznet/ps3recomp         5244db92669b54831c6d3ebb7a96d58c4dbfa6df
 pin Vulkan-Headers KhronosGroup/Vulkan-Headers c46850864f4661461b0f6cb9922c058ffea4915e
 pin glslang-src    KhronosGroup/glslang        2fbed5e1fb43a1c480fe020e3bb686a31010989a
-pin zlib           madler/zlib                 767c4c947852e143f582c85f14cf573411df1b35
-pin SDL2-src       libsdl-org/SDL              release-2.32.10
+pin zlib           madler/zlib                767c4c947852e143f582c85f14cf573411df1b35
+pin SDL2-src       libsdl-org/SDL              5d249570393f7a37e037abf22cd6012a4cc56a71
 
-# The Android runtime (patches/ps3recomp-android.patch, in place of the Windows patch) and the
-# Android changes to SDL2 (patches/sdl2-android.patch). --ignore-whitespace: some files mix line endings.
-if [ "$fresh_runtime" = 1 ]; then
-    git -C tools/ps3recomp apply --ignore-whitespace ../../patches/ps3recomp-android.patch
-    echo "tools/ps3recomp: Android runtime applied"
-fi
-if [ "$fresh_sdl" = 1 ]; then
-    git -C tools/SDL2-src apply --ignore-whitespace ../../patches/sdl2-android.patch
-    echo "tools/SDL2-src: Android changes applied"
-fi
+# Some of the runtime source files mix line endings.
+apply_dependency_patch ps3recomp ps3recomp-android.patch
+apply_dependency_patch SDL2-src sdl2-android.patch
 echo "Done."
