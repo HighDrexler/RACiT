@@ -1816,6 +1816,11 @@ std::string Store::launch(void** process, bool prepare)
     const BuildInfo b = build_for(u120, g.title_id);
     if (!b.version) return "No build installed: reinstall the launcher.";
     std::error_code ec;
+#ifdef __APPLE__
+    const fs::path exe = b.dir / game_program(g.title_id);
+    if (!fs::is_regular_file(exe, ec))
+        return "Build v" + std::to_string(b.version) + " has no program for this disc (" + g.title_id + ": " + u8(exe.filename()) + ").";
+#endif
     fs::create_directories(hdd(), ec); fs::create_directories(cache(), ec);
     if (u120) { const std::string r = prepare_update_hdd(); if (!r.empty()) return "Could not set up update 1.20: " + r; }
     const fs::path eboot = u120 ? update_elf() : g.root / L"PS3_GAME" / L"USRDIR" / L"EBOOT.elf";
@@ -1884,7 +1889,7 @@ std::string Store::launch(void** process, bool prepare)
         if (const auto error = prepare_update_disc(g.root, update_dir() / L"PARAM.SFO", vfs_root))
             return "Could not prepare the update's disc files: " + error.message();
     }
-    return launch_mac(vfs_root, b, eboot, set, process);
+    return launch_mac(vfs_root, exe, eboot, set, process);
 #else
     std::wstring env;
     if (wchar_t* cur = GetEnvironmentStringsW()) {
@@ -1940,12 +1945,13 @@ std::string Store::launch(void** process, bool prepare)
 // same environment as on Windows, the game folder named outright (PS3_VFS_ROOT), the
 // Vulkan loader and MoltenVK beside the build (builds/vNN/lib, unless settings.txt names
 // others), and stdout + stderr into data/log.txt.
-std::string Store::launch_mac(const fs::path& vfs_root, const BuildInfo& b, const fs::path& eboot, std::map<std::wstring, std::wstring>& set, void** process)
+std::string Store::launch_mac(const fs::path& vfs_root, const fs::path& exe, const fs::path& eboot, std::map<std::wstring, std::wstring>& set, void** process)
 {
     std::error_code ec;
     auto ours = [&](const wchar_t* k) { for (auto& kv : set) if (_wcsicmp(kv.first.c_str(), k) == 0) return true; return false; };
     set[L"PS3_VFS_ROOT"] = vfs_root.wstring();
-    const fs::path lib = b.dir / L"lib";
+    const fs::path build_dir = exe.parent_path();
+    const fs::path lib = build_dir / L"lib";
     if (!ours(L"PS3RECOMP_VULKAN_LIBRARY") && fs::exists(lib / L"libvulkan.1.dylib", ec))
         set[L"PS3RECOMP_VULKAN_LIBRARY"] = (lib / L"libvulkan.1.dylib").wstring();
     if (!ours(L"VK_DRIVER_FILES") && fs::exists(lib / L"MoltenVK_icd.json", ec))
@@ -1961,12 +1967,11 @@ std::string Store::launch_mac(const fs::path& vfs_root, const BuildInfo& b, cons
     }
     for (auto& kv : set) env.push_back(narrow(kv.first) + "=" + narrow(kv.second));
 
-    const fs::path exe = b.dir / RACIT_GAME_EXE;
-    fs::remove(b.dir / L"log.txt", ec);
-    launched_dir = b.dir;
-    clear_quarantine(b.dir);
+    fs::remove(build_dir / L"log.txt", ec);
+    launched_dir = build_dir;
+    clear_quarantine(build_dir);
     std::string why;
-    ChildProcess* c = child_start({ u8(exe), u8(eboot) }, &env, b.dir, log(), &why);
+    ChildProcess* c = child_start({ u8(exe), u8(eboot) }, &env, build_dir, log(), &why);
     if (!c) return "Could not start " + u8(exe) + " (" + why + ").";
     *process = c;
     return {};
