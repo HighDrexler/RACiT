@@ -28,7 +28,7 @@ pin() {
         git -C "$dir" remote add origin "https://github.com/$repository"
     fi
     if ! git -C "$dir" rev-parse --verify HEAD >/dev/null 2>&1; then
-        git -C "$dir" -c core.autocrlf=false fetch -q --depth 1 origin "$revision"
+        git -C "$dir" -c core.autocrlf=false fetch -q --depth 1 "https://github.com/$repository" "$revision"
         git -C "$dir" -c core.autocrlf=false checkout -q --detach FETCH_HEAD
     fi
     local actual
