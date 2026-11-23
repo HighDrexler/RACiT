@@ -978,10 +978,23 @@ static bool nexus_behind()
     }
     return top > 0 && top < kNexusBuild;
 }
+/* macOS releases ship A Crack in Time's update 1.20 build too (builds/vNN-u120, mac/package_macos.sh
+ * --game120). A 1.0.1 launcher's installer drops that folder, so the same release is offered once more
+ * when there is a disc build but no 1.20 build; only once per release, in case a release has none. */
+#ifdef __APPLE__
+static const bool kReleaseHasU120 = true;
+#else
+static const bool kReleaseHasU120 = false;
+#endif
+static bool u120_behind(const std::string& tag)
+{
+    return kReleaseHasU120 && R->build_for(true, "BCUS98124").version == 0 &&
+        R->build_for(false, "BCUS98124").version != 0 && R->ini.get("u120_finish_offered", "") != tag;
+}
 static bool release_newer(const std::string& tag)
 {
     const int c = Store::compare_versions(tag, R->installed_release(kLauncherVersion));
-    return c > 0 || (c == 0 && nexus_behind());
+    return c > 0 || (c == 0 && (nexus_behind() || u120_behind(tag)));
 }
 
 static void remember_release(const ReleaseInfo& rel)
@@ -1998,8 +2011,11 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
             g_update_asked = true;
             const ReleaseInfo r = g_rel;
             const bool finish = Store::compare_versions(r.tag, R->installed_release(kLauncherVersion)) == 0;
+            const bool finish_u120 = finish && !nexus_behind();
+            if (finish_u120) { R->ini.put("u120_finish_offered", r.tag); R->ini.save(); }
             confirm(finish ? "Finish the update: " + r.name : "Update available: " + r.name,
-                    (finish ? std::string("The launcher you updated from could not install Into the Nexus's new build. Download ") + r.name +
+                    (finish ? std::string("The launcher you updated from could not install ") +
+                              (finish_u120 ? "the update 1.20 build" : "Into the Nexus's new build") + ". Download " + r.name +
                               " once more to put it in.\n\n" : std::string()) +
                     (r.notes.empty() ? std::string() : r.notes + "\n\n") + "Download it now" + (r.size ? " (" + format_size(r.size) + ")" : std::string()) +
                     "? You confirm again before anything is installed; your saves are backed up first.",
