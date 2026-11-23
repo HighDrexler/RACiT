@@ -15,7 +15,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PS3R="$ROOT/tools/ps3recomp"
 ELF="${1:-$ROOT/input/EBOOT.ELF}"
-PY="${PY:-python3 -I}"
+# UTF-8 mode: the lifter and the patchers read and write the lifted sources as UTF-8,
+# not in the locale's encoding (cp1252 on Windows), so every platform gets the same bytes.
+PY="${PY:-python3 -I} -X utf8"
 JOBS="${JOBS:-${CMAKE_BUILD_PARALLEL_LEVEL:-}}"
 
 # The same explicit count bounds both lifters and the native compiler.
@@ -160,7 +162,8 @@ export RACACIT_SPU_DIR="$SPU" RACACIT_PRX_DIR="$PRX"
 
 echo "== 5/5 Desktop build"
 CMAKE_ARGS=(-DPS3RECOMP_DIR="$PS3R" -DRECOMP_DIR="$RECOMP" -DSPU_DIR="$SPU"
-            -DPRX_DIR="$PRX" -DHOST_DIR="$HOST" -DPS3RECOMP_RSX_VULKAN=ON)
+            -DPRX_DIR="$PRX" -DHOST_DIR="$HOST" -DPS3RECOMP_RSX_VULKAN=ON
+            -DRACACIT_GAME_PROFILE="$PROFILE" -DRACACIT_ELF="$ELF")
 if [ -n "${PS3RECOMP_VULKAN_INCLUDE_DIR:-}" ]; then
   CMAKE_ARGS+=(-DPS3RECOMP_VULKAN_INCLUDE_DIR="$PS3RECOMP_VULKAN_INCLUDE_DIR")
 elif [ -d "$ROOT/tools/Vulkan-Headers/include" ]; then

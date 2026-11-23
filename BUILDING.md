@@ -205,12 +205,48 @@ LIBSRE="$PWD/input/libsre.prx" PY="$PWD/tools/venv/Scripts/python -I" bash scrip
 The update gets a tree of its own, `out/BCUS98124-1.20/` (`recomp/`, `spu/`, `prx/`, `host/`,
 `build/`), so it never overwrites the disc's `game/src/recomp` and `game/spu`. Its hooks,
 function and data addresses and SPU payloads are in `versions/` (see `versions/README.md`);
-each hook checks the function's fingerprint before it edits it. The release launcher builds
-only the disc; the update build has not been run on Windows yet.
+each hook checks the function's fingerprint before it edits it.
+
+On Windows, generate the update with `SKIP_DESKTOP=1`, then configure from `windows/`
+using the release toolchain. Use a fresh build directory for each game version and CPU target.
+
+```bash
+update_elf="/path/to/update120/EBOOT.ELF"
+export PATH="$PWD/tools/venv/Scripts:$PATH"
+PY="python -I" SKIP_DESKTOP=1 bash scripts/pipeline.sh "$update_elf"
+cmake -S windows -B game/build-win-u120 -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_TOOLCHAIN_FILE="$PWD/windows/toolchain/zig-windows.cmake" \
+  -DPython3_EXECUTABLE="$PWD/tools/venv/Scripts/python.exe" \
+  -DRACACIT_GAME_PROFILE=BCUS98124-1.20 -DRACACIT_ELF="$update_elf"
+cmake --build game/build-win-u120 --parallel 2
+```
+
+For Windows packaging, put the update's `RaCACiT.exe` and `RaCACiT_compat.exe` in
+`builds/vN-u120` alongside the disc's `builds/vN`. Build the compat executable in its own
+directory with `-DRACACIT_CPU_COMPAT=ON`. For macOS, pass the update executable to
+`mac/package_macos.sh --game120`. Use the next game build number after the one already shipped.
+The launcher selects 1.20 when the USA disc, matching update files, and update build are present.
+
+On Linux the game runs directly from its build. Build both versions through `scripts/pipeline.sh`
+with their respective EBOOTs and the same pinned, patched runtime. Provide SDL2, zlib, Vulkan
+headers and loader, and glslang from your distribution. For 1.00, point `PS3_VFS_ROOT` at the
+folder containing the disc's `PS3_GAME`, and set `PS3_HDD0_ROOT` to its writable installed-data
+folder. For 1.20, use the same disc root and a separate writable installed-data folder containing
+`game/BCUS98124/PARAM.SFO` and `game/BCUS98124/USRDIR` from your installed update. Set
+`PS3_UPDATE_PARAM_SFO` to that installed metadata file and `PS3_HDD0_HOME_ROOT` to the 1.00
+HDD folder's `home` directory to share saves. Pass the respective decrypted EBOOT to each binary.
+
+Both Linux versions load and save in-game settings in `$XDG_CONFIG_HOME/racit/settings.txt`
+(`~/.config/racit/settings.txt` by default). Set `RACACIT_SETTINGS_FILE` to use a different
+file, or set it to an empty value to disable settings persistence for that run. The file
+loads `RACACIT_` settings, including key bindings and mouse sensitivity. Explicit
+environment values take precedence.
 
 ## Keyboard menu artwork
 
 Prepare a separate archive from your own game dump with `python scripts/prepare_menu_keycaps.py ORIGINAL_GLOBAL_CACHED.PSARC PREPARED_GLOBAL_CACHED.PSARC`. The output directory must exist. The tool checks the bundled menu source and compiled actions, preserves the original archive, and records a receipt beside the prepared file. Repeating the command verifies and reuses the matching output. A changed input or output requires a fresh output path.
+
+Or let the game do it, which it does by default on Windows, macOS and Linux (`RACACIT_MENU_KEYCAPS=0` in the environment or the settings file turns it off; Android needs `RACACIT_MENU_KEYCAPS=1`): with no `RACACIT_MENU_ARCHIVE`, the game prepares the same archive the first time it opens `global_cached.psarc` and keeps it in a `menu-keycaps` folder next to the settings file, reusing it while the original's size and time are unchanged. It takes about half a second and needs as much free space as the original (about 220 MB).
 
 Set `RACACIT_MENU_ARCHIVE` to the prepared file when running the player through its usual entry point. The player validates the archive header before booting the guest and redirects read-only opens of `packed/game/global_cached.psarc`. Original stat, installation and write paths retain the owner's game files. Leave the variable unset to use the original archive.
 

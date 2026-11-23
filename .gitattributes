@@ -7,3 +7,5 @@ patches/ps3recomp-0001-racacit-runtime-fixes.patch -text
 *.svg text
 *.jpg binary
 *.png binary
+*.as text eol=lf
+*.bin binary

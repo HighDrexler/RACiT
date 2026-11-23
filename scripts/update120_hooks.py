@@ -5,6 +5,29 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+def drop_old_preamble(source, preamble, row_includes):
+    # A chunk patched with an earlier recipe carries that recipe's preamble
+    # (a hook's declaration may have changed since). Two preambles would
+    # redefine RacJbFrame and can conflict, so the old one goes: its marker
+    # line and the declarations that follow it, but not a hook row's own
+    # include lines.
+    marker = preamble.split('\n', 1)[0] + '\n'
+    start = source.find(marker)
+    if start < 0:
+        return source
+    end = start + len(marker)
+    while True:
+        line_end = source.find('\n', end)
+        if line_end < 0:
+            break
+        line = source[end:line_end]
+        if line in row_includes or not (line.startswith('extern "C"') or line == '#include "ps3_setjmp.h"'
+                                        or line.startswith('typedef struct RacJbFrame')):
+            break
+        end = line_end + 1
+    return source[:start] + source[end:]
+
+
 # This consumes source edits; executable bytes and generated game functions
 # remain local to the person building their own copy.
 def apply_update120_hooks(recomp, elf):
@@ -23,13 +46,14 @@ def apply_update120_hooks(recomp, elf):
         raise ValueError('Update hooks require the exact BCUS98124 1.20 executable')
 
     hooks = {row['function']: row for row in recipe['hooks']}
+    row_includes = {line for row in recipe['hooks'] for line in row.get('includes', [])}
     if len(hooks) != len(recipe['hooks']):
         raise ValueError('Duplicate update hook address')
     seen = set()
     pending = {}
     preamble = recipe['preamble']
     for path in sorted(Path(recomp).glob('ppu_recomp_*.cpp')):
-        source = path.read_text(encoding='utf-8')
+        source = path.read_text(encoding='utf-8', errors='surrogateescape')
         replacements = []
         includes = set()
         for match in re.finditer(r'(?m)^void func_([0-9A-F]{8})\(ppu_context\* ctx\) \{', source):
@@ -46,7 +70,7 @@ def apply_update120_hooks(recomp, elf):
             before = source[match.start():end]
             hook = hooks[address]
             includes.update(hook.get('includes', []))
-            checksum = hashlib.sha256(before.encode('utf-8')).hexdigest()
+            checksum = hashlib.sha256(before.encode('utf-8', 'surrogateescape')).hexdigest()
             if checksum == hook['after_sha256']:
                 continue
             if checksum != hook['before_sha256']:
@@ -59,7 +83,7 @@ def apply_update120_hooks(recomp, elf):
                 lines[start:start + count] = added.splitlines(keepends=True)
                 previous = start
             after = ''.join(lines)
-            if hashlib.sha256(after.encode('utf-8')).hexdigest() != hook['after_sha256']:
+            if hashlib.sha256(after.encode('utf-8', 'surrogateescape')).hexdigest() != hook['after_sha256']:
                 raise ValueError('Update hook result does not match: ' + address)
             replacements.append((match.start(), end, after))
         for start, end, after in reversed(replacements):
@@ -70,6 +94,7 @@ def apply_update120_hooks(recomp, elf):
             source = source[:position] + include + '\n' + source[position:]
         if replacements or missing_includes:
             if preamble not in source:
+                source = drop_old_preamble(source, preamble, row_includes)
                 include = source.index('\n', source.index('#include')) + 1
                 source = source[:include] + preamble + source[include:]
             pending[path] = source
@@ -80,7 +105,7 @@ def apply_update120_hooks(recomp, elf):
     # a late compiler/layout mismatch must not leave a half-patched source tree.
     for path, source in pending.items():
         temporary = path.with_suffix(path.suffix + '.update120.tmp')
-        with open(temporary, 'x', encoding='utf-8', newline='') as stream:
+        with open(temporary, 'x', encoding='utf-8', errors='surrogateescape', newline='') as stream:
             stream.write(source)
         os.replace(temporary, path)
     print('BCUS98124 1.20 hooks: %d functions checked, %d chunks updated' % (len(seen), len(pending)))

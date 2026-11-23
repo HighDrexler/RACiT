@@ -1,4 +1,12 @@
 cmake_minimum_required(VERSION 3.20)
+# macOS: run on macOS 14 and later. Without a target the SDK's own version is
+# the minimum, so a build made on a newer Mac would not start on an older one.
+# APIs newer than the target stay in use behind @available /
+# __builtin_available checks (-Werror=unguarded-availability-new below).
+# Must be set before project().
+if(APPLE AND NOT CMAKE_OSX_DEPLOYMENT_TARGET AND NOT DEFINED ENV{MACOSX_DEPLOYMENT_TARGET})
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum macOS version" FORCE)
+endif()
 project(RaCACiTRecomp
     VERSION 0.1.0
     LANGUAGES C CXX
@@ -12,6 +20,10 @@ set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+if(APPLE)
+    # A call to an API newer than the deployment target must be guarded.
+    add_compile_options(-Werror=unguarded-availability-new)
+endif()
 
 # Prefer Ninja if available
 if(NOT CMAKE_GENERATOR MATCHES "Ninja" AND NOT DEFINED ENV{CMAKE_GENERATOR})
@@ -234,6 +246,61 @@ target_sources(${PROJECT_NAME} PRIVATE
     ${RECOMP_SOURCES}
     ${SPU_SOURCES}
 )
+# Every hook on the lift. The lift is generated once and patched by
+# scripts/patch_lift.py, so a lift patched before a hook was added would build
+# without it. Before the game compiles, scripts/check_lift_hooks.py re-runs the
+# patcher when it, a hook table under versions/ or the lift is newer than the
+# last check, and stops the build if any hook in
+# versions/<profile>-hook-symbols.txt is missing. The profile comes from the
+# version-selected host sources (scripts/prepare_game_host.py writes it into
+# game_version.h); RACACIT_ELF is the executable re-patching needs for an update.
+set(RACACIT_GAME_PROFILE "" CACHE STRING "Game profile of RECOMP_DIR (empty: from HOST_DIR/game_version.h, else BCUS98124-1.00)")
+set(RACACIT_ELF "" CACHE FILEPATH "Decrypted EBOOT.ELF of RECOMP_DIR's lift (needed to re-patch an update lift)")
+set(RACACIT_CHECK_HOOKS ON CACHE BOOL "Re-patch the lift when needed and stop on missing hooks")
+if(RACACIT_CHECK_HOOKS)
+    set(_racit_profile "${RACACIT_GAME_PROFILE}")
+    if(NOT _racit_profile AND EXISTS "${HOST_DIR}/game_version.h")
+        file(STRINGS "${HOST_DIR}/game_version.h" _racit_profile_line REGEX "RACACIT_GAME_PROFILE_ID")
+        string(REGEX REPLACE ".*\"([^\"]+)\".*" "\\1" _racit_profile "${_racit_profile_line}")
+    endif()
+    if(NOT _racit_profile)
+        set(_racit_profile "BCUS98124-1.00")
+    endif()
+    set(_racit_elf "${RACACIT_ELF}")
+    if(NOT _racit_elf AND _racit_profile STREQUAL "BCUS98124-1.00" AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../input/EBOOT.ELF")
+        set(_racit_elf "${CMAKE_CURRENT_SOURCE_DIR}/../input/EBOOT.ELF")
+    endif()
+    message(STATUS "Lift hooks:      ${_racit_profile} (versions/${_racit_profile}-hook-symbols.txt)")
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    set(_racit_root "${CMAKE_CURRENT_SOURCE_DIR}/..")
+    file(GLOB _racit_hook_inputs
+        "${_racit_root}/scripts/patch_lift.py" "${_racit_root}/scripts/update120_hooks.py"
+        "${_racit_root}/scripts/fix_vmx_alias.py" "${_racit_root}/scripts/game_version.py"
+        "${_racit_root}/scripts/check_lift_hooks.py" "${_racit_root}/versions/*")
+    # Re-patch here, at configure time, before the build has looked at the lifted sources:
+    # a source rewritten during the build would not be recompiled. A change to the patcher
+    # or a hook list configures (and so re-patches) again.
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_racit_hook_inputs})
+    execute_process(
+        COMMAND "${Python3_EXECUTABLE}" -I -X utf8 "${_racit_root}/scripts/check_lift_hooks.py" "${RECOMP_DIR}"
+                --profile "${_racit_profile}" --elf "${_racit_elf}" --patch
+                --stamp "${CMAKE_CURRENT_BINARY_DIR}/lift-patched.ok"
+        RESULT_VARIABLE _racit_patch_result)
+    if(NOT _racit_patch_result EQUAL 0)
+        message(FATAL_ERROR "The lift in ${RECOMP_DIR} is missing hooks (see above)")
+    endif()
+    # The build only checks again (it never writes a source): a lift regenerated or edited
+    # since this configure, and not patched, stops the build.
+    set(_racit_stamp "${CMAKE_CURRENT_BINARY_DIR}/lift-hooks.ok")
+    add_custom_command(OUTPUT "${_racit_stamp}"
+        COMMAND "${Python3_EXECUTABLE}" -I -X utf8 "${_racit_root}/scripts/check_lift_hooks.py" "${RECOMP_DIR}"
+                --profile "${_racit_profile}" --stamp "${_racit_stamp}"
+        DEPENDS ${_racit_hook_inputs} ${RECOMP_SOURCES}
+        COMMENT "Checking the lift's hooks (${_racit_profile})"
+        VERBATIM)
+    add_custom_target(racit_lift_hooks ALL DEPENDS "${_racit_stamp}")
+    add_dependencies(${PROJECT_NAME} racit_lift_hooks)
+endif()
 # Android: the dual-screen companion's JNI link (android/app).
 if(ANDROID)
     target_sources(${PROJECT_NAME} PRIVATE android_companion.cpp android_profiler.cpp)
@@ -310,7 +377,26 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 target_link_libraries(${PROJECT_NAME} PRIVATE
     ps3recomp_runtime
 )
-if(APPLE)
+# menu_archive.cpp builds the keyboard menu archive itself (RACACIT_MENU_KEYCAPS=1)
+# from the compiled menu actions, so they go into the game as bytes.
+set(RACACIT_MENU_ACTIONS "${CMAKE_CURRENT_SOURCE_DIR}/menu_keycaps.actions.bin")
+file(READ "${RACACIT_MENU_ACTIONS}" RACACIT_MENU_ACTIONS_HEX HEX)
+string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," RACACIT_MENU_ACTIONS_BYTES "${RACACIT_MENU_ACTIONS_HEX}")
+set(RACACIT_MENU_ACTIONS_INC "${CMAKE_CURRENT_BINARY_DIR}/menu_keycaps_actions.inc")
+set(RACACIT_MENU_ACTIONS_OLD "")
+if(EXISTS "${RACACIT_MENU_ACTIONS_INC}")
+    file(READ "${RACACIT_MENU_ACTIONS_INC}" RACACIT_MENU_ACTIONS_OLD)
+endif()
+if(NOT RACACIT_MENU_ACTIONS_OLD STREQUAL "${RACACIT_MENU_ACTIONS_BYTES}")
+    file(WRITE "${RACACIT_MENU_ACTIONS_INC}" "${RACACIT_MENU_ACTIONS_BYTES}")
+endif()
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${RACACIT_MENU_ACTIONS}")
+target_include_directories(${PROJECT_NAME} PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
+if(ZLIB_SOURCES)
+    target_include_directories(${PROJECT_NAME} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../tools/zlib")
+endif()
+
+if(APPLE OR (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ZLIB_SOURCES))
     find_package(ZLIB REQUIRED)
     target_link_libraries(${PROJECT_NAME} PRIVATE ZLIB::ZLIB)
     target_link_libraries(ps3recomp_runtime PRIVATE ZLIB::ZLIB)
@@ -361,7 +447,8 @@ if(WIN32)
 endif()
 # main.cpp's CPU check asks for what this build was compiled for.
 if(RACACIT_CPU_COMPAT)
-    set_property(SOURCE main.cpp APPEND PROPERTY COMPILE_DEFINITIONS RACACIT_CPU_COMPAT=1)
+    # The source actually compiled: game/main.cpp for the disc, the generated copy for 1.20.
+    set_property(SOURCE "${HOST_DIR}/main.cpp" APPEND PROPERTY COMPILE_DEFINITIONS RACACIT_CPU_COMPAT=1)
 endif()
 
 # ---------------------------------------------------------------------------

@@ -4,6 +4,9 @@
 // macOS: the same class drawn with CoreGraphics, CoreText and ImageIO (mac/launcher/gfx_mac.mm).
 #pragma once
 #ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX   // windows.h min/max macros break std::min/std::max with MSVC
+#endif
 #include <windows.h>
 #include <d2d1.h>
 #include <dwrite.h>

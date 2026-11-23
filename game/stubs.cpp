@@ -184,7 +184,7 @@ extern "C" void racacit_longjmp(uint32_t guest_buf)
  * no file, no licence. (There are no .rap licences in a disc dump, so an
  * .edat that does exist cannot be decrypted either; report it as unlicensed.)
  * -----------------------------------------------------------------------*/
-#include "../tools/ps3recomp/runtime/ppu/ppu_context.h"
+#include "ppu_context.h"
 extern "C" void ps3_hle_register_ctx(uint32_t nid, const char* name, void (*fn)(ppu_context*));
 extern "C" uint8_t* vm_base;
 static void racacit_npdrm_is_available(ppu_context* ctx)
@@ -2341,6 +2341,7 @@ extern "C" void racacit_snd_play_hook(ppu_context* ctx, int tag)
     __sync_lock_release(&mu);
 }
 
+// Disc-only 1.20 fixes begin. (scripts/prepare_game_host.py drops them from the update 1.20 build: 1.20 has them natively.)
 /* ---------------------------------------------------------------------------
  * Update 1.20's hero part masks in the disc build
  *
@@ -2501,6 +2502,7 @@ extern "C" void racacit_u120_space_bits(ppu_context* ctx)
     memcpy(ctx->gpr, gpr, sizeof gpr); memcpy(ctx->fpr, fpr, sizeof fpr); memcpy(ctx->vr, vr, sizeof vr);
     ctx->cr = cr; ctx->lr = lr; ctx->ctr = ctr; ctx->xer = xer; ctx->fpscr = fpscr; ctx->vscr = vscr;
 }
+// Disc-only 1.20 fixes end.
 
 /* ---------------------------------------------------------------------------
  * Frame-rate unlock, step 1: the game clock (patch_lift step 27).

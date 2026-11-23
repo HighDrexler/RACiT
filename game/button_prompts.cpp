@@ -40,7 +40,14 @@
  * memory -- the page the glyph records name, from the font's IGHW texture
  * header -- and encoded again), and put back for the PS3 layout.
  */
+/* Before any header that can bring in <windows.h>: its min / max macros
+ * break std::min / std::max (here and in the headers included below). */
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <algorithm>
+#include <map>
+#include <vector>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -202,7 +209,7 @@ const int kHudRows = (kKeyH + 3) / 4, kKeyBytes = kHudRows * kKeyCols * 16;
  * texture header the game loads right after the font's records: section
  * 0x5200, 32-byte entries, RSX local offset at +0, format at +6, width
  * at +0x18). Host pointer to a DXT5 page and its pitch, or NULL. */
-const uint8_t* font_page_at(uint32_t rec, int page, uint32_t* pitch, int* width=nullptr, int* height=nullptr)
+const uint8_t* font_page_at(uint32_t rec, int page, uint32_t* pitch, int* width=nullptr, int* height=nullptr, int* levels=nullptr)
 {
     /* Explicit page permits face, stick and keyboard glyphs too. */   /* the E00B record's page */
     const uint32_t a0 = (rec + 255u) & ~255u, re = readable_end(a0);
@@ -218,7 +225,7 @@ const uint8_t* font_page_at(uint32_t rec, int page, uint32_t* pitch, int* width=
         const uint32_t ea = cellGcmResolveLocated(1, be32(t));
         *pitch = (uint32_t)w / 4u * 16u;
         if (!ea || !readable(ea, *pitch * (uint32_t)(hh / 4))) return nullptr;
-        if (width) *width=w; if (height) *height=hh;
+        if (width) *width=w; if (height) *height=hh; if (levels) *levels=t[5] ? t[5] : 1;   /* mip levels at +5 */
         return vm_base + ea;
     }
     return nullptr;
@@ -237,6 +244,15 @@ void hud_blocks(const uint8_t* tex, uint8_t* out)
     for (int r = 0; r < kHudRows; r++) memcpy(out + r * kKeyCols * 16, tex + r * kHudPitch, kKeyCols * 16);
 }
 
+/* Memory the tether's entry points at that was found not to be the picture:
+ * looked at again only once it changes (the entry is followed every second). */
+struct { uint32_t ea; uint8_t head[256]; } s_hud_rejected;
+void hud_reject(uint32_t ea) { s_hud_rejected.ea = ea; memcpy(s_hud_rejected.head, vm_base + ea, sizeof s_hud_rejected.head); }
+bool hud_rejected(uint32_t ea)
+{
+    return ea && ea == s_hud_rejected.ea && !memcmp(vm_base + ea, s_hud_rejected.head, sizeof s_hud_rejected.head);
+}
+
 /* Keep the picture in step with the layout (want: 1 = R1 drawn in). */
 void hud_sync(int want)
 {
@@ -244,9 +260,15 @@ void hud_sync(int want)
     if (!readable(s_hud.entry, 32) || !readable(s_hud.ea, kHudRows * kHudPitch)) { s_hud.ea = 0; return; }
     const uint8_t* t = vm_base + s_hud.entry;
     if (be16(t + 0x18) != kHudW || be16(t + 0x1A) != kKeyH || t[6] != 0xA8) { s_hud.ea = 0; return; }   /* memory reused */
+    if (hud_rejected(s_hud.ea)) { s_hud.ea = 0; return; }
     uint8_t* tex = vm_base + s_hud.ea;
+    /* Identify and redraw from one copy taken now, and write only while the
+     * entry still points here and the memory still holds that copy's blocks:
+     * the game may free the picture and reuse its memory meanwhile. */
+    static uint8_t snap[kHudRows * kHudPitch];
+    memcpy(snap, tex, sizeof snap);
     uint8_t cur[kKeyBytes];
-    hud_blocks(tex, cur);
+    hud_blocks(snap, cur);
     const bool is_mine = s_hud.have && !memcmp(cur, s_hud.mine, sizeof cur);
     bool is_orig = s_hud.have && !memcmp(cur, s_hud.orig, sizeof cur);
     if (!is_mine && !is_orig) {         /* first sight, or loaded again: is it the R2 key? */
@@ -258,13 +280,13 @@ void hud_sync(int want)
             for (int x = 0; x < kKeyW - 3; x++) {
                 uint8_t a[4], b[4];
                 dxt5_pixel(pg, pitch, kR2x + x, kRowY + y, a);
-                dxt5_pixel(tex, kHudPitch, x, y, b);
+                dxt5_pixel(snap, kHudPitch, x, y, b);
                 for (int k = 0; k < 4; k++) err += abs(a[k] - b[k]);
             }
         if (err > 40L * kKeyH * (kKeyW - 3)) {
             fprintf(stderr, "[prompts] HUD picture at %08X: not the font's R2 (difference %ld), left alone%c", s_hud.ea,
                     err / (kKeyH * (kKeyW - 3)), 10);
-            s_hud.ea = 0; return; }
+            hud_reject(s_hud.ea); s_hud.ea = 0; return; }
         memcpy(s_hud.orig, cur, sizeof cur);
         for (int r = 0; r < kHudRows; r++)
             for (int c = 0; c < kKeyCols; c++) {
@@ -272,7 +294,7 @@ void hud_sync(int want)
                 for (int i = 0; i < 16; i++) {
                     const int x = c * 4 + (i & 3), y = r * 4 + (i >> 2);
                     if (x < kKeyW && y < kKeyH) dxt5_pixel(pg, pitch, kR1x + x, kRowY + y, px[i]);
-                    else dxt5_pixel(tex, kHudPitch, x, y, px[i]);
+                    else dxt5_pixel(snap, kHudPitch, x, y, px[i]);
                 }
                 dxt5_encode(px, s_hud.mine + (r * kKeyCols + c) * 16);
             }
@@ -280,6 +302,12 @@ void hud_sync(int want)
     }
     const uint8_t* put = want && is_orig ? s_hud.mine : !want && is_mine ? s_hud.orig : nullptr;
     if (!put) return;
+    uint8_t now[kKeyBytes];
+    hud_blocks(tex, now);
+    if (cellGcmResolveLocated(0, be32(vm_base + s_hud.entry)) != s_hud.ea || memcmp(now, cur, sizeof now)) {
+        fprintf(stderr, "[prompts] HUD picture at %08X: changed while the R1 key was made, left alone%c", s_hud.ea, 10);
+        s_hud.ea = 0; s_hud.have = 0; return;
+    }
     for (int r = 0; r < kHudRows; r++) memcpy(tex + r * kHudPitch, put + r * kKeyCols * 16, kKeyCols * 16);
     fprintf(stderr, "[prompts] HUD picture \"R2 + square\" at %08X: %s%c", s_hud.ea, want ? "R1 drawn in" : "R2 put back", 10);
 }
@@ -524,6 +552,54 @@ void badge_sync(int want)
 /* Every committed page of guest memory, 16-byte steps: the records sit at
  * 16-byte offsets in a font.dat that the game loads 16-byte aligned. */
 #include "desktop_prompts.h"
+#include "hud_keycaps.h"
+
+/* RACACIT_PROMPT_DIAG=1: every button-glyph record table (E001..E004 in a
+ * row, any atlas layout) and the HUD texture table round the "R2 + square"
+ * entry, logged at each scan. Diagnostics only. */
+void prompt_diag(uint32_t hud)
+{
+    static int on = -1;
+    if (on < 0) { const char* e = getenv("RACACIT_PROMPT_DIAG"); on = e && *e == '1'; }
+    if (!on) return;
+    for (uint32_t a = 0x10000u; a < 0x40000000u; ) {
+        MEMORY_BASIC_INFORMATION mbi;
+        if (!VirtualQuery(vm_base + a, &mbi, sizeof mbi)) break;
+        uint32_t end = (uint32_t)((uint8_t*)mbi.BaseAddress + mbi.RegionSize - vm_base);
+        if (end > 0x40000000u || end <= a) end = 0x40000000u;
+        if (mbi.State == MEM_COMMIT && !(mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) && end - a >= 448)
+            for (uint32_t p = (a + 15u) & ~15u; p + 448 <= end; p += 16) {
+                const uint8_t* q = vm_base + p;
+                if (be16(q) != 0xE001 || be16(q + 16) != 0xE002 || be16(q + 32) != 0xE003 || be16(q + 48) != 0xE004) continue;
+                fprintf(stderr, "[prompt-diag] glyph table at %08X:", p);
+                for (int k = 0; k < 26; k++) {
+                    const uint8_t* r = q + 16 * k;
+                    fprintf(stderr, " %04X@%d,%d p%d %dx%d", be16(r), be16(r + 2), be16(r + 4), be16(r + 6), r[10], r[11]);
+                }
+                fputc(10, stderr);
+            }
+        a = end;
+    }
+    /* With RACACIT_PROMPT_DUMP too: the font's other button glyphs (E00F
+     * on: the d-pad and radar pictures) as hudkey_E0xx.ppm. */
+    for (unsigned key = 14; key < 26 && s_nfont; key++) {
+        const uint32_t rec = s_font[0] - 6 * 16 + key * 16;
+        if (!readable(rec, 16) || be16(vm_base + rec) != 0xE001 + key) continue;
+        const int w = vm_base[rec + 10], h = vm_base[rec + 11];
+        static uint8_t img[255 * 255 * 4];
+        bool ok = w > 0 && h > 0;
+        for (int y = 0; ok && y < h; y++)
+            for (int x = 0; ok && x < w; x++) ok = glyph_pixel(key, x, y, img + 4 * (y * w + x));
+        if (ok) hudkey_dump(0xE001 + key, img, img, w, h);
+    }
+    if (hud && readable(hud - 64 * 32, 129 * 32))
+        for (int k = -64; k <= 64; k++) {
+            const uint8_t* t = vm_base + hud + 32 * k;
+            fprintf(stderr, "[prompt-diag] hud %+d %08X:", k, hud + 32 * k);
+            for (int i = 0; i < 32; i++) fprintf(stderr, "%s%02X", i % 4 ? "" : " ", t[i]);
+            fputc(10, stderr);
+        }
+}
 
 void scan(void)
 {
@@ -553,6 +629,7 @@ void scan(void)
         a = end;
     }
     fprintf(stderr, "[prompts] memory scan: %llu ms, %d letter-font candidates%c", GetTickCount64() - t0, s_lf_calls, 10);
+    prompt_diag(hud);
     if (n != s_nfont) fprintf(stderr, "[prompts] button glyphs found in %d font(s)%c", n, 10);
     s_nfont = n;
     for (int k = 0; k < nb; k++) {
@@ -563,10 +640,166 @@ void scan(void)
         bd.entry = badges[k]; bd.ea = ea; bd.have = 0;
         fprintf(stderr, "[prompts] quick select badge found at %08X (table %08X)%c", ea, badges[k], 10);
     }
-    if (hud && hud != s_hud.entry) {
+    if (hud) {   /* resolved again on every scan: the picture can move while its entry stays */
         const uint32_t ea = cellGcmResolveLocated(0, be32(vm_base + hud));
-        if (ea) { s_hud.entry = hud; s_hud.ea = ea;
-                  fprintf(stderr, "[prompts] HUD picture \"R2 + square\" found at %08X (table %08X)%c", ea, hud, 10); } }
+        if (ea && (hud != s_hud.entry || ea != s_hud.ea)) {
+            s_hud.entry = hud; s_hud.ea = ea;
+            fprintf(stderr, "[prompts] HUD picture \"R2 + square\" found at %08X (table %08X)%c", ea, hud, 10); } }
+    if (s_hud.entry) hud_faces_find(s_hud.entry);
+}
+
+/* RACACIT_PROMPT_CHECK=1 (tests): every 5 s one "[prompt-check]" line says
+ * whether any button picture the player could see still shows the other
+ * input's art: every button-glyph record table in memory (any atlas layout)
+ * must belong to a font the scan found, every glyph of those fonts must hold
+ * its key (or the controller's own) in level 0 and the smaller levels, and so
+ * must the HUD pictures. A headless run asserts "0 showing" in each menu. */
+void prompt_check(bool keyboard)
+{
+    static int on = -1;
+    if (on < 0) { const char* e = getenv("RACACIT_PROMPT_CHECK"); on = e && *e == '1'; }
+    static unsigned tick;
+    if (!on || tick++ % 5) return;
+    int tables = 0, unknown = 0, glyphs = 0, pictures = 0, wrong = 0;
+    char detail[600]; size_t used = 0; detail[0] = 0;
+    auto note = [&](const char* what, unsigned id, uint32_t ea) {
+        if (used + 40 < sizeof detail)
+            used += (size_t)snprintf(detail + used, sizeof detail - used, " %s%s%03X@%08X", what, id ? "E" : "", id, ea);
+    };
+    for (uint32_t a = 0x10000u; a < 0x40000000u; ) {
+        MEMORY_BASIC_INFORMATION mbi;
+        if (!VirtualQuery(vm_base + a, &mbi, sizeof mbi)) break;
+        uint32_t end = (uint32_t)((uint8_t*)mbi.BaseAddress + mbi.RegionSize - vm_base);
+        if (end > 0x40000000u || end <= a) end = 0x40000000u;
+        if (mbi.State == MEM_COMMIT && !(mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) && end - a >= 448)
+            for (uint32_t p = (a + 15u) & ~15u; p + 448 <= end; p += 16) {
+                const uint8_t* q = vm_base + p;
+                if (be16(q) != 0xE001 || be16(q + 16) != 0xE002 || be16(q + 32) != 0xE003 || be16(q + 48) != 0xE004) continue;
+                tables++;
+                bool known = false;
+                for (int i = 0; i < s_nfont; i++) known |= s_font[i] - 6 * 16 == p;
+                if (!known) { unknown++; wrong++; note("unscanned-font", 0, p); }
+            }
+        a = end;
+    }
+    /* Neighbouring glyphs share blocks (in the smaller levels especially), so
+     * each glyph's own copy can't be compared on its own: replay every glyph's
+     * blocks in desktop_prompts' order (keys front to back, originals back to
+     * front) and compare guest memory with the result. */
+    struct Want { uint8_t bytes[16]; unsigned key; uint32_t rec; };
+    static std::map<uint32_t, Want> want;
+    want.clear();
+    std::vector<std::pair<const DesktopGlyph*, unsigned>> order;
+    for (int f = 0; f < s_nfont; f++)
+        for (unsigned key = 0; key < 20; key++) {
+            if (key == 18) continue;   /* E013: the grenade picture, not a button */
+            const uint32_t rec = s_font[f] - 6 * 16 + key * 16;
+            if (!readable(rec, 16) || be16(vm_base + rec) != 0xE001 + key) continue;
+            uint32_t pitch = 0;
+            const uint8_t* page = font_page_at(s_font[f], be16(vm_base + rec + 6), &pitch);
+            if (!page) continue;
+            glyphs++;
+            const DesktopGlyph* g = nullptr;
+            for (unsigned i = 0; i < desktop_count; i++)
+                if (desktop_glyphs[i].rec == rec && desktop_glyphs[i].page == (uint32_t)(page - vm_base)) { g = &desktop_glyphs[i]; break; }
+            if (!g) { if (keyboard) { wrong++; note("no-key-", key + 1, rec); } continue; }
+            order.push_back({g, key});
+        }
+    if (!keyboard) std::reverse(order.begin(), order.end());
+    for (const auto& [g, key] : order) {
+        const uint8_t* level0 = keyboard ? g->keys : g->original;
+        for (int r = 0; r < g->rows; r++)
+            for (int c = 0; c < g->cols; c++) {
+                Want& w = want[g->page + (uint32_t)(g->by + r) * g->pitch + (uint32_t)(g->bx + c) * 16];
+                memcpy(w.bytes, level0 + (r * g->cols + c) * 16, 16); w.key = key; w.rec = g->rec;
+            }
+        const uint8_t* smaller = keyboard ? g->mkeys : g->morig;
+        size_t o = 0;
+        for (int m = 0; m < g->nmips; m++) {
+            const DesktopMip& d = g->mip[m];
+            for (int r = 0; r < d.rows; r++)
+                for (int c = 0; c < d.cols; c++, o += 16) {
+                    Want& w = want[d.ea + (uint32_t)(d.by + r) * d.pitch + (uint32_t)(d.bx + c) * 16];
+                    memcpy(w.bytes, smaller + o, 16); w.key = key; w.rec = g->rec;
+                }
+        }
+    }
+    std::vector<uint32_t> bad;
+    for (const auto& [ea, w] : want)
+        if (memcmp(vm_base + ea, w.bytes, 16) && std::find(bad.begin(), bad.end(), w.rec) == bad.end()) {
+            bad.push_back(w.rec); wrong++; note("glyph-", w.key + 1, w.rec);
+        }
+    for (int i = 0; i < s_nface; i++) {
+        const HudFace& h = s_face[i];
+        if (!h.ea || !h.have || !readable(h.ea, kFaceBytes)) continue;
+        pictures++;
+        if (memcmp(vm_base + h.ea, keyboard ? h.mine : h.orig, kFaceBytes)) { wrong++; note("hud-face", 0, h.ea); }
+    }
+    if (s_hudkb.have && s_hud.ea == s_hudkb.ea && readable(s_hudkb.ea, kHudRows * kHudPitch)) {
+        pictures++;
+        const uint8_t* tex = vm_base + s_hudkb.ea;
+        /* With the controller: the picture as the game left it, or with the shoulder button
+         * on the left redrawn for the other layout (hud_sync's R1): then that part must be the
+         * font's R1 or R2 art and everything right of it (the "+" and the square) the game's
+         * own blocks, never a key anywhere. */
+        bool controller_art = !memcmp(tex, s_hudkb.before, kHudRows * kHudPitch);
+        if (!controller_art && tether_is_picture(tex)) {
+            controller_art = true;
+            for (int r = 0; r < kHudRows && controller_art; r++)
+                for (int c = (kKeyW + 3) / 4; c < (kHudW + 3) / 4; c++)
+                    if (memcmp(tex + r * kHudPitch + c * 16, s_hudkb.before + r * kHudPitch + c * 16, 16)) { controller_art = false; break; }
+        }
+        if (keyboard ? memcmp(tex, s_hudkb.keys, kHudRows * kHudPitch) != 0 : !controller_art) { wrong++; note("hud-tether", 0, s_hudkb.ea); }
+    } else if (keyboard && s_hud.entry && readable(s_hud.entry, 32)) {
+        /* The tether picture without keys yet (moved, or never prepared): wrong while it
+         * still shows the controller's R2 + square where its entry points, at two checks
+         * in a row. One alone is a picture the game has just loaded (while loading a save
+         * it moves it a few times within a second): hud_keys_sync keys it within a second. */
+        static uint32_t s_unprepared;
+        const uint8_t* t = vm_base + s_hud.entry;
+        const uint32_t ea = cellGcmResolveLocated(0, be32(t));
+        if (be16(t + 0x18) == kHudW && be16(t + 0x1A) == kKeyH && t[6] == 0xA8 && ea &&
+            readable(ea, kHudRows * kHudPitch) && tether_is_picture(vm_base + ea)) {
+            pictures++;
+            if (s_unprepared == ea) { wrong++; note("hud-tether-unprepared", 0, ea); }
+            else fprintf(stderr, "[prompt-check] tether picture at %08X just loaded, no keys yet%c", ea, 10);
+            s_unprepared = ea;
+        } else s_unprepared = 0;
+    }
+    for (int i = 0; i < 2; i++) {
+        const auto& k = s_badgekb[i];
+        const Badge& bd = s_badge[i];
+        if (!k.have || !k.ea || !readable(k.ea, kBadgeBytes)) continue;
+        pictures++;
+        const uint8_t* tex = vm_base + k.ea;
+        /* With the controller: as the game left it, or one of the badge's two controller states. */
+        const bool controller_art = !memcmp(tex, k.before, kBadgeBytes) ||
+            (bd.have && bd.ea == k.ea && (!memcmp(tex, bd.orig, kBadgeBytes) || !memcmp(tex, bd.mine, kBadgeBytes)));
+        if (keyboard ? memcmp(tex, k.keys, kBadgeBytes) != 0 : !controller_art) { wrong++; note("badge", 0, k.ea); }
+    }
+    fprintf(stderr, "[prompt-check] %s: %d glyph tables (%d unscanned), %d glyphs, %d HUD pictures; %d showing the %s%s%c",
+            keyboard ? "keyboard" : "controller", tables, unknown, glyphs, pictures, wrong,
+            keyboard ? "controller's" : "keys", detail, 10);
+}
+
+/* Keyboard prompts or controller glyphs. RACACIT_PROMPT_INPUT_FILE=<file>
+ * (tests): "pad" or "keyboard" in it overrides cellPad's choice, re-read
+ * once a second, so a headless run (whose scripted pad never counts as a
+ * controller) can switch both ways. */
+bool prompts_keyboard(bool reread)
+{
+    static const char* file = (const char*)-1;
+    static int forced = -1;
+    if (file == (const char*)-1) { file = getenv("RACACIT_PROMPT_INPUT_FILE"); if (file && !*file) file = nullptr; reread = true; }
+    if (file && reread) {
+        char buf[16] = {};
+        FILE* f = fopen(file, "rb");
+        if (f) { fread(buf, 1, sizeof buf - 1, f); fclose(f); }
+        const int now = !strncmp(buf, "pad", 3) ? 0 : !strncmp(buf, "keyboard", 8) ? 1 : -1;
+        if (now != forced) fprintf(stderr, "[prompts] input forced: %s%c", now < 0 ? "no" : now ? "keyboard" : "pad", 10);
+        forced = now;
+    }
+    return forced >= 0 ? forced != 0 : racit_keyboard_prompts_active() != 0;
 }
 
 DWORD WINAPI prompts_thread(LPVOID)
@@ -584,7 +817,7 @@ DWORD WINAPI prompts_thread(LPVOID)
             if (next < sizeof kScanAt / sizeof kScanAt[0] && t == kScanAt[next]) { scan(); next++; } }
         static int force = -2;   /* RACACIT_PROMPT_LAYOUT=<0|1|2>: a layout for tests */
         if (force == -2) { const char* e = getenv("RACACIT_PROMPT_LAYOUT"); force = e && *e ? atoi(e) : -1; }
-        const bool keyboard = racit_keyboard_prompts_active() != 0;
+        const bool keyboard = prompts_keyboard(!ms);
         const int layout = keyboard ? 0 : force >= 0 ? force : g_racacit_pad_layout;
         /* R1 <-> R2 with the layout swapped (R2 fires); L1 <-> L2 only while
          * the quick select ring is open, where L2 / R2 page (cellPad.c). */
@@ -601,7 +834,12 @@ DWORD WINAPI prompts_thread(LPVOID)
             if (has_r != want_r) { swap_records(s_font[i] + 64, s_font[i] + 80); changed = 1; }   /* R1 <-> R2 */
         }
         if (keyboard) desktop_prompts(true);
-        if (!ms) { hud_sync(want_r); badge_sync(want_r); }
+        if (!ms) {
+            /* HUD pictures: keys, or the controller's own (with the R1/L2 swaps) */
+            hud_faces_sync(keyboard); hud_keys_sync(keyboard); badge_keys_sync(keyboard);
+            if (!keyboard) { hud_sync(want_r); badge_sync(want_r); }
+            prompt_check(keyboard);
+        }
         if ((changed && !want_l) || (unsigned)layout != last_layout)
             if (s_nfont) fprintf(stderr, "[prompts] controller layout %d: shoulder buttons in the text %s%c", layout,
                                  want_r ? "R1<->R2 (L1<->L2 while quick select is open)" : "as the PS3 layout", 10);

@@ -1,14 +1,24 @@
 #include "store.h"
 #include "iso.h"
 #include "platform.h"
+#include "program_magic.h"
+#include "release_asset.h"
 
 #ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX   // windows.h min/max macros break std::min/std::max with MSVC
+#endif
 #include <windows.h>
 #else
 #include <unistd.h>
 extern char** environ;
 #endif
+#if defined(_MSC_VER) && !defined(__clang__) && (defined(_M_X64) || defined(_M_IX86))
+#include <intrin.h>   // MSVC: __cpuid, __cpuidex, _xgetbv (it has no cpuid.h)
+#define RACIT_CPUID_MSVC 1
+#elif defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
 #include <cpuid.h>
+#endif
 
 #include <algorithm>
 #include <cctype>
@@ -18,6 +28,9 @@ extern char** environ;
 #include <set>
 #include <thread>
 #include <unordered_set>
+#ifdef __APPLE__
+#include <copyfile.h>
+#endif
 
 // ---- settings files ------------------------------------------------------------
 // The discs this launcher knows. The lifted code is made from one disc's program,
@@ -29,13 +42,13 @@ extern char** environ;
 #ifdef __APPLE__
 const GameProfile kRacitProfile = { "racit", "A Crack in Time", "Ratchet & Clank Future: A Crack in Time", "RATCHET & CLANK FUTURE", L"",
     { { "BCUS98124", "USA", RACIT_GAME_EXE, L"RaCACiT_compat.exe", "406bded328d9dbdfa9684ed392554ca34c76f4ed95aa21685f622d3ab2b04592" },
-      { "BCES00511", "Europe", L"RaCACiT_BCES00511.exe", L"RaCACiT_BCES00511_compat.exe", "6debdca0f181f35d98ebe23faabe2531b697c558b4e3384b06630173400674c1" } }, true, { "BCUS98124", "BCES00511" }, "1.0.0" };
+      { "BCES00511", "Europe", L"RaCACiT_BCES00511.exe", L"RaCACiT_BCES00511_compat.exe", "6debdca0f181f35d98ebe23faabe2531b697c558b4e3384b06630173400674c1" } }, true, { "BCUS98124", "BCES00511" }, "1.0.2" };
 const GameProfile kNexusProfile = { "nexus", "Into the Nexus", "Ratchet & Clank: Into the Nexus", "RATCHET & CLANK", L"nexus",
     { { "BCUS99245", "USA", L"RaCNexus", nullptr, "ca1a1a293d211095fc834eaaa10cd5fa9248b0e0328919fdeadeed1675c52c3f" } }, false, { "BCUS99245", "NPUA80908" }, "0.1.1" };
 #else
 const GameProfile kRacitProfile = { "racit", "A Crack in Time", "Ratchet & Clank Future: A Crack in Time", "RATCHET & CLANK FUTURE", L"",
     { { "BCUS98124", "USA", L"RaCACiT.exe", L"RaCACiT_compat.exe", "406bded328d9dbdfa9684ed392554ca34c76f4ed95aa21685f622d3ab2b04592" },
-      { "BCES00511", "Europe", L"RaCACiT_BCES00511.exe", L"RaCACiT_BCES00511_compat.exe", "6debdca0f181f35d98ebe23faabe2531b697c558b4e3384b06630173400674c1" } }, true, { "BCUS98124", "BCES00511" }, "1.0.0" };
+      { "BCES00511", "Europe", L"RaCACiT_BCES00511.exe", L"RaCACiT_BCES00511_compat.exe", "6debdca0f181f35d98ebe23faabe2531b697c558b4e3384b06630173400674c1" } }, true, { "BCUS98124", "BCES00511" }, "1.0.2" };
 const GameProfile kNexusProfile = { "nexus", "Into the Nexus", "Ratchet & Clank: Into the Nexus", "RATCHET & CLANK", L"nexus",
     { { "BCUS99245", "USA", L"RaCNexus.exe", nullptr, "ca1a1a293d211095fc834eaaa10cd5fa9248b0e0328919fdeadeed1675c52c3f" } }, false, { "BCUS99245", "NPUA80908" }, "0.1.1" };
 #endif
@@ -157,6 +170,7 @@ static const char* kSettingsTemplateRest =
     "# by hand are kept.\r\n"
     "#\r\n"
     "# GAME = the folder that contains your disc dump's PS3_GAME folder (set by Import).\r\n"
+    "# A relative GAME path starts in the launcher folder.\r\n"
     "# --- Cutscenes ---\r\n"
     "RACACIT_START_SKIPS_MOVIES=1\r\n"
     "RACACIT_ALL_CUTSCENES_SKIPPABLE=1\r\n";
@@ -171,7 +185,9 @@ static const char* kIniTemplate =
     "backup_on_play=1\r\n"
     "# How many save backups and old logs to keep\r\n"
     "keep_backups=8\r\n"
-    "keep_logs=10\r\n";
+    "keep_logs=10\r\n"
+    "# With update 1.20 added: which version Play runs, 1.20 or 1.00\r\n"
+    "play_version=1.20\r\n";
 
 Store::Store(fs::path r, const GameProfile* p) : root(std::move(r)), prof(p)
 {
@@ -217,7 +233,20 @@ GameInfo Store::game() const
 {
     GameInfo g;
     const std::string gs = settings.get("GAME");
-    g.root = gs.empty() ? game_copy() : upath(gs);
+    // Relative to the launcher folder: Into the Nexus's root is its nexus\ folder inside it.
+    // (A 1.0.1 setting relative to nexus\ itself still works when only that folder has the game.)
+    const fs::path launcher_dir = prof->folder && *prof->folder ? root.parent_path() : root;
+    g.root = gs.empty() ? game_copy() : launcher_dir / upath(gs);
+    if (!gs.empty() && launcher_dir != root && upath(gs).is_relative()) {
+        // The launcher folder's candidate wins only if it holds this game; else nexus\<GAME> if that does.
+        std::error_code e0;
+        auto holds_this_game = [&](const fs::path& r) {
+            if (!fs::is_directory(r / L"PS3_GAME", e0)) return false;
+            const std::string id = read_sfo(r / L"PS3_GAME" / L"PARAM.SFO")["TITLE_ID"];
+            return !id.empty() && supported_title(id);
+        };
+        if (!holds_this_game(g.root) && holds_this_game(root / upath(gs))) g.root = root / upath(gs);
+    }
     std::error_code ec;
     if (!fs::is_directory(g.root / L"PS3_GAME", ec)) {
         g.status = gs.empty() ? "Not imported yet" : "PS3_GAME not found in " + gs;
@@ -231,8 +260,12 @@ GameInfo Store::game() const
     }
     const fs::path eb = g.root / L"PS3_GAME" / L"USRDIR" / L"EBOOT.elf";
     const std::string head = read_text(eb, 4);
-    if (head.size() < 4) { g.need_decrypt = true; g.status = "No EBOOT.elf yet"; return g; }
-    if (head.compare(0, 4, "\x7F" "ELF") != 0) { g.need_decrypt = true; g.status = "EBOOT.elf is still encrypted"; return g; }
+    // Update 1.20 with its own EBOOT.elf needs only the disc's data.
+    if (head.compare(0, 4, "\x7F" "ELF") != 0 && !plays_update(g.title_id)) {
+        g.need_decrypt = true;
+        g.status = head.size() < 4 ? "No EBOOT.elf yet" : "EBOOT.elf is still encrypted";
+        return g;
+    }
     g.ok = true;
     g.status = "Ready";
     return g;
@@ -303,9 +336,16 @@ std::string Store::import_iso(const fs::path& iso, Progress* p, std::string* sum
     p->total = need;
     std::error_code ec;
     fs::create_directories(game_copy(), ec);
+#ifdef _WIN32
     ULARGE_INTEGER free_{};
     if (GetDiskFreeSpaceExW(game_copy().c_str(), &free_, nullptr, nullptr) && free_.QuadPart < need + (512ull << 20))
         return "Not enough space: the game needs " + format_size(need) + ", " + format_size(free_.QuadPart) + " free on this drive.";
+#else
+    const fs::space_info space = fs::space(game_copy(), ec);
+    if (!ec && space.available < need + (512ull << 20))
+        return "Not enough space: the game needs " + format_size(need) + ", " + format_size(space.available) + " free on this drive.";
+    ec.clear();
+#endif
     // An EBOOT.elf already in the launcher's copy is kept for the new one.
     const fs::path old_elf = game_copy() / L"PS3_GAME" / L"USRDIR" / L"EBOOT.elf";
     bool k = false;
@@ -338,26 +378,42 @@ std::string Store::import_iso(const fs::path& iso, Progress* p, std::string* sum
     return {};
 }
 
-std::string Store::check_elf(const fs::path& elf, bool* known)
+static const char* kElf120 = "dd304912f85cb9afc344f4a0d4e071d05a08b2af8de216d458b26060417549ad";
+
+std::string Store::check_elf(const fs::path& elf, bool* known, int* version)
 {
     *known = false;
+    if (version) *version = 0;
     const std::string h = read_text(elf, 64);
     if (h.size() >= 4 && h.compare(0, 4, std::string("SCE\0", 4)) == 0)
         return "This is the locked EBOOT.BIN (or a copy of it). Unlock it with RPCS3 first: Utilities > Decrypt PS3 Binaries.";
     if (h.size() < 20 || h.compare(0, 4, "\x7F" "ELF") != 0) return u8(elf.filename()) + " is not an ELF program.";
     if (h[4] != 2 || h[5] != 2 || (unsigned char)h[18] != 0 || (unsigned char)h[19] != 0x15) return u8(elf.filename()) + " is not a PS3 program.";
     const std::string sum = sha256_file(elf);
-    for (auto& d : g_prof->discs) if (sum == d.elf_sha256) *known = true;
+    int v = 0;
+    for (auto& d : g_prof->discs) if (sum == d.elf_sha256) v = 100;
+    if (sum == kElf120) v = 120;   // update 1.20 (USA): builds\vNN-u120
+    *known = v != 0;
+    if (version) *version = v;
     return {};
 }
 
 std::string Store::add_elf(const fs::path& elf)
 {
     bool known = false;
-    std::string r = check_elf(elf, &known);
+    int v = 0;
+    std::string r = check_elf(elf, &known, &v);
     if (!r.empty()) return r;
-    const GameInfo g = game();
     std::error_code ec;
+    if (v == 120) {   // update 1.20's: beside the update's files, the disc's EBOOT.elf stays
+        if (!supports_update120()) return "Update 1.20 requires A Crack in Time.";
+        fs::create_directories(update_dir(), ec);
+        if (!(fs::exists(update_elf(), ec) && fs::equivalent(elf, update_elf(), ec)) &&
+            !fs::copy_file(elf, update_elf(), fs::copy_options::overwrite_existing, ec))
+            return "Could not copy it to " + u8(update_elf()) + ": " + ec.message();
+        return {};
+    }
+    const GameInfo g = game();
     const bool have_game = fs::is_directory(g.root / L"PS3_GAME", ec);
     const fs::path to = have_game ? g.root / L"PS3_GAME" / L"USRDIR" / L"EBOOT.elf" : pending_elf();
     if (!(fs::exists(to, ec) && fs::equivalent(elf, to, ec))) {
@@ -365,6 +421,140 @@ std::string Store::add_elf(const fs::path& elf)
         if (!fs::copy_file(elf, to, fs::copy_options::overwrite_existing, ec)) return "Could not copy it to " + u8(to) + ": " + ec.message();
     }
     if (have_game) fs::remove(pending_elf(), ec);
+    return {};
+}
+
+// ---- update 1.20 ----------------------------------------------------------------------
+bool Store::update_added() const
+{
+    auto sfo = read_sfo(update_dir() / L"PARAM.SFO");
+    return sfo["TITLE_ID"] == "BCUS98124" && sfo["APP_VER"] == "01.20";
+}
+
+bool Store::update_ready() const
+{
+    return update_added() && sha256_file(update_elf()) == kElf120;
+}
+
+bool Store::plays_update() const
+{
+    return plays_update(game().title_id);
+}
+
+bool Store::plays_update(const std::string& title_id) const
+{
+    return supports_update120() && title_id == "BCUS98124" && ini.get("play_version", "1.20") != "1.00"
+        && update_ready() && build_for(true, title_id).version != 0;
+}
+
+bool Store::supports_update120() const
+{
+    return prof == &kRacitProfile;
+}
+
+std::string Store::import_update(const fs::path& picked, Progress* p, std::string* summary)
+{
+    if (!supports_update120()) return "Update 1.20 requires A Crack in Time.";
+    std::error_code ec;
+    if (lower(u8(picked.extension())) == ".pkg")
+        return "A .pkg is locked with PlayStation keys, which the launcher does not ship. Install it in RPCS3 "
+               "(File > Install Packages), then pick the folder it made: dev_hdd0/game/BCUS98124.";
+    // The installed update: PARAM.SFO and USRDIR. Its USRDIR, or dev_hdd0 / dev_hdd0/game above it, also do.
+    fs::path d;
+    for (const fs::path& c : { picked, picked.parent_path(), picked / L"BCUS98124", picked / L"game" / L"BCUS98124" })
+        if (fs::exists(c / L"PARAM.SFO", ec) && fs::is_directory(c / L"USRDIR", ec)) { d = c; break; }
+    if (d.empty()) return "No update in " + u8(picked) + ". Pick the folder that holds PARAM.SFO and USRDIR (RPCS3: dev_hdd0/game/BCUS98124).";
+    auto sfo = read_sfo(d / L"PARAM.SFO");
+    if (sfo["TITLE_ID"] != "BCUS98124") return "This is " + (sfo["TITLE_ID"].empty() ? std::string("not a PS3 game update") : sfo["TITLE_ID"]) + ", not A Crack in Time USA (BCUS98124).";
+    if (sfo["APP_VER"] != "01.20") return "This is version " + sfo["APP_VER"] + " of the game. The launcher plays update 1.20 (or the disc's 1.00).";
+    const fs::path tmp = data() / L"update.new";
+    const fs::path previous = data() / L"update.previous";
+    if (fs::exists(previous, ec) && !fs::exists(update_dir(), ec)) {
+        fs::rename(previous, update_dir(), ec);
+        if (ec) return "Could not restore the previous update: " + ec.message();
+    }
+    if (!delete_tree(tmp)) return "Could not clear " + u8(tmp);
+    auto stop = [&](const std::string& message) { delete_tree(tmp); return message; };
+    p->total = tree_size(d);
+    std::string r = copy_tree(d, tmp, p);
+    if (!r.empty()) return stop(r);
+    // A decrypted EBOOT.elf in the update's folder (RPCS3 writes it beside EBOOT.BIN) is taken
+    // as the 1.20 program, not kept with the update's data.
+    std::string elf_note;
+    const fs::path staged_elf = tmp / L"EBOOT.elf";
+    const fs::path found = tmp / L"USRDIR" / L"EBOOT.elf";
+    if (sha256_file(staged_elf) == kElf120) {
+        elf_note = " Its EBOOT.elf was there too.";
+    } else if (sha256_file(found) == kElf120) {
+        fs::rename(found, staged_elf, ec);
+        if (ec) return stop("Could not stage the update's EBOOT.elf: " + ec.message());
+        elf_note = " Its EBOOT.elf was there too.";
+    } else if (sha256_file(update_elf()) == kElf120) {
+        if (!fs::copy_file(update_elf(), staged_elf, fs::copy_options::overwrite_existing, ec))
+            return stop("Could not keep the update's EBOOT.elf: " + ec.message());
+    } else {
+        fs::remove(staged_elf, ec);
+        if (ec) return stop("Could not remove the unmatched EBOOT.elf from the staged update: " + ec.message());
+    }
+    const bool replacing = fs::exists(update_dir(), ec);
+    if (ec) return stop("Could not check the existing update: " + ec.message());
+    if (replacing) {
+        if (!delete_tree(previous)) return stop("Could not clear " + u8(previous));
+        fs::rename(update_dir(), previous, ec);
+        if (ec) return stop("Could not move the existing update aside: " + ec.message());
+    }
+    fs::rename(tmp, update_dir(), ec);
+    if (ec) {
+        r = "Could not put the update in " + u8(update_dir()) + ": " + ec.message();
+        if (replacing) {
+            fs::rename(previous, update_dir(), ec);
+            if (ec) r += " The original is still in " + u8(previous) + ": " + ec.message();
+        }
+        return stop(r);
+    }
+    if (replacing) delete_tree(previous);
+    if (summary) *summary = "Update 1.20 added." + elf_note + (update_ready() ? " Play runs version 1.20."
+                          : " Now add its EBOOT.elf: its USRDIR/EBOOT.BIN, decrypted with RPCS3.");
+    return {};
+}
+
+// The 1.20 build's dev_hdd0: the update's files in game/BCUS98124, the disc's installed data
+// beside them (files the update does not have; cloned, so each version writes its own), and
+// home -- the saves -- shared with the disc's dev_hdd0.
+static bool clone_file(const fs::path& from, const fs::path& to)
+{
+#ifdef __APPLE__
+    if (copyfile(from.c_str(), to.c_str(), nullptr, COPYFILE_CLONE | COPYFILE_EXCL) == 0) return true;
+#endif
+    std::error_code ec;
+    return fs::copy_file(from, to, fs::copy_options::skip_existing, ec);
+}
+
+std::string Store::prepare_update_hdd()
+{
+    std::error_code ec;
+    const fs::path inst = hdd_update() / L"game" / L"BCUS98124";
+    fs::create_directories(inst, ec);
+    if (!fs::copy_file(update_dir() / L"PARAM.SFO", inst / L"PARAM.SFO", fs::copy_options::overwrite_existing, ec))
+        return "cannot copy PARAM.SFO into " + u8(inst) + ": " + ec.message();
+    Progress p;
+    std::string r = copy_tree(update_dir() / L"USRDIR", inst / L"USRDIR", &p);
+    if (!r.empty()) return r;
+    const fs::path disc = hdd() / L"game" / L"BCUS98124";
+    if (fs::exists(disc, ec) && fs::is_directory(disc, ec))
+        for (auto it = fs::recursive_directory_iterator(disc, ec); !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+            const fs::path to = inst / it->path().lexically_relative(disc);
+            if (it->is_directory(ec)) { fs::create_directories(to, ec); continue; }
+            if (it->is_regular_file(ec) && !fs::exists(to, ec) && !clone_file(it->path(), to))
+                return "cannot copy " + u8(it->path()) + " into " + u8(to);
+        }
+    if (ec) return "cannot read the disc's installed data: " + ec.message();
+    const fs::path disc_home = hdd() / L"home";
+    fs::create_directories(disc_home, ec);
+    if (ec) return "cannot open the disc's save folder: " + ec.message();
+    const fs::path home = hdd_update() / L"home";
+    if (fs::exists(fs::symlink_status(home, ec)) && !fs::equivalent(home, disc_home, ec))
+        return "There is a separate save folder at " + u8(home) + ". Move it aside before using the disc's saves with update 1.20.";
     return {};
 }
 
@@ -409,6 +599,20 @@ std::vector<fs::path> Store::find_old_installs() const
 
 bool cpu_has_avx2()
 {
+#if !defined(__x86_64__) && !defined(__i386__) && !defined(_M_X64) && !defined(_M_IX86)
+    return true;   // not an x86 processor: there is no older-processor build to pick
+#elif defined(RACIT_CPUID_MSVC)
+    int r[4];
+    __cpuid(r, 0);
+    if (r[0] < 7) return false;
+    __cpuid(r, 1);
+    const unsigned c1 = (unsigned)r[2];
+    if (!(c1 & (1u << 12)) || !(c1 & (1u << 27)) || !(c1 & (1u << 28))) return false;   /* FMA, OSXSAVE, AVX */
+    if ((_xgetbv(0) & 6u) != 6u) return false;                                       /* YMM state saved */
+    __cpuidex(r, 7, 0);
+    if (!((unsigned)r[1] & (1u << 5)) || !((unsigned)r[1] & (1u << 8))) return false;   /* AVX2, BMI2 */
+    return !GetEnvironmentVariableA("RACACIT_TEST_NO_AVX2", nullptr, 0);
+#else
     unsigned a, b, c, d;
     if (!__get_cpuid(1, &a, &b, &c, &d) || !(c & (1u << 12)) || !(c & (1u << 27)) || !(c & (1u << 28))) return false;
     unsigned lo, hi;                                       /* FMA, OSXSAVE, AVX; then YMM state saved */
@@ -416,12 +620,18 @@ bool cpu_has_avx2()
     if ((lo & 6u) != 6u) return false;
     if (!__get_cpuid_count(7, 0, &a, &b, &c, &d)) return false;
     if (!(b & (1u << 5)) || !(b & (1u << 8))) return false;   /* AVX2, BMI2 */
+#ifdef _WIN32
     return !GetEnvironmentVariableA("RACACIT_TEST_NO_AVX2", nullptr, 0);
+#else
+    return !getenv("RACACIT_TEST_NO_AVX2");
+#endif
+#endif
 }
 
 static bool launcher_owned_key(const std::string& k)
 {
-    static const char* own[] = { "PS3_HDD0_ROOT", "RSX_SHADER_CACHE", "RSX_PIPELINE_CACHE", "RSX_PIPELINE_LIST",
+    static const char* own[] = { "PS3_HDD0_ROOT", "PS3_HDD0_HOME_ROOT", "PS3_UPDATE_PARAM_SFO", "PS3_VFS_ROOT",
+                                 "RSX_SHADER_CACHE", "RSX_PIPELINE_CACHE", "RSX_PIPELINE_LIST",
                                  "RACACIT_SETTINGS_FILE", "RACACIT_LOG_FILE", "RACACIT_MODS",
                                  "RACACIT_CODE_MODS", "RACIT_GAME_VERSION" };
     for (const char* o : own) if (same_key(k, o)) return true;
@@ -434,6 +644,7 @@ std::string Store::migrate_from(const fs::path& old, Progress* p, std::string* s
     if (!os.load()) return "No settings.txt in " + u8(old);
     const std::string mods_on = settings.get("RACACIT_MODS_ENABLED");
     const std::string hdd_src = os.get("PS3_HDD0_ROOT");
+    const std::string game_src = os.get("GAME");
     // The old file's lines (its comments too); what the launcher sets itself is left as a comment.
     SettingsFile ns = settings;
     ns.lines.clear();
@@ -443,6 +654,7 @@ std::string Store::migrate_from(const fs::path& old, Progress* p, std::string* s
         else ns.lines.push_back(l);
     }
     if (!mods_on.empty()) ns.put("RACACIT_MODS_ENABLED", mods_on);
+    if (!game_src.empty()) ns.put("GAME", u8(old / upath(game_src)));
     settings = ns;
     if (!settings.save()) return "Could not write " + u8(settings.path);
     std::string s = "Settings from " + u8(old.filename()) + ".";
@@ -586,7 +798,15 @@ std::string Store::migrate_from_launcher(const fs::path& old, Progress* p, std::
           std::error_code e2;
           const fs::path to = backups() / f->path().filename();
           if (u8(f->path().filename()).rfind("saves-", 0) != 0 || fs::exists(to, e2)) continue;
-          if (f->is_directory(e2)) { Progress bp; nb += copy_tree(f->path(), to, &bp).empty(); }
+          if (f->is_directory(e2)) {
+              // Copied beside it first, so a copy that fails part way never shows up as a backup.
+              // Not under the saves- prefix, so restore, pruning and later migrations never see it.
+              const fs::path part = backups() / (L"partial-" + f->path().filename().wstring());
+              fs::remove_all(part, e2);
+              Progress bp;
+              if (copy_tree(f->path(), part, &bp).empty()) { fs::rename(part, to, e2); nb += !e2; }
+              if (fs::exists(part, e2)) fs::remove_all(part, e2);
+          }
           else if (f->path().extension() == L".zip") { fs::copy_file(f->path(), to, e2); nb += !e2; }
       } }
     if (nb) s += " " + std::to_string(nb) + " save backups copied.";
@@ -611,12 +831,14 @@ std::string Store::migrate_from_launcher(const fs::path& old, Progress* p, std::
         else ns.lines.push_back(l);
     }
     const std::string old_game = os.get("GAME");
+    const fs::path old_game_root = old / upath(old_game);
     const fs::path old_copy = old / L"game";
     if (here.ok) {
         if (here_game.empty()) ns.remove("GAME"); else ns.put("GAME", here_game);
         s += " Game: this launcher's own, kept.";
-    } else if (!old_game.empty() && fs::is_directory(upath(old_game) / L"PS3_GAME", ec)) {
-        s += " Game: " + old_game + ", as before.";
+    } else if (!old_game.empty() && fs::is_directory(old_game_root / L"PS3_GAME", ec)) {
+        ns.put("GAME", u8(old_game_root));
+        s += " Game: " + u8(old_game_root) + ", as before.";
     } else if (fs::is_directory(old_copy / L"PS3_GAME", ec)) {
         ns.put("GAME", u8(old_copy));
         s += " Game: played from " + u8(old_copy) + ", not copied. Keep that folder, or import the .iso again here.";
@@ -641,6 +863,7 @@ std::vector<BuildInfo> Store::builds() const
         const std::string n = u8(d.path().filename());
         if (n.size() < 2 || n[0] != 'v' || !has_game_program(d.path())) continue;
         BuildInfo b; b.version = atoi(n.c_str() + 1); b.dir = d.path();
+        b.update120 = n.size() > 5 && lower(n.substr(n.size() - 5)) == "-u120";
         std::string rd = read_text(d.path() / L"README.txt", 400);
         b.notes_first_line = trim(rd.substr(0, rd.find('\n')));
         if (b.version > 0) out.push_back(b);
@@ -652,13 +875,27 @@ std::vector<BuildInfo> Store::builds() const
 BuildInfo Store::current_build() const
 {
     // The newest build that ships with the launcher, always.
-    const auto all = builds();
-    if (all.empty()) return BuildInfo{};
+    return build_for(false);
+}
+
+BuildInfo Store::build_for(bool update120) const
+{
+    return build_for(update120, game().title_id);
+}
+
+BuildInfo Store::build_for(bool update120, const std::string& title_id) const
+{
     // ...that has this disc's program; a build may hold only one of them.
     std::error_code ec;
-    const wchar_t* program = game_program(game().title_id);
-    for (const auto& b : all) if (fs::exists(b.dir / program, ec)) return b;
-    return all.front();
+    const wchar_t* program = game_program(title_id);
+    const auto installed = builds();
+    const BuildInfo* fallback = nullptr;
+    for (const auto& b : installed) {
+        if (b.update120 != update120) continue;
+        if (fs::exists(b.dir / program, ec)) return b;
+        if (!update120 && !fallback) fallback = &b;
+    }
+    return fallback ? *fallback : BuildInfo{};
 }
 
 bool Store::set_current(int version) { return write_text_atomic(builds_dir() / L"current.txt", std::to_string(version) + "\r\n"); }
@@ -774,8 +1011,9 @@ std::string Store::fetch_latest_release(ReleaseInfo* out)
     }
     Json all; std::string err;
     if (!json_parse(body, &all, &err) || (all.type != Json::Obj && all.type != Json::Arr)) return "GitHub's answer could not be read. Try again later.";
-    // The newest published Windows release: not a draft or pre-release, not tagged for Android, and
-    // with a launcher .zip among its files. (The test server may answer with one object.)
+    // The newest published release for this platform: not a draft or pre-release, not tagged for
+    // Android, and with this platform's .zip among its files (release_asset.h). (The test server
+    // may answer with one object.)
     const Json* pick = all.type == Json::Obj ? &all : nullptr;
     if (!pick)
         for (const Json& r : all.a) {
@@ -784,11 +1022,15 @@ std::string Store::fetch_latest_release(ReleaseInfo* out)
             bool has = false;
             for (const Json& a : r["assets"].a) {
                 const std::string low = lower(a.str("name"));
-                if (low.size() > 4 && low.compare(low.size() - 4, 4, ".zip") == 0 && low.find("launcher") != std::string::npos) has = true;
+                if (release_asset_here(low)) has = true;
             }
             if (has) { pick = &r; break; }
         }
+#ifdef __APPLE__
+    if (!pick) return "There is no macOS release on GitHub yet.";
+#else
     if (!pick) return "There is no Windows release on GitHub yet.";
+#endif
     const Json& j = *pick;
     out->tag = trim(j.str("tag_name"));
     if (out->tag.empty()) return "GitHub's answer has no release in it. Try again later.";
@@ -797,11 +1039,10 @@ std::string Store::fetch_latest_release(ReleaseInfo* out)
     out->notes = plain_notes(j.str("body"));
     const std::string page = j.str("html_url");
     if (under(page, kReleasePages) || !test.empty()) out->page = page;
-    // The asset: a .zip with "launcher" in its name. A .7z is listed for the message only.
+    // The asset: this platform's .zip (release_asset.h). Anything else is listed for the message only.
     for (const Json& a : j["assets"].a) {
         const std::string n = a.str("name"), low = lower(n), url = a.str("browser_download_url");
-        const bool zip = low.size() > 4 && low.compare(low.size() - 4, 4, ".zip") == 0;
-        if (out->asset.empty() && zip && low.find("launcher") != std::string::npos && release_download_ok(url)) {
+        if (out->asset.empty() && release_asset_here(low) && release_download_ok(url)) {
             out->asset = n; out->url = url; out->size = (uint64_t)a.num("size");
             const std::string d = lower(a.str("digest"));
             if (d.rfind("sha256:", 0) == 0) out->sha256 = d.substr(7);
@@ -841,12 +1082,22 @@ std::string Store::installed_release(const std::string& launcher_version) const
     return compare_versions(done, launcher_version) > 0 ? done : launcher_version;
 }
 
+#ifdef __APPLE__
+// What install_release set aside on macOS: the old .app bundle, holding the launcher program.
+static bool is_old_launcher_app(const fs::path& app)
+{
+    std::error_code ec;
+    return fs::is_directory(app, ec) && fs::is_regular_file(app / L"Contents" / L"MacOS" / L"RaCACiT Launcher", ec);
+}
+#endif
+
 void Store::clean_update_leftovers()
 {
     delete_tree(root / L".update");
     // The launcher this one replaced: it may still be on its way out.
-    fs::path old = exe_path(); old += L".old";
     std::error_code ec;
+#ifdef _WIN32
+    fs::path old = exe_path(); old += L".old";
     if (!fs::exists(old, ec)) return;
     std::thread([old] {
         for (int i = 0; i < 40; i++) {
@@ -854,6 +1105,19 @@ void Store::clean_update_leftovers()
             Sleep(250);
         }
     }).detach();
+#elif defined(__APPLE__)
+    // install_release sets the whole .app aside as <app>.old beside it: only that, when it
+    // still holds the launcher program, goes as a folder. Anything else of that name (and a
+    // stray <program>.old inside Contents/MacOS) is removed only if it's a file or empty.
+    fs::path old_app = app_bundle_path(); old_app += L".old";
+    if (is_old_launcher_app(old_app)) fs::remove_all(old_app, ec);
+    else fs::remove(old_app, ec);
+    fs::path old = exe_path(); old += L".old";
+    fs::remove(old, ec);
+#else
+    fs::path old = exe_path(); old += L".old";
+    fs::remove(old, ec);   // nothing holds a replaced program open here
+#endif
 }
 
 std::string Store::download_release(const ReleaseInfo& rel, Progress* p)
@@ -907,12 +1171,19 @@ static bool build_folder_part(const std::string& n, size_t at)   /* n[at..] = "v
 {
     if (n.size() <= at || n[at] != 'v') return false;
     const size_t e = n.find('/', at + 1);
-    return e != std::string::npos && e > at + 1 && n.find_first_not_of("0123456789", at + 1) == e;
+    const size_t digits_end = n.find_first_not_of("0123456789", at + 1);
+    // builds/vNN/ or (A Crack in Time's update 1.20) builds/vNN-u120/
+    return e != std::string::npos && digits_end > at + 1 &&
+        (digits_end == e || (digits_end + 5 == e && n.compare(digits_end, 5, "-u120") == 0));
 }
 static bool release_part(const std::string& rel_name)
 {
     const std::string n = lower(rel_name);
     if (n == "readme.txt") return true;
+#ifdef __APPLE__
+    // The macOS launcher is a bundle: everything under RaCACiT Launcher.app/.
+    if (n.rfind(lower(narrow(RACIT_LAUNCHER_FILE)) + "/", 0) == 0) return true;
+#endif
     if (n.find('/') == std::string::npos) return n.size() > 4 && n.compare(n.size() - 4, 4, ".exe") == 0 && n.find("launcher") != std::string::npos;
     if (n.rfind("mods/", 0) == 0) return n.size() > 5 && n.find('/', 5) != std::string::npos;
     if (n.rfind("builds/", 0) == 0) return build_folder_part(n, 7);
@@ -927,8 +1198,8 @@ static const wchar_t* const kNexusProgram = L"RaCNexus.exe";
 
 static bool looks_like_program(const fs::path& p)
 {
-    const std::string h = read_text(p, 2);
-    return h.size() >= 2 && h[0] == 'M' && h[1] == 'Z';
+    const std::string h = read_text(p, 4);
+    return looks_like_program_head(reinterpret_cast<const unsigned char*>(h.data()), h.size());
 }
 
 std::string Store::install_release(const ReleaseInfo& rel, Progress* p, std::string* summary, bool* restart)
@@ -946,7 +1217,14 @@ std::string Store::install_release(const ReleaseInfo& rel, Progress* p, std::str
     std::string r = zip_list(zip, &all);
     if (!r.empty()) return stop("The release could not be read: " + r + ". Nothing was changed.");
     std::string base;   // the folder everything is packed in, if any
-    auto is_main = [](const std::string& s) { return lower(s).rfind("builds/", 0) == 0 || lower(s).rfind("nexus/builds/", 0) == 0 || (s.find('/') == std::string::npos && release_part(s) && lower(s) != "readme.txt"); };
+    auto is_main = [](const std::string& s) {
+        const std::string n = lower(s);
+        if (n.rfind("builds/", 0) == 0 || n.rfind("nexus/builds/", 0) == 0) return true;
+#ifdef __APPLE__
+        if (n.rfind(lower(narrow(RACIT_LAUNCHER_FILE)) + "/", 0) == 0) return true;
+#endif
+        return s.find('/') == std::string::npos && release_part(s) && n != "readme.txt";
+    };
     for (const auto& e : all) {
         if (is_main(e.name)) { base.clear(); break; }
         const size_t s = e.name.find('/');
@@ -997,7 +1275,6 @@ std::string Store::install_release(const ReleaseInfo& rel, Progress* p, std::str
     if (fs::is_directory(fresh / RACIT_LAUNCHER_FILE, ec)) new_launcher = fresh / RACIT_LAUNCHER_FILE;
     if (new_builds.empty() && new_nexus.empty() && new_launcher.empty()) return stop("That release holds no game build and no launcher. Nothing was changed.");
     const fs::path self = app_bundle_path().parent_path() == root ? app_bundle_path() : root / RACIT_LAUNCHER_FILE;
-    if (!new_launcher.empty() && sha256_file(program_of(new_launcher)) == sha256_file(program_of(self))) new_launcher.clear();   // the same one
     if (!new_launcher.empty()) {
         if (!looks_like_program(program_of(new_launcher))) return stop("The release's launcher is not a program. Nothing was changed.");
         const int code = run_argv({ u8(program_of(new_launcher)), "--self-test" }, fresh, &p->cancel);
@@ -1061,7 +1338,18 @@ std::string Store::install_release(const ReleaseInfo& rel, Progress* p, std::str
     if (ok && !new_launcher.empty()) {
         // A running exe can be renamed but not deleted: this one goes aside beside itself, and the next
         // start deletes it. The new launcher takes its name, whatever the player calls it.
-        DeleteFileW(self_old.c_str());
+        // Only what an earlier update set aside: a file (Windows), or on macOS the old .app
+        // bundle. A folder of any other kind that happens to have that name is left alone,
+        // and the update then stops at the rename instead of deleting it.
+        {
+            std::error_code gone;
+#ifdef __APPLE__
+            if (is_old_launcher_app(self_old))
+                fs::remove_all(self_old, gone);
+            else
+#endif
+                fs::remove(self_old, gone);
+        }
         ok = put(new_launcher, self, self_old);
     }
     if (!ok) {
@@ -1069,20 +1357,21 @@ std::string Store::install_release(const ReleaseInfo& rel, Progress* p, std::str
         return stop("A file could not be replaced (is something using this folder?), so your install was put back as it was.");
     }
 
-    // 5. In. Only the new build and the one before it stay (Play always starts the newest here).
+    // 5. Keep the new build, the previous build, and the latest build for each disc and game version.
     if (top_build) {
         set_current(top_build);
         int before = 0;
-        for (const auto& b : builds()) if (b.version < top_build) before = std::max(before, b.version);
-        // And the newest with each disc's program, or an update could leave a disc with none.
-        int newest_usa = 0, newest_eu = 0;
-        for (const auto& b : builds()) {
-            if (fs::exists(b.dir / RACIT_GAME_EXE, ec)) newest_usa = std::max(newest_usa, b.version);
-            if (fs::exists(b.dir / L"RaCACiT_BCES00511.exe", ec)) newest_eu = std::max(newest_eu, b.version);
+        const auto installed = builds();
+        for (const auto& b : installed) if (b.version < top_build) before = std::max(before, b.version);
+        std::set<std::pair<std::string, bool>> has_newest;
+        for (const auto& b : installed) {
+            bool keep = b.version == top_build || b.version == before;
+            for (const auto& disc : prof->discs) {
+                if (fs::exists(b.dir / disc.exe, ec) && has_newest.emplace(disc.id, b.update120).second)
+                    keep = true;
+            }
+            if (!keep) delete_tree(b.dir);
         }
-        for (const auto& b : builds())
-            if (b.version != top_build && b.version != before && b.version != newest_usa && b.version != newest_eu)
-                delete_tree(b.dir);
     }
     if (top_nexus) {
         // Into the Nexus: Play starts its newest build (Store::current_build); the one before stays.
@@ -1392,7 +1681,7 @@ std::vector<fs::path> Store::old_logs() const
 // seen: "RSXPLS01", u32 record size, u32 0, then records of that size). They were copied into
 // data\cache only when it had none, so a player who started on an older build never got a
 // newer build's caches: every area compiled its shaders again during play, build after build.
-// Now a build's entries are merged in once (cache\seeded.txt: the last build merged); the
+// A build's entries are merged once, tracked separately for the disc and update variants. The
 // game itself drops the oldest when a file outgrows its cap. pipelinecache.bin is the
 // graphics driver's own: copied only when there is none.
 namespace {
@@ -1443,9 +1732,10 @@ bool merge_shader_cache(const fs::path& from, const fs::path& to)
     for (const SpvRec& r : src) {
         if (!have.insert({ r.a, r.b }).second) continue;
         buf.resize(24 + (size_t)r.n * 4);
-        if (!in.seekg((std::streamoff)r.off) || !in.read(buf.data(), (std::streamsize)buf.size())) break;
-        out.write(buf.data(), (std::streamsize)buf.size());
+        if (!in.seekg((std::streamoff)r.off) || !in.read(buf.data(), (std::streamsize)buf.size())) return false;
+        if (!out.write(buf.data(), (std::streamsize)buf.size())) return false;
     }
+    out.close();
     return (bool)out;
 }
 
@@ -1468,8 +1758,9 @@ bool merge_pipeline_list(const fs::path& from, const fs::path& to)
     std::ofstream out(to, std::ios::binary | std::ios::app);
     for (size_t i = 0; 16 + (i + 1) * rs <= s.size(); i++) {
         std::string r = s.substr(16 + i * rs, rs);
-        if (have.insert(r).second) out.write(r.data(), (std::streamsize)rs);
+        if (have.insert(r).second && !out.write(r.data(), (std::streamsize)rs)) return false;
     }
+    out.close();
     return (bool)out;
 }
 }  // namespace
@@ -1477,18 +1768,23 @@ bool merge_pipeline_list(const fs::path& from, const fs::path& to)
 void Store::seed_caches(const BuildInfo& b)
 {
     std::error_code ec;
-    const fs::path mark = cache() / L"seeded.txt";
+    const fs::path mark = cache() / (b.update120 ? L"seeded-u120.txt" : L"seeded-disc.txt");
     const bool merged = atoi(trim(read_text(mark, 64)).c_str()) == b.version;
     bool ok = true;
+    bool found_seed = false;
     for (const wchar_t* cf : { L"shadercache.bin", L"pipelinecache.bin", L"pipelinelist.bin" }) {
         const fs::path from = b.dir / cf, to = cache() / cf;
-        if (!fs::exists(from, ec)) continue;
-        if (!fs::exists(to, ec)) { fs::copy_file(from, to, ec); continue; }   // a fresh install starts from the build's
+        if (!fs::exists(from, ec)) { if (ec) ok = false; continue; }
+        found_seed = true;
+        if (!fs::exists(to, ec)) {
+            if (ec || !fs::copy_file(from, to, ec)) ok = false;
+            continue;
+        }
         if (merged) continue;
         if (!wcscmp(cf, L"shadercache.bin")) ok = merge_shader_cache(from, to) && ok;
         else if (!wcscmp(cf, L"pipelinelist.bin")) ok = merge_pipeline_list(from, to) && ok;
     }
-    if (!merged && ok) write_text_atomic(mark, std::to_string(b.version) + "\r\n");   // else tried again next Play
+    if (!merged && found_seed && ok) write_text_atomic(mark, std::to_string(b.version) + "\r\n");
 }
 
 // ---- shaders: the prepare's files in data\cache ---------------------------------------------
@@ -1523,7 +1819,11 @@ int Store::shader_variants() const
 
 std::map<std::string, std::string> Store::shader_stamp() const { return key_values(cache() / L"shaders.stamp"); }
 std::map<std::string, std::string> Store::shader_state() const { return key_values(cache() / L"shaders.state"); }
-std::string Store::shader_build_tag() const { const BuildInfo b = current_build(); return b.version ? "v" + std::to_string(b.version) : std::string(); }
+std::string Store::shader_build_tag() const
+{
+    const std::string title_id = game().title_id;
+    return build_for(plays_update(title_id), title_id).shader_tag();
+}
 
 int Store::shader_status() const
 {
@@ -1554,10 +1854,13 @@ std::string Store::launch(void** process, bool prepare)
     reload();
     const GameInfo g = game();
     if (!g.ok) return "The game is not ready: " + g.status;
-    const BuildInfo b = current_build();
+    const bool u120 = plays_update(g.title_id);
+    const BuildInfo b = build_for(u120, g.title_id);
     if (!b.version) return "No build installed: reinstall the launcher.";
     std::error_code ec;
     fs::create_directories(hdd(), ec); fs::create_directories(cache(), ec);
+    if (u120) { const std::string r = prepare_update_hdd(); if (!r.empty()) return "Could not set up update 1.20: " + r; }
+    const fs::path eboot = u120 ? update_elf() : g.root / L"PS3_GAME" / L"USRDIR" / L"EBOOT.elf";
     seed_caches(b);   // a prepare too: a new build's shipped pipelines are then built as well
     if (!prepare && ini.get("backup_on_play", "1") != "0") {
         /* A backup that cannot be made must not keep the game from starting
@@ -1565,10 +1868,8 @@ std::string Store::launch(void** process, bool prepare)
          * to logs\backup_failed.txt. */
         const std::string r = backup_saves("play", nullptr);
         if (!r.empty()) {
-            if (FILE* f = _wfopen((logs() / L"backup_failed.txt").c_str(), L"ab")) {
-                fprintf(f, "%s  backup on Play failed: %s\r\n", stamp_now().c_str(), r.c_str());
-                fclose(f);
-            }
+            std::ofstream f(logs() / L"backup_failed.txt", std::ios::binary | std::ios::app);
+            if (f) f << stamp_now() << "  backup on Play failed: " << r << "\r\n";
         }
     }
     if (!prepare) rotate_log();
@@ -1591,14 +1892,17 @@ std::string Store::launch(void** process, bool prepare)
                     }
     }
     set[L"RACACIT_SETTINGS_FILE"] = settings.path.wstring();
-    set[L"PS3_HDD0_ROOT"] = hdd().wstring();
+    set[L"PS3_VFS_ROOT"] = g.root.wstring();
+    set[L"PS3_HDD0_ROOT"] = (u120 ? hdd_update() : hdd()).wstring();
+    set[L"PS3_HDD0_HOME_ROOT"] = u120 ? (hdd() / L"home").wstring() : L"";
+    set[L"PS3_UPDATE_PARAM_SFO"] = u120 ? (hdd_update() / L"game" / L"BCUS98124" / L"PARAM.SFO").wstring() : L"";
     set[L"RSX_SHADER_CACHE"] = (cache() / L"shadercache.bin").wstring();
     set[L"RSX_PIPELINE_CACHE"] = (cache() / L"pipelinecache.bin").wstring();
     set[L"RSX_PIPELINE_LIST"] = (cache() / L"pipelinelist.bin").wstring();
     set[L"RACACIT_LOG_FILE"] = (prepare ? prepare_log() : log()).wstring();
     if (prepare) {
         set[L"RACACIT_PREPARE"] = L"1";
-        set[L"RACACIT_PREPARE_TAG"] = widen(shader_build_tag());
+        set[L"RACACIT_PREPARE_TAG"] = widen(b.shader_tag());
         fs::remove(cache() / L"shaders.progress", ec);
     }
     set[L"RACACIT_LAUNCHER"] = L"1";
@@ -1619,7 +1923,7 @@ std::string Store::launch(void** process, bool prepare)
 
 #ifdef __APPLE__
     if (prepare) return "Preparing shaders is not available on this system yet.";
-    return launch_mac(g, b, set, process);
+    return launch_mac(b, eboot, set, process);
 #else
     std::wstring env;
     if (wchar_t* cur = GetEnvironmentStringsW()) {
@@ -1650,7 +1954,6 @@ std::string Store::launch(void** process, bool prepare)
               "Set Settings > Performance > Game build to Automatic or Standard."
             : "This PC's processor has no AVX2, and build v" + std::to_string(b.version) + " has no version for "
               "older processors (" + prog + "). Install a release that includes one.";
-    const fs::path eboot = g.root / L"PS3_GAME" / L"USRDIR" / L"EBOOT.elf";
     std::wstring cl = L"\"" + exe.wstring() + L"\" \"" + eboot.wstring() + L"\"";
     // An older build writes log.txt beside itself: clear the last one so a stale
     // file is never taken for this session's.
@@ -1676,11 +1979,10 @@ std::string Store::launch(void** process, bool prepare)
 // same environment as on Windows, the game folder named outright (PS3_VFS_ROOT), the
 // Vulkan loader and MoltenVK beside the build (builds/vNN/lib, unless settings.txt names
 // others), and stdout + stderr into data/log.txt.
-std::string Store::launch_mac(const GameInfo& g, const BuildInfo& b, std::map<std::wstring, std::wstring>& set, void** process)
+std::string Store::launch_mac(const BuildInfo& b, const fs::path& eboot, std::map<std::wstring, std::wstring>& set, void** process)
 {
     std::error_code ec;
     auto ours = [&](const wchar_t* k) { for (auto& kv : set) if (_wcsicmp(kv.first.c_str(), k) == 0) return true; return false; };
-    set[L"PS3_VFS_ROOT"] = g.root.wstring();
     const fs::path lib = b.dir / L"lib";
     if (!ours(L"PS3RECOMP_VULKAN_LIBRARY") && fs::exists(lib / L"libvulkan.1.dylib", ec))
         set[L"PS3RECOMP_VULKAN_LIBRARY"] = (lib / L"libvulkan.1.dylib").wstring();
@@ -1698,7 +2000,6 @@ std::string Store::launch_mac(const GameInfo& g, const BuildInfo& b, std::map<st
     for (auto& kv : set) env.push_back(narrow(kv.first) + "=" + narrow(kv.second));
 
     const fs::path exe = b.dir / RACIT_GAME_EXE;
-    const fs::path eboot = g.root / L"PS3_GAME" / L"USRDIR" / L"EBOOT.elf";
     fs::remove(b.dir / L"log.txt", ec);
     launched_dir = b.dir;
     clear_quarantine(b.dir);
@@ -1707,6 +2008,7 @@ std::string Store::launch_mac(const GameInfo& g, const BuildInfo& b, std::map<st
     if (!c) return "Could not start " + u8(exe) + " (" + why + ").";
     *process = c;
     return {};
+}
 #endif
 
 void Store::collect_log()

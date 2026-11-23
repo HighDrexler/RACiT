@@ -54,6 +54,10 @@ extern "C" void ppu_threads_dump_stacks(ppu_context* main_ctx);
 #include <sys/mman.h>
 #include <unistd.h>   /* _exit */
 #endif
+#if defined(__linux__) && !defined(__ANDROID__)
+#include <filesystem>
+#include <fstream>
+#endif
 
 #ifdef __ANDROID__
 /* SDLActivity loads libmain.so and calls SDL_main: SDL.h renames main(). */
@@ -1365,6 +1369,12 @@ static void windows_setup(int* argc, char*** argv)
      * names the settings file; else settings.txt beside the exe. */
     if (const char* sf = getenv("RACACIT_SETTINGS_FILE"); sf && *sf) snprintf(path, sizeof path, "%s", sf);
     else snprintf(path, sizeof path, "%s\\settings.txt", dir);
+    /* From the launcher, what it set (its paths, mod overrides) wins and the file only
+     * fills in the rest -- except a PS3_HDD0_ROOT set by hand, which keeps pointing at
+     * the player's saves as in 1.0.1. Playing update 1.20 (PS3_HDD0_HOME_ROOT set) the
+     * launcher's own dev_hdd0 holds the update, so only the saves (home) move there. */
+    const char* launched = getenv("RACACIT_LAUNCHER");
+    const bool from_launcher = launched && strcmp(launched, "1") == 0;
     if (FILE* f = fopen(path, "r")) {
         char line[2048];
         while (fgets(line, sizeof line, f)) {
@@ -1379,7 +1389,14 @@ static void windows_setup(int* argc, char*** argv)
             char v[2048]; snprintf(v, sizeof v, "%s", val);
             size_t n = strlen(v); while (n && v[n - 1] == '"') v[--n] = 0;
             if (!_stricmp(line, "GAME")) snprintf(game, sizeof game, "%s", v);
-            else _putenv_s(line, v);
+            else if (from_launcher && !_stricmp(line, "PS3_HDD0_ROOT") && v[0]) {
+                const char* home = getenv("PS3_HDD0_HOME_ROOT");
+                if (home && *home) {
+                    char h[2100]; snprintf(h, sizeof h, "%s\\home", v);
+                    _putenv_s("PS3_HDD0_HOME_ROOT", h);
+                } else _putenv_s(line, v);
+            }
+            else if (!from_launcher || !getenv(line)) _putenv_s(line, v);
         }
         fclose(f);
     }
@@ -1582,16 +1599,63 @@ extern "C" int racacit_entry(void)
 #endif
 #endif
 
+#if defined(__linux__) && !defined(__ANDROID__)
+static void linux_load_settings()
+{
+    namespace fs = std::filesystem;
+    fs::path path;
+    if (const char* file = getenv("RACACIT_SETTINGS_FILE")) {
+        if (!*file) return;
+        path = file;
+    } else {
+        const char* config = getenv("XDG_CONFIG_HOME");
+        fs::path dir = config ? fs::path(config) : fs::path();
+        if (!dir.is_absolute()) {
+            const char* home = getenv("HOME");
+            if (!home || !*home) return;
+            dir = fs::path(home) / ".config";
+        }
+        dir /= "racit";
+        std::error_code error;
+        fs::create_directories(dir, error);
+        if (error) return;
+        path = dir / "settings.txt";
+        setenv("RACACIT_SETTINGS_FILE", path.c_str(), 0);
+    }
+
+    std::ifstream file(path);
+    for (std::string line; std::getline(file, line); ) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.compare(0, 8, "RACACIT_") != 0) continue;
+        const size_t separator = line.find('=');
+        if (separator == std::string::npos) continue;
+        line[separator] = '\0';
+        setenv(line.c_str(), line.c_str() + separator + 1, 0);
+    }
+}
+#endif
+
 int main(int argc, char** argv)
 {
+#if defined(__linux__) && !defined(__ANDROID__)
+    linux_load_settings();
+#endif
 #if defined(__APPLE__) && defined(RACACIT_HAVE_VULKAN)
     /* Preserve IEEE shader guards before SDL or the Vulkan loader starts.
      * Pending asynchronous pipelines currently skip draws in this backend. */
     setenv("MVK_CONFIG_FAST_MATH_ENABLED", "0", 0);
     setenv("RACACIT_ASYNC_PIPELINES", "0", 0);
+#endif
+#if defined(RACACIT_HAVE_VULKAN) && (defined(__APPLE__) || (defined(__linux__) && !defined(__ANDROID__)))
+    /* Desktop defaults for a direct launch. Explicit settings and headless runs can override them. */
     setenv("RACACIT_HLE_SPURS", "1", 0);
     setenv("RACACIT_KBM", "1", 0);
     setenv("PS3RECOMP_VK_WINDOW", "1", 0);
+    /* As on Windows: the guest's own shader programs, and the title the
+     * renderer's per-game paths key on. Without them it takes the vtable path and
+     * never uploads a texture, so the window stays black (#72). */
+    setenv("PS3RECOMP_VK_GUEST_PROGRAMS", "1", 0);
+    setenv("PS3_TITLE", "Ratchet & Clank: A Crack in Time", 0);
 #endif
 #ifdef __ANDROID__
     android_setup(&argc, &argv);
@@ -1705,9 +1769,14 @@ int main(int argc, char** argv)
     /* Real title id (BCUS98124) from PARAM.SFO; without this cellGame,
      * save data and trophies all fall back to the BLES00000 placeholder. */
     {
-        char sfo[1100];
-        snprintf(sfo, sizeof sfo, "%s/PS3_GAME/PARAM.SFO", ppu_vfs_root);
-        cellGame_init_from_paramsfo(sfo);
+        const char* update_sfo = getenv("PS3_UPDATE_PARAM_SFO");
+        if (update_sfo && *update_sfo) {
+            cellGame_init_from_paramsfo(update_sfo);
+        } else {
+            char sfo[1100];
+            snprintf(sfo, sizeof sfo, "%s/PS3_GAME/PARAM.SFO", ppu_vfs_root);
+            cellGame_init_from_paramsfo(sfo);
+        }
     }
 
     ppu_recomp_register();   /* lifted function table -> address map */
