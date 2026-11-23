@@ -29,7 +29,7 @@ HARNESS = r'''
 #include <string>
 #define RACIT_LAUNCHER_FILE L"RaCACiT Launcher.app"
 static std::string lower(std::string s) { for (char& c : s) if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a'); return s; }
-static std::string narrow(const wchar_t* w) { std::string s; while (*w) s += (char)*w++; return s; }
+[[maybe_unused]] static std::string narrow(const wchar_t* w) { std::string s; while (*w) s += (char)*w++; return s; }
 BUILD_FOLDER_PART
 RELEASE_PART
 int main(int argc, char** argv)
