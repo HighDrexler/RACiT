@@ -970,7 +970,7 @@ static bool nexus_behind()
 {
     std::error_code ec;
     int top = 0;
-    for (auto& d : fs::directory_iterator(exe_dir() / kNexusProfile.folder / L"builds", ec)) {
+    for (auto& d : fs::directory_iterator(g_games[1]->builds_dir(), ec)) {
         const std::string n = u8(d.path().filename());
         if (!d.is_directory(ec) || n.size() < 2 || n[0] != 'v') continue;
         for (const auto& disc : kNexusProfile.discs)
@@ -990,7 +990,8 @@ static const bool kReleaseHasU120 = false;
 static bool racit_build_present(bool update120)
 {
     std::error_code ec;
-    for (auto& d : fs::directory_iterator(exe_dir() / kRacitProfile.folder / L"builds", ec)) {
+    // R->builds_dir(): beside the .app on macOS (exe_dir() is inside it).
+    for (auto& d : fs::directory_iterator(R->builds_dir(), ec)) {
         const std::string n = u8(d.path().filename());
         if (!d.is_directory(ec) || n.size() < 2 || n[0] != 'v') continue;
         const size_t digits_end = n.find_first_not_of("0123456789", 1);

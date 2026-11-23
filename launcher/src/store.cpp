@@ -234,8 +234,14 @@ GameInfo Store::game() const
     GameInfo g;
     const std::string gs = settings.get("GAME");
     // Relative to the launcher folder: Into the Nexus's root is its nexus\ folder inside it.
+    // (A 1.0.1 setting relative to nexus\ itself still works when only that folder has the game.)
     const fs::path launcher_dir = prof->folder && *prof->folder ? root.parent_path() : root;
     g.root = gs.empty() ? game_copy() : launcher_dir / upath(gs);
+    if (!gs.empty() && launcher_dir != root && upath(gs).is_relative()) {
+        std::error_code e0;
+        if (!fs::is_directory(g.root / L"PS3_GAME", e0) && fs::is_directory(root / upath(gs) / L"PS3_GAME", e0))
+            g.root = root / upath(gs);
+    }
     std::error_code ec;
     if (!fs::is_directory(g.root / L"PS3_GAME", ec)) {
         g.status = gs.empty() ? "Not imported yet" : "PS3_GAME not found in " + gs;
@@ -789,7 +795,8 @@ std::string Store::migrate_from_launcher(const fs::path& old, Progress* p, std::
           if (u8(f->path().filename()).rfind("saves-", 0) != 0 || fs::exists(to, e2)) continue;
           if (f->is_directory(e2)) {
               // Copied beside it first, so a copy that fails part way never shows up as a backup.
-              const fs::path part = backups() / (f->path().filename().wstring() + L".partial");
+              // Not under the saves- prefix, so restore, pruning and later migrations never see it.
+              const fs::path part = backups() / (L"partial-" + f->path().filename().wstring());
               fs::remove_all(part, e2);
               Progress bp;
               if (copy_tree(f->path(), part, &bp).empty()) { fs::rename(part, to, e2); nb += !e2; }
