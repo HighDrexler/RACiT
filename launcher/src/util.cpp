@@ -143,7 +143,9 @@ std::string copy_tree(const fs::path& src, const fs::path& dst, Progress* p)
     fs::create_directories(dst, ec);
     if (ec) return "cannot create " + u8(dst) + ": " + ec.message();
     std::vector<char> buf(4u << 20);
-    for (auto it = fs::recursive_directory_iterator(src, fs::directory_options::skip_permission_denied, ec);
+    // No skip_permission_denied: a folder that cannot be read fails the copy rather than leaving a
+    // partial game or update that looks complete.
+    for (auto it = fs::recursive_directory_iterator(src, ec);
          !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
         if (p && p->cancel) return "cancelled";
         const fs::path rel = it->path().lexically_relative(src);
