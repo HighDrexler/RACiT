@@ -20,6 +20,10 @@ A Crack in Time fixes. Into the Nexus is unchanged (0.1.1).
   saves are shared between the two, and Your game switches back to 1.00.
 - Fixes for Play failing when the game folder was given as a relative path, and
   for launcher updates that were only partly copied.
+- macOS: the 1.0.0 and 1.0.1 Mac launchers cannot update themselves to 1.0.2.
+  Download RACiT-1.0.2-macos.zip once and copy what is in its RACiT-1.0.2-macos
+  folder over your RACiT folder (your saves, settings and game are not in the
+  zip); updates from 1.0.2 on work from the launcher.
 
 NEW IN 1.0.1
 Into the Nexus test build 0.1.1 (nexus\builds\v97): fixes for freezes of about

@@ -238,9 +238,14 @@ GameInfo Store::game() const
     const fs::path launcher_dir = prof->folder && *prof->folder ? root.parent_path() : root;
     g.root = gs.empty() ? game_copy() : launcher_dir / upath(gs);
     if (!gs.empty() && launcher_dir != root && upath(gs).is_relative()) {
+        // The launcher folder's candidate wins only if it holds this game; else nexus\<GAME> if that does.
         std::error_code e0;
-        if (!fs::is_directory(g.root / L"PS3_GAME", e0) && fs::is_directory(root / upath(gs) / L"PS3_GAME", e0))
-            g.root = root / upath(gs);
+        auto holds_this_game = [&](const fs::path& r) {
+            if (!fs::is_directory(r / L"PS3_GAME", e0)) return false;
+            const std::string id = read_sfo(r / L"PS3_GAME" / L"PARAM.SFO")["TITLE_ID"];
+            return id.empty() || supported_title(id);
+        };
+        if (!holds_this_game(g.root) && holds_this_game(root / upath(gs))) g.root = root / upath(gs);
     }
     std::error_code ec;
     if (!fs::is_directory(g.root / L"PS3_GAME", ec)) {
