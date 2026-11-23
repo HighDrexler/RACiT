@@ -1,4 +1,4 @@
-RACiT Launcher 1.0.1 -- Ratchet & Clank Future: A Crack in Time (PC), Windows
+RACiT Launcher 1.0.2 -- Ratchet & Clank Future: A Crack in Time (PC), Windows
 ================================================================================
 
 Everything the game needs comes in this folder: the launcher, the game build
@@ -6,6 +6,20 @@ Everything the game needs comes in this folder: the launcher, the game build
 A Crack in Time (USA BCUS98124, or Europe BCES00511):
   1. the game: its disc image (.iso), or the dumped game's folder (USRDIR)
   2. EBOOT.elf, the game's main program, unlocked with RPCS3
+
+NEW IN 1.0.2
+A Crack in Time fixes. Into the Nexus is unchanged (0.1.1).
+- Menus, the HUD and quick select show your keys instead of PS3 buttons when
+  you play with a keyboard, and switch back when you pick up a controller.
+- The mouse turns every camera directly (follow, strafe, first person,
+  turrets and the ships), and moves maps and puzzles like the right stick.
+- The comma key can be bound.
+- Update 1.20: when the release has a 1.20 build (builds\vNN-u120), the
+  launcher plays it as well as disc 1.00. Set up step 3 adds the installed
+  update (RPCS3's dev_hdd0\game\BCUS98124 with a decrypted EBOOT.elf in it);
+  saves are shared between the two, and Your game switches back to 1.00.
+- Fixes for Play failing when the game folder was given as a relative path, and
+  for launcher updates that were only partly copied.
 
 NEW IN 1.0.1
 Into the Nexus test build 0.1.1 (nexus\builds\v97): fixes for freezes of about
