@@ -1369,11 +1369,13 @@ static void windows_setup(int* argc, char*** argv)
      * names the settings file; else settings.txt beside the exe. */
     if (const char* sf = getenv("RACACIT_SETTINGS_FILE"); sf && *sf) snprintf(path, sizeof path, "%s", sf);
     else snprintf(path, sizeof path, "%s\\settings.txt", dir);
-    /* The launcher has already loaded settings and applied its own paths and
-     * mod overrides. Only a standalone game needs to read this file here. */
+    /* From the launcher, what it set (its paths, mod overrides) wins and the file only
+     * fills in the rest -- except a PS3_HDD0_ROOT set by hand, which keeps pointing at
+     * the player's saves as in 1.0.1. Playing update 1.20 (PS3_HDD0_HOME_ROOT set) the
+     * launcher's own dev_hdd0 holds the update, so only the saves (home) move there. */
     const char* launched = getenv("RACACIT_LAUNCHER");
     const bool from_launcher = launched && strcmp(launched, "1") == 0;
-    if (FILE* f = from_launcher ? nullptr : fopen(path, "r")) {
+    if (FILE* f = fopen(path, "r")) {
         char line[2048];
         while (fgets(line, sizeof line, f)) {
             char* e = line + strlen(line);
@@ -1387,7 +1389,14 @@ static void windows_setup(int* argc, char*** argv)
             char v[2048]; snprintf(v, sizeof v, "%s", val);
             size_t n = strlen(v); while (n && v[n - 1] == '"') v[--n] = 0;
             if (!_stricmp(line, "GAME")) snprintf(game, sizeof game, "%s", v);
-            else _putenv_s(line, v);
+            else if (from_launcher && !_stricmp(line, "PS3_HDD0_ROOT") && v[0]) {
+                const char* home = getenv("PS3_HDD0_HOME_ROOT");
+                if (home && *home) {
+                    char h[2100]; snprintf(h, sizeof h, "%s\\home", v);
+                    _putenv_s("PS3_HDD0_HOME_ROOT", h);
+                } else _putenv_s(line, v);
+            }
+            else if (!from_launcher || !getenv(line)) _putenv_s(line, v);
         }
         fclose(f);
     }
