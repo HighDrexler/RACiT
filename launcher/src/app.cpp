@@ -980,21 +980,36 @@ static bool nexus_behind()
 }
 /* macOS releases ship A Crack in Time's update 1.20 build too (builds/vNN-u120, mac/package_macos.sh
  * --game120). A 1.0.1 launcher's installer drops that folder, so the same release is offered once more
- * when there is a disc build but no 1.20 build; only once per release, in case a release has none. */
+ * when there is a disc build but no 1.20 build (looked up in A Crack in Time's folder whichever game
+ * is on screen). */
 #ifdef __APPLE__
 static const bool kReleaseHasU120 = true;
 #else
 static const bool kReleaseHasU120 = false;
 #endif
-static bool u120_behind(const std::string& tag)
+static bool racit_build_present(bool update120)
 {
-    return kReleaseHasU120 && R->build_for(true, "BCUS98124").version == 0 &&
-        R->build_for(false, "BCUS98124").version != 0 && R->ini.get("u120_finish_offered", "") != tag;
+    std::error_code ec;
+    for (auto& d : fs::directory_iterator(exe_dir() / kRacitProfile.folder / L"builds", ec)) {
+        const std::string n = u8(d.path().filename());
+        if (!d.is_directory(ec) || n.size() < 2 || n[0] != 'v') continue;
+        const size_t digits_end = n.find_first_not_of("0123456789", 1);
+        if (digits_end == 1) continue;
+        const bool u120 = digits_end != std::string::npos && n.compare(digits_end, std::string::npos, "-u120") == 0;
+        if ((digits_end == std::string::npos || u120) && u120 == update120)
+            for (const auto& disc : kRacitProfile.discs)
+                if (fs::exists(d.path() / disc.exe, ec)) return true;
+    }
+    return false;
+}
+static bool u120_behind()
+{
+    return kReleaseHasU120 && racit_build_present(false) && !racit_build_present(true);
 }
 static bool release_newer(const std::string& tag)
 {
     const int c = Store::compare_versions(tag, R->installed_release(kLauncherVersion));
-    return c > 0 || (c == 0 && (nexus_behind() || u120_behind(tag)));
+    return c > 0 || (c == 0 && (nexus_behind() || u120_behind()));
 }
 
 static void remember_release(const ReleaseInfo& rel)
@@ -2007,11 +2022,16 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
         delete rel;
         if (!prog && (scr.title == S->prof->name || scr.title == "Updates" || scr.title == "More")) refresh();
         /* A newer release: ask straight away whether to download it (once a session, not over a job or the game). */
-        if (g_update_ready && !g_update_asked && !prog && !game_proc && !g_rel.url.empty()) {
+        /* The 1.20 repair asks by itself once a release (a release without a 1.20 build would ask every
+         * start); Updates keeps offering it. */
+        const bool finish_now = g_update_ready && Store::compare_versions(g_rel.tag, R->installed_release(kLauncherVersion)) == 0;
+        const bool u120_only = finish_now && !nexus_behind();
+        if (g_update_ready && !g_update_asked && !prog && !game_proc && !g_rel.url.empty() &&
+            !(u120_only && R->ini.get("u120_finish_offered", "") == g_rel.tag)) {
             g_update_asked = true;
             const ReleaseInfo r = g_rel;
-            const bool finish = Store::compare_versions(r.tag, R->installed_release(kLauncherVersion)) == 0;
-            const bool finish_u120 = finish && !nexus_behind();
+            const bool finish = finish_now;
+            const bool finish_u120 = u120_only;
             if (finish_u120) { R->ini.put("u120_finish_offered", r.tag); R->ini.save(); }
             confirm(finish ? "Finish the update: " + r.name : "Update available: " + r.name,
                     (finish ? std::string("The launcher you updated from could not install ") +

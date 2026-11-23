@@ -233,7 +233,9 @@ GameInfo Store::game() const
 {
     GameInfo g;
     const std::string gs = settings.get("GAME");
-    g.root = gs.empty() ? game_copy() : root / upath(gs);
+    // Relative to the launcher folder: Into the Nexus's root is its nexus\ folder inside it.
+    const fs::path launcher_dir = prof->folder && *prof->folder ? root.parent_path() : root;
+    g.root = gs.empty() ? game_copy() : launcher_dir / upath(gs);
     std::error_code ec;
     if (!fs::is_directory(g.root / L"PS3_GAME", ec)) {
         g.status = gs.empty() ? "Not imported yet" : "PS3_GAME not found in " + gs;
@@ -785,7 +787,14 @@ std::string Store::migrate_from_launcher(const fs::path& old, Progress* p, std::
           std::error_code e2;
           const fs::path to = backups() / f->path().filename();
           if (u8(f->path().filename()).rfind("saves-", 0) != 0 || fs::exists(to, e2)) continue;
-          if (f->is_directory(e2)) { Progress bp; nb += copy_tree(f->path(), to, &bp).empty(); }
+          if (f->is_directory(e2)) {
+              // Copied beside it first, so a copy that fails part way never shows up as a backup.
+              const fs::path part = backups() / (f->path().filename().wstring() + L".partial");
+              fs::remove_all(part, e2);
+              Progress bp;
+              if (copy_tree(f->path(), part, &bp).empty()) { fs::rename(part, to, e2); nb += !e2; }
+              if (fs::exists(part, e2)) fs::remove_all(part, e2);
+          }
           else if (f->path().extension() == L".zip") { fs::copy_file(f->path(), to, e2); nb += !e2; }
       } }
     if (nb) s += " " + std::to_string(nb) + " save backups copied.";
