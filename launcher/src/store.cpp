@@ -1160,7 +1160,7 @@ static bool build_folder_part(const std::string& n, size_t at)   /* n[at..] = "v
     if (n.size() <= at || n[at] != 'v') return false;
     const size_t e = n.find('/', at + 1);
     const size_t digits_end = n.find_first_not_of("0123456789", at + 1);
-    // builds\vNN\ or (A Crack in Time's update 1.20) builds\vNN-u120\
+    // builds/vNN/ or (A Crack in Time's update 1.20) builds/vNN-u120/
     return e != std::string::npos && digits_end > at + 1 &&
         (digits_end == e || (digits_end + 5 == e && n.compare(digits_end, 5, "-u120") == 0));
 }
