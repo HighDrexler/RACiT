@@ -243,7 +243,7 @@ GameInfo Store::game() const
         auto holds_this_game = [&](const fs::path& r) {
             if (!fs::is_directory(r / L"PS3_GAME", e0)) return false;
             const std::string id = read_sfo(r / L"PS3_GAME" / L"PARAM.SFO")["TITLE_ID"];
-            return id.empty() || supported_title(id);
+            return !id.empty() && supported_title(id);
         };
         if (!holds_this_game(g.root) && holds_this_game(root / upath(gs))) g.root = root / upath(gs);
     }
