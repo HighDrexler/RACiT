@@ -1356,15 +1356,31 @@ static LONG WINAPI crash_unhandled(EXCEPTION_POINTERS* ep)
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
+/* The exe's manifest makes the process code page UTF-8, and the launcher writes settings.txt
+ * as UTF-8. A settings.txt saved by hand in the system's old code page (Windows-1252 and
+ * the like) still works: a value that isn't valid UTF-8 is converted from that code page. */
+static void settings_value_to_utf8(char* v, size_t size)
+{
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, v, -1, nullptr, 0) > 0) return;
+    UINT cp = 0;
+    if (!GetLocaleInfoEx(LOCALE_NAME_SYSTEM_DEFAULT, LOCALE_IDEFAULTANSICODEPAGE | LOCALE_RETURN_NUMBER,
+                         (LPWSTR)&cp, sizeof cp / sizeof(WCHAR)) || !cp) return;
+    wchar_t w[2048];
+    if (!MultiByteToWideChar(cp, 0, v, -1, w, 2048)) return;
+    char u[2048 * 3];
+    if (WideCharToMultiByte(CP_UTF8, 0, w, -1, u, sizeof u, nullptr, nullptr)) snprintf(v, size, "%s", u);
+}
+
 static void windows_setup(int* argc, char*** argv)
 {
-    char dir[MAX_PATH * 2];
+    /* UTF-8 takes up to 3 bytes for each of a path's MAX_PATH characters. */
+    char dir[MAX_PATH * 3];
     GetModuleFileNameA(NULL, dir, sizeof dir);
     char* slash = strrchr(dir, '\\');
     if (slash) *slash = 0;
 
-    char path[MAX_PATH * 3];
-    char game[MAX_PATH * 2] = "";
+    char path[MAX_PATH * 4];
+    char game[MAX_PATH * 3] = "";
     /* RACACIT_SETTINGS_FILE (set by the Windows launcher: its data\settings.txt)
      * names the settings file; else settings.txt beside the exe. */
     if (const char* sf = getenv("RACACIT_SETTINGS_FILE"); sf && *sf) snprintf(path, sizeof path, "%s", sf);
@@ -1388,6 +1404,7 @@ static void windows_setup(int* argc, char*** argv)
             while (*val == ' ' || *val == '"') val++;
             char v[2048]; snprintf(v, sizeof v, "%s", val);
             size_t n = strlen(v); while (n && v[n - 1] == '"') v[--n] = 0;
+            settings_value_to_utf8(v, sizeof v);
             if (!_stricmp(line, "GAME")) snprintf(game, sizeof game, "%s", v);
             else if (from_launcher && !_stricmp(line, "PS3_HDD0_ROOT") && v[0]) {
                 const char* home = getenv("PS3_HDD0_HOME_ROOT");
