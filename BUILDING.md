@@ -173,12 +173,16 @@ If the GPU lacks a usable Vulkan driver, Mesa Lavapipe provides a CPU Vulkan dev
 | `mac/` | Everything macOS-only: setup, the launcher's Mac parts and build, the release packaging, the link order file |
 | `versions/` | Per-version data: profiles, and update 1.20's hooks, addresses and SPU payloads |
 
-**Changing the runtime:** edit `tools/ps3recomp`, then save your work back into the patch:
+**Changing the runtime:** start with the pinned checkout and keep its line endings. After editing, mark each new file with `git add -N` and save the patch from the repository root.
 
 ```bash
-git -C tools/ps3recomp add -N .
-(cd tools/ps3recomp && git diff --ignore-cr-at-eol HEAD | tr -d '\r') > patches/ps3recomp-0001-racacit-runtime-fixes.patch
+git -C tools/ps3recomp -c core.autocrlf=false -c core.eol=lf diff --binary HEAD \
+  > patches/ps3recomp-0001-racacit-runtime-fixes.patch
 ```
+
+Keep the diff's end-of-file markers. Ignoring carriage returns at line ends can
+hide that a file in the pinned revision lacks a final newline. The patch then
+joins the first added line to the end of the preceding line on some Git versions.
 
 **Hot code lists:** `game/hot_*` only group frequently used code together in the exe for speed.
 They can go stale after big changes without breaking anything. `scripts/dev/hot_funcs.py` regenerates them.

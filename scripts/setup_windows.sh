@@ -25,7 +25,7 @@ tools/venv/Scripts/python.exe -m pip install -q --disable-pip-version-check \
     pycryptodome==3.24.1 tabulate==0.10.0 tqdm==4.70.1
 
 echo "== Sources"
-runtime_pin=5244db92669b54831c6d3ebb7a96d58c4dbfa6df
+runtime_pin=de4f090328ea08bef6b2f15caec0b85e343a7ece
 pin ps3recomp      sp00nznet/ps3recomp         "$runtime_pin"
 if [ "$(git -C tools/ps3recomp rev-parse HEAD)" != "$runtime_pin" ]; then
     echo "Runtime revision differs. Use the pinned runtime in a separate checkout." >&2

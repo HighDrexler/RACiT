@@ -1067,7 +1067,7 @@ def patch_file(path):
                  'func_00385E78': 1, 'func_004735E8': 1, 'func_0046DB90': 1}
     f60_load = re.compile(r'vm_read32\(ctx->gpr\[(\d+)\] \+ 0xD0\)')
     f60_any = re.compile(r'(?:vm_read32\(ctx->gpr\[\d+\] \+ 0xD0\)|racacit_frame60_at\(\(uint32_t\)ctx->gpr\[\d+\]\))')
-    f60_br = re.compile(r'^\s*if \(\(!\(\(ctx->cr >> \d+\) & 2\)\)\) goto loc_[0-9A-F]+;$')
+    f60_br = re.compile(r'^\s*if \(\(!\(\(ctx->cr >> \d+\) & [12]\)\)\) goto loc_[0-9A-F]+;$')
     for fname in (sorted(set(F60_LOADS) | set(G60_GATES)) if BUILD_TITLE == 'BCUS98124' else ()):
         sp = func_span(src, fname)
         if not sp or 'racacit_new60' in src[sp[0]:sp[2]] or 'racacit_frame60_at' in src[sp[0]:sp[2]]:
@@ -1083,7 +1083,7 @@ def patch_file(path):
                     if not f60_br.match(lines[j]):
                         continue
                     between = '\n'.join(lines[k:j])
-                    if '/_b' in between or re.search(r'& 0x[0-9A-F]+\b|ppc_rlwinm', between):
+                    if '/_b' in between or re.search(r'& 0x[0-9A-F]+\b|ppc_rlwinm|ppc_rlw64', between):
                         lines[j] = lines[j].replace(') goto ', ' || !racacit_new60()) goto ', 1)
                         lines[k] = f60_load.sub(lambda m: 'racacit_frame60_at((uint32_t)ctx->gpr[%s])' % m.group(1), lines[k])
                         gates += 1

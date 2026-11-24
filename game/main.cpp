@@ -118,6 +118,7 @@ extern int32_t g_sys_process_exit_code;
 uint8_t* vm_base = nullptr;
 extern "C" void racacit_ring_dump(void);   /* spu_channels.c: RACACIT_LINE_RING */
 extern "C" uint32_t ppu_hle_inject_base;   /* libs/video/cellGcmSys.c */
+extern "C" uint32_t sys_mapper_base;       /* runtime/syscalls/sys_memory.c */
 extern uint32_t ppu_vm_size;                  /* ppu_loader.cpp: the OOB guard */
 
 /* At a stall: the state of the game's SPU job queues, always (owner logs have
@@ -1745,6 +1746,11 @@ int main(int argc, char** argv)
         /* The lifted code is built with PPU_INL_NO_HOLE (game/CMakeLists.txt):
          * ppu_run ends its inline memory window below that page instead. */
         ppu_inl_clip_hole = 1;
+        /* The title reserves its 256 MB heap with sys_mmapper_allocate_address
+         * (256 MB aligned) and has always been given 0x20000000; the GCM IO
+         * comment above, the write-watch ranges and the prompt scans expect it
+         * there. ps3recomp v0.19 starts mapper regions at 0x40000000. */
+        sys_mapper_base = 0x20000000u;
     }
 
 #if defined(_WIN32) && defined(RACACIT_HAVE_VULKAN)

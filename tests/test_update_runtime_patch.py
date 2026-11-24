@@ -25,7 +25,7 @@ SCRIPT = ROOT / 'scripts' / 'update_runtime_patch.sh'
 # CreateProcess, which tries System32 before PATH and so starts WSL's bash.exe there.
 BASH = shutil.which('bash')
 REAL_PATCH = ROOT / 'patches' / 'ps3recomp-0001-racacit-runtime-fixes.patch'
-PIN = '5244db92669b54831c6d3ebb7a96d58c4dbfa6df'
+PIN = 'de4f090328ea08bef6b2f15caec0b85e343a7ece'
 BASE = {'a.c': 'one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\n', 'b.c': 'alpha\nbeta\ngamma\ndelta\n'}
 
 
