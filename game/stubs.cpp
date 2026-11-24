@@ -139,14 +139,30 @@ extern "C" void racacit_longjmp(uint32_t guest_buf)
 #include "../tools/ps3recomp/runtime/ppu/ppu_context.h"
 extern "C" void ps3_hle_register_ctx(uint32_t nid, const char* name, void (*fn)(ppu_context*));
 extern "C" uint8_t* vm_base;
+/* NEXUS_PYRO_ARMOR=1: the Pyro armor DLC (UP9000-NPUA80908_00-PYROARMOR0000000)
+ * as owned. The title's "NP DRM" thread (func_002C24D4, started by
+ * func_002C21E0) walks its DLC table at 0x00D90644 (34-byte records: psnpass.edat,
+ * pyroarmor.edat), asks this call for /dev_hdd0/game/<id>/USRDIR/<name> with
+ * its klicensee at 0x00D90689, and on CELL_OK sets the record's owned byte
+ * (pyroarmor: 0x00D90668). The DLC's .edat is only a 9-byte licence token;
+ * the armor is on the disc. (2026-11-23) */
+static int nexus_pyro_armor(void)
+{
+    static int on = -1;
+    if (on < 0) { const char* e = getenv("NEXUS_PYRO_ARMOR"); on = e && *e == '1'; }
+    return on;
+}
 static void nexus_npdrm_is_available(ppu_context* ctx)
 {
     uint32_t p = (uint32_t)ctx->gpr[4];
     char path[512] = {0};
     if (p) { for (int i = 0; i < 511 && vm_base[p + i]; i++) path[i] = (char)vm_base[p + i]; }
+    const char* slash = strrchr(path, '/');
+    const int pyro = nexus_pyro_armor() && slash && !strcmp(slash + 1, "pyroarmor.edat");
     static int n = 0;
-    if (n++ < 16) fprintf(stderr, "[sceNpDrm] IsAvailable('%s') -> LICENSE_NOT_FOUND\n", path);
-    ctx->gpr[3] = (uint64_t)(int64_t)(int32_t)0x80029521;   /* SCE_NP_DRM_ERROR_LICENSE_NOT_FOUND */
+    if (n++ < 16) fprintf(stderr, "[sceNpDrm] IsAvailable('%s') -> %s\n", path,
+                          pyro ? "OK (NEXUS_PYRO_ARMOR=1)" : "LICENSE_NOT_FOUND");
+    ctx->gpr[3] = pyro ? 0u : (uint64_t)(int64_t)(int32_t)0x80029521;   /* SCE_NP_DRM_ERROR_LICENSE_NOT_FOUND */
 }
 __attribute__((constructor)) static void nexus_register_npdrm(void)
 {

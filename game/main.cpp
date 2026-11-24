@@ -1646,6 +1646,21 @@ int main(int argc, char** argv)
 #endif
 
     printf("=== ps3recomp game runner ===\n");
+#ifdef _WIN32
+    /* Which build this is: the launcher's build folder carries version.txt,
+     * so a tester's log says which one they ran (2026-11-23). */
+    { char vd[MAX_PATH * 2];
+      const DWORD vn = GetModuleFileNameA(NULL, vd, sizeof vd - 16);
+      char* sl = vn ? strrchr(vd, '\\') : NULL;
+      if (sl) {
+          strcpy(sl + 1, "version.txt");
+          if (FILE* vf = fopen(vd, "r")) {
+              char v[32] = "";
+              if (fgets(v, sizeof v, vf)) { v[strcspn(v, "\r\n")] = 0; if (v[0]) printf("[nexus] build v%s\n", v); }
+              fclose(vf);
+          }
+      } }
+#endif
 
     if (!alloc_guest_vm()) {
         fprintf(stderr, "ERROR: could not allocate the guest address space\n");
