@@ -59,6 +59,8 @@
 #include "win32_compat.h"
 
 extern "C" uint8_t* vm_base;
+extern "C" volatile int g_racacit_pad_family;     /* cellPad.c: port 0 is 0 PlayStation (or none), 1 Xbox-style, 2 Nintendo Switch */
+extern "C" int racacit_pad_input_for(unsigned btn); /* cellPad.c: the controller input that presses the game's button `btn` now */
 extern "C" volatile int g_racacit_shoulder_swap; /* cellPad.c: port 0 has bumpers and triggers swapped (Settings > Controls) */
 extern "C" volatile int g_racacit_pad_layout;   /* cellPad.c racacit_pad_layout at the last poll: 0 PS3 layout, 1 PS pad swapped, 2 other pad swapped */
 extern "C" uint32_t cellGcmResolveLocated(int local, uint32_t offset);   /* cellGcmSys.c: RSX offset -> guest address */
@@ -704,18 +706,22 @@ void prompt_check(bool keyboard)
             const DesktopGlyph* g = nullptr;
             for (unsigned i = 0; i < desktop_count; i++)
                 if (desktop_glyphs[i].rec == rec && desktop_glyphs[i].page == (uint32_t)(page - vm_base)) { g = &desktop_glyphs[i]; break; }
-            if (!g) { if (keyboard) { wrong++; note("no-key-", key + 1, rec); } continue; }
-            order.push_back({g, key});
+            /* Controller names leave some glyphs as the game drew them (the sticks, the d-pad). */
+            char tl[8]; PromptStyle ts;
+            const bool drawn = keyboard && (s_prompt_mode != 2 || controller_label(key, s_prompt_family, tl, &ts));
+            if (!g) { if (drawn) { wrong++; note("no-key-", key + 1, rec); } continue; }
+            order.push_back({g, key | (drawn ? 0x100u : 0u)});
         }
     if (!keyboard) std::reverse(order.begin(), order.end());
-    for (const auto& [g, key] : order) {
-        const uint8_t* level0 = keyboard ? g->keys : g->original;
+    for (const auto& [g, keyd] : order) {
+        const unsigned key = keyd & 0xFF; const bool drawn = (keyd & 0x100) != 0;
+        const uint8_t* level0 = drawn ? g->keys : g->original;
         for (int r = 0; r < g->rows; r++)
             for (int c = 0; c < g->cols; c++) {
                 Want& w = want[g->page + (uint32_t)(g->by + r) * g->pitch + (uint32_t)(g->bx + c) * 16];
                 memcpy(w.bytes, level0 + (r * g->cols + c) * 16, 16); w.key = key; w.rec = g->rec;
             }
-        const uint8_t* smaller = keyboard ? g->mkeys : g->morig;
+        const uint8_t* smaller = drawn ? g->mkeys : g->morig;
         size_t o = 0;
         for (int m = 0; m < g->nmips; m++) {
             const DesktopMip& d = g->mip[m];
@@ -780,8 +786,8 @@ void prompt_check(bool keyboard)
         if (keyboard ? memcmp(tex, k.keys, kBadgeBytes) != 0 : !controller_art) { wrong++; note("badge", 0, k.ea); }
     }
     fprintf(stderr, "[prompt-check] %s: %d glyph tables (%d unscanned), %d glyphs, %d HUD pictures; %d showing the %s%s%c",
-            keyboard ? "keyboard" : "controller", tables, unknown, glyphs, pictures, wrong,
-            keyboard ? "controller's" : "keys", detail, 10);
+            s_prompt_mode == 2 ? (s_prompt_family == 2 ? "Switch controller" : "Xbox controller") : keyboard ? "keyboard" : "controller", tables, unknown, glyphs, pictures, wrong,
+            s_prompt_mode == 2 ? "wrong pictures" : keyboard ? "controller's" : "keys", detail, 10);
 }
 
 /* Keyboard prompts or controller glyphs. RACACIT_PROMPT_INPUT_FILE=<file>
@@ -819,7 +825,13 @@ DWORD WINAPI prompts_thread(LPVOID)
             if (next < sizeof kScanAt / sizeof kScanAt[0] && t == kScanAt[next]) { scan(); next++; } }
         static int force = -2;   /* RACACIT_PROMPT_LAYOUT=<0|1|2>: a layout for tests */
         if (force == -2) { const char* e = getenv("RACACIT_PROMPT_LAYOUT"); force = e && *e ? atoi(e) : -1; }
-        const bool keyboard = prompts_keyboard(!ms);
+        const bool kb = prompts_keyboard(!ms);
+        /* Xbox-style and Switch pads get the glyphs drawn with their own names (mode 2,
+         * desktop_prompts.h controller_label); a PlayStation pad keeps the game's pictures,
+         * with the shoulder swaps below. */
+        const int family = kb ? 0 : g_racacit_pad_family;
+        s_prompt_mode = kb ? 1 : family ? 2 : 0; s_prompt_family = family;
+        const bool keyboard = s_prompt_mode != 0;   /* drawn: the pictures replaced, as for keys */
         const int layout = keyboard ? 0 : force >= 0 ? force : g_racacit_pad_layout;
         /* R1 <-> R2 with the layout swapped (R2 fires); L1 <-> L2 only while
          * the quick select ring is open, where L2 / R2 page (cellPad.c). */
@@ -830,7 +842,7 @@ DWORD WINAPI prompts_thread(LPVOID)
         const int shoulders = !keyboard && g_racacit_shoulder_swap;
         const int want_r = (layout != 0) != shoulders,
                   want_l = (layout != 0 && (g_racacit_ctx_quickselect || force_qs)) != shoulders;
-        if (!keyboard) desktop_prompts(false);
+        if (!keyboard) desktop_prompts(0);
         int changed = 0;
         for (int i = 0; i < s_nfont; i++) {
             const int st = font_state(s_font[i]);
@@ -839,7 +851,7 @@ DWORD WINAPI prompts_thread(LPVOID)
             if (has_l != want_l) { swap_records(s_font[i], s_font[i] + 16); changed = 1; }        /* L1 <-> L2 */
             if (has_r != want_r) { swap_records(s_font[i] + 64, s_font[i] + 80); changed = 1; }   /* R1 <-> R2 */
         }
-        if (keyboard) desktop_prompts(true);
+        if (keyboard) desktop_prompts(s_prompt_mode, family);
         if (!ms) {
             /* HUD pictures: keys, or the controller's own (with the R1/L2 swaps) */
             hud_faces_sync(keyboard); hud_keys_sync(keyboard); badge_keys_sync(keyboard);

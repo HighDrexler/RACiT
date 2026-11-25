@@ -12,7 +12,11 @@ struct DesktopGlyph {
     uint8_t original[8192], keys[8192];
     int nmips; DesktopMip mip[7];
     uint8_t morig[4096], mkeys[4096];
+    char label[8]; uint8_t style[4];   /* what keys holds: its label, ink colour and shape (PromptStyle) */
 };
+/* How a drawn button looks: the label's colour, and round (a face button) or a key. */
+struct PromptStyle { uint8_t ink[3]; bool round; };
+static const PromptStyle kKeyStyle = { { 255, 255, 255 }, false };
 static DesktopGlyph desktop_glyphs[16 * 20];
 static unsigned desktop_count;
 static uint8_t desktop_letter(char ch, int row)
@@ -131,12 +135,17 @@ static void desktop_make_mips(DesktopGlyph& g, uint32_t page_ea, int width, int 
         used += bytes;
     }
 }
-static void desktop_make(DesktopGlyph& g, const char* label)
+static void desktop_make(DesktopGlyph& g, const char* label, const PromptStyle& st = kKeyStyle)
 {
     memcpy(g.keys, g.original, sizeof g.keys);
-    const int len = (int)strlen(label), letters_w = len * 6 - 1;
-    const float scale = std::min((g.w - 8.f) / letters_w, (g.h - 8.f) / 7.f);
+    snprintf(g.label, sizeof g.label, "%s", label);
+    memcpy(g.style, st.ink, 3); g.style[3] = st.round;
+    const int len = (int)strlen(label), letters_w = len > 0 ? len * 6 - 1 : 1;
+    /* A round button's label sits inside the circle: a smaller box. */
+    const float box = st.round ? 0.62f : 1.0f;
+    const float scale = std::min((g.w * box - 8.f) / letters_w, (g.h * box - 8.f) / 7.f);
     const float left = (g.w - letters_w * scale) / 2, top = (g.h - 7 * scale) / 2;
+    const float cx = g.w / 2.f, cy = g.h / 2.f, rad = std::min(g.w, g.h) / 2.f - 0.5f;
     for (int row = 0; row < g.rows; ++row) for (int col = 0; col < g.cols; ++col) {
         uint8_t pixels[16][4]; uint8_t* block = g.keys + (row * g.cols + col) * 16;
         dxt5_decode(block, pixels);
@@ -144,15 +153,17 @@ static void desktop_make(DesktopGlyph& g, const char* label)
             const int x = (g.bx + col) * 4 + i % 4 - g.x;
             const int y = (g.by + row) * 4 + i / 4 - g.y;
             if (x < 0 || x >= g.w || y < 0 || y >= g.h) continue;
-            const bool edge = x < 2 || y < 2 || x >= g.w - 2 || y >= g.h - 2;
+            const float d = std::sqrt((x + 0.5f - cx) * (x + 0.5f - cx) + (y + 0.5f - cy) * (y + 0.5f - cy));
+            if (st.round && d > rad) { pixels[i][0] = pixels[i][1] = pixels[i][2] = 0; pixels[i][3] = 0; continue; }
+            const bool edge = st.round ? d > rad - 2 : x < 2 || y < 2 || x >= g.w - 2 || y >= g.h - 2;
             bool ink = false;
             if (x >= left && y >= top) {
                 const int tx = (int)((x - left) / scale), ty = (int)((y - top) / scale);
                 if (ty < 7 && tx / 6 < len && tx % 6 < 5)
                     ink = desktop_letter(label[tx / 6], ty) & (16 >> (tx % 6));
             }
-            const uint8_t color = edge || ink ? 255 : 20;
-            pixels[i][0] = pixels[i][1] = pixels[i][2] = color; pixels[i][3] = 255;
+            for (int k = 0; k < 3; k++) pixels[i][k] = ink ? st.ink[k] : edge ? (st.round ? st.ink[k] : 255) : 20;
+            pixels[i][3] = 255;
         }
         dxt5_encode(pixels, block);
     }
@@ -217,8 +228,65 @@ static void desktop_label(unsigned key, char label[8])
     };
     desktop_binding_label(bindings[key], labels[key], label);
 }
-static void desktop_prompts(bool keyboard)
+
+/* Controller prompts for Xbox-style and Nintendo Switch pads (cellPad.c
+ * g_racacit_pad_family 1 / 2): the button glyphs drawn with that controller's
+ * own names, of whatever presses each of the game's buttons now
+ * (racacit_pad_input_for: Controller buttons, Bumpers and triggers, Fire on
+ * R2, the quick select ring). A PlayStation pad keeps the game's pictures.
+ * Inputs are SDL's: 0-20 its buttons by position (0 the bottom face button),
+ * 21 / 22 the left / right trigger. */
+static const unsigned kGlyphButton[20] = {   /* E001 + key: the game's CELL_PAD_CTRL_* bit */
+    1u << 13, 1u << 15, 1u << 14, 1u << 12, 1u << 0, 1u << 3, 1u << 10, 1u << 8, 1u << 1, 0,
+    1u << 11, 1u << 9, 1u << 2, 0, 1u << 4, 1u << 6, 1u << 7, 1u << 5, 0, 0 };
+static bool controller_input_label(int in, int family, char label[8], PromptStyle* st)
 {
+    static const char* const xbox[23] = { "A", "B", "X", "Y", "VIEW", "XBOX", "MENU", "LS", "RS", "LB", "RB",
+        "UP", "DOWN", "LEFT", "RIGHT", "SHARE", "P1", "P2", "P3", "P4", "TPAD", "LT", "RT" };
+    static const char* const sw[23] = { "B", "A", "Y", "X", "-", "HOME", "+", "LS", "RS", "L", "R",
+        "UP", "DOWN", "LEFT", "RIGHT", "CAP", "P1", "P2", "P3", "P4", "TPAD", "ZL", "ZR" };
+    if (in < 0 || in > 22) return false;
+    snprintf(label, 8, "%s", family == 2 ? sw[in] : xbox[in]);
+    *st = kKeyStyle;
+    if (in <= 3) {   /* the face buttons: round; Xbox's in their colours (A green, B red, X blue, Y yellow) */
+        static const uint8_t col[4][3] = { { 96, 190, 60 }, { 230, 70, 60 }, { 60, 140, 235 }, { 245, 195, 40 } };
+        st->round = true;
+        if (family != 2) memcpy(st->ink, col[in], 3);
+    }
+    return true;
+}
+/* Glyph E001 + `key` in the controller's names: false to leave the game's own
+ * picture (the sticks and d-pad, while they do what they show). */
+static bool controller_label(unsigned key, int family, char label[8], PromptStyle* st)
+{
+    const unsigned btn = key < 20 ? kGlyphButton[key] : 0;
+    if (!btn) return false;
+    const int in = racacit_pad_input_for(btn);
+    if (in == -2) return false;   /* the controller's buttons not read yet: the game's picture for now */
+    if (in < 0) { snprintf(label, 8, "NONE"); *st = kKeyStyle; return true; }
+    if (key >= 14 && key <= 17 && in == 11 + (int)(key - 14)) {
+        /* d-pad glyphs E00F-E012 (up, down, left, right) on SDL 11-14 (up, down, left, right) */
+        return false;
+    }
+    if ((key == 8 && in == 7) || (key == 12 && in == 8)) return false;   /* L3 / R3 on their own stick */
+    return controller_input_label(in, family, label, st);
+}
+/* mode 0: the game's own pictures, 1: keycaps (keyboard), 2: the controller's
+ * names (controller_label; `family` as g_racacit_pad_family). */
+/* The prompts' mode this tick (button_prompts.cpp sets them): 0 the game's pictures,
+ * 1 keyboard keycaps, 2 controller names of family s_prompt_family. */
+static int s_prompt_mode, s_prompt_family;
+/* Glyph E001 + `key` as the HUD pictures draw it in the mode now: the keycap
+ * label (mode 1) or the controller's name and look (mode 2). */
+static void prompt_label_for(unsigned key, char label[8], PromptStyle* st)
+{
+    *st = kKeyStyle;
+    if (s_prompt_mode == 2 && controller_label(key, s_prompt_family, label, st)) return;
+    desktop_label(key, label);
+}
+static void desktop_prompts(int mode, int family = 0)
+{
+    const bool keyboard = mode != 0;   /* "drawn": the order and creation below, as for the keys */
     /* E00F-E012: the d-pad with up, down, left or right lit; E014: the whole
      * d-pad (E013 is the grenade picture, not a button). */
     /* Smaller levels share blocks between neighbouring glyphs, and each
@@ -227,6 +295,10 @@ static void desktop_prompts(bool keyboard)
     for (int ff = 0; ff < s_nfont; ++ff) for (unsigned kk = 0; kk < 20; ++kk) {
         const int font = keyboard ? ff : s_nfont - 1 - ff;
         const unsigned key = keyboard ? kk : 19 - kk;
+        /* What this glyph should show now: drawn (with `want`) or the game's picture. */
+        char want[8] = ""; PromptStyle wst = kKeyStyle; bool draw = mode != 0;
+        if (mode == 1) desktop_label(key, want);
+        else if (mode == 2) draw = controller_label(key, family, want, &wst);
         if (key == 18) continue;
         const uint32_t rec = s_font[font] - 6 * 16 + key * 16;
         if (!readable(rec, 16) || be16(vm_base + rec) != 0xE001 + key) continue;
@@ -241,7 +313,7 @@ static void desktop_prompts(bool keyboard)
             if (desktop_glyphs[i].rec == rec && desktop_glyphs[i].page == ea && desktop_glyphs[i].pitch==pitch &&
                 desktop_glyphs[i].x==x && desktop_glyphs[i].y==y && desktop_glyphs[i].w==w && desktop_glyphs[i].h==h) { glyph = &desktop_glyphs[i]; break; }
         if (!glyph) {
-            if (!keyboard || desktop_count == sizeof desktop_glyphs / sizeof *desktop_glyphs) continue;
+            if (!draw || desktop_count == sizeof desktop_glyphs / sizeof *desktop_glyphs) continue;
             glyph = &desktop_glyphs[desktop_count++];
             *glyph = {};
             glyph->rec = rec; glyph->page = ea; glyph->pitch = pitch;
@@ -254,17 +326,31 @@ static void desktop_prompts(bool keyboard)
                 !readable(ea + glyph->by * pitch + glyph->bx * 16,
                           (glyph->rows - 1) * pitch + glyph->cols * 16)) { --desktop_count; continue; }
             desktop_blocks(*glyph, glyph->original, false);
-            char label[8];
-            desktop_label(key, label);
-            desktop_make(*glyph, label);
+            desktop_make(*glyph, want, wst);
             desktop_make_mips(*glyph, ea, width, height, levels);
-            fprintf(stderr, "[prompts] desktop glyph E%03X: %s (%d smaller levels of %d)\n", key + 1, label, glyph->nmips, levels);
+            fprintf(stderr, "[prompts] desktop glyph E%03X: %s (%d smaller levels of %d)\n", key + 1, want, glyph->nmips, levels);
         }
         uint8_t present[8192]; desktop_blocks(*glyph, present, false);
         const size_t bytes = (size_t)glyph->cols * glyph->rows * 16;
-        if (!memcmp(present, keyboard ? glyph->original : glyph->keys, bytes)) {
-            desktop_blocks(*glyph, keyboard ? glyph->keys : glyph->original, true);
-            desktop_mip_blocks(*glyph, keyboard ? glyph->mkeys : glyph->morig, nullptr, true);
+        const bool showing_keys = !memcmp(present, glyph->keys, bytes), showing_orig = !memcmp(present, glyph->original, bytes);
+        if (draw && (strcmp(glyph->label, want) || memcmp(glyph->style, wst.ink, 3) || glyph->style[3] != wst.round)) {
+            /* Another label now (a controller in place of the keyboard, a remap, Fire on R2 in
+             * the quick select ring): the game's picture back first, then the new one made
+             * from it. The smaller levels keep the originals saved when the glyph was found. */
+            if (showing_keys) { desktop_blocks(*glyph, glyph->original, true); desktop_mip_blocks(*glyph, glyph->morig, nullptr, true); }
+            else if (!showing_orig) continue;   /* neither: the memory is something else now */
+            static uint8_t morig[4096]; memcpy(morig, glyph->morig, sizeof morig);
+            desktop_make(*glyph, want, wst);
+            desktop_make_mips(*glyph, ea, width, height, levels);
+            memcpy(glyph->morig, morig, sizeof morig);
+            fprintf(stderr, "[prompts] desktop glyph E%03X: now %s%c", key + 1, want, 10);
+            desktop_blocks(*glyph, glyph->keys, true);
+            desktop_mip_blocks(*glyph, glyph->mkeys, nullptr, true);
+            continue;
+        }
+        if (draw ? showing_orig : showing_keys) {
+            desktop_blocks(*glyph, draw ? glyph->keys : glyph->original, true);
+            desktop_mip_blocks(*glyph, draw ? glyph->mkeys : glyph->morig, nullptr, true);
         }
     }
 }
@@ -273,14 +359,16 @@ static void desktop_prompts(bool keyboard)
  * A key drawn into an RGBA picture of any size: a rounded dark key with a
  * light rim, the label in the bitmap alphabet above, centred and as large as
  * fits. 4x4 samples per pixel for smooth edges. Alpha 0 outside the key. */
-static void keycap_rgba(int w, int h, const char* label, uint8_t* rgba)
+static void keycap_rgba(int w, int h, const char* label, uint8_t* rgba, const PromptStyle& st = kKeyStyle)
 {
     const int len = (int)strlen(label), letters_w = len > 0 ? len * 6 - 1 : 1;
     const float m = std::max(1.0f, std::min(w, h) * 0.04f);       /* margin round the key */
     const float x0 = m, y0 = m, x1 = w - m, y1 = h - m;
-    const float r = std::min(x1 - x0, y1 - y0) * 0.22f;             /* corner radius */
+    /* corner radius: a round button (PromptStyle) is a circle as wide as the picture is tall */
+    const float r = st.round ? std::min(x1 - x0, y1 - y0) * 0.5f : std::min(x1 - x0, y1 - y0) * 0.22f;
     const float rim = std::max(1.0f, std::min(w, h) * 0.06f);
-    const float tw = (x1 - x0) - 2 * rim - 2 * std::max(1.0f, w * 0.06f), th = (y1 - y0) - 2 * rim - 2 * std::max(1.0f, h * 0.12f);
+    float tw = (x1 - x0) - 2 * rim - 2 * std::max(1.0f, w * 0.06f), th = (y1 - y0) - 2 * rim - 2 * std::max(1.0f, h * 0.12f);
+    if (st.round) { tw *= 0.7f; th *= 0.7f; }
     const float scale = std::max(0.5f, std::min(tw / letters_w, th / 7.0f));
     const float lx = (w - letters_w * scale) / 2, ly = (h - 7 * scale) / 2;
     auto inside = [&](float x, float y, float inset) {
@@ -292,7 +380,7 @@ static void keycap_rgba(int w, int h, const char* label, uint8_t* rgba)
     };
     for (int y = 0; y < h; y++)
         for (int x = 0; x < w; x++) {
-            float a = 0, lum = 0;
+            float a = 0, lum[3] = {0, 0, 0};
             for (int s = 0; s < 16; s++) {
                 const float sx = x + (s % 4 + 0.5f) / 4, sy = y + (s / 4 + 0.5f) / 4;
                 if (!inside(sx, sy, 0)) continue;
@@ -302,10 +390,10 @@ static void keycap_rgba(int w, int h, const char* label, uint8_t* rgba)
                     const int tx = (int)((sx - lx) / scale), ty = (int)((sy - ly) / scale);
                     if (ty < 7 && tx / 6 < len && tx % 6 < 5) ink = desktop_letter(label[tx / 6], ty) & (16 >> (tx % 6));
                 }
-                lum += ink ? 245 : 28;
+                for (int k = 0; k < 3; k++) lum[k] += ink ? (st.ink[k] < 245 ? st.ink[k] : 245) : 28;
             }
             uint8_t* p = rgba + 4 * (y * w + x);
-            const uint8_t v = a ? (uint8_t)(lum / a) : 0;
-            p[0] = p[1] = p[2] = v; p[3] = (uint8_t)(a * 255 / 16);
+            for (int k = 0; k < 3; k++) p[k] = a ? (uint8_t)(lum[k] / a) : 0;
+            p[3] = (uint8_t)(a * 255 / 16);
         }
 }

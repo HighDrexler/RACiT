@@ -160,7 +160,10 @@ struct HudFace {
     uint32_t entry, ea;
     uint8_t  orig[kFaceBytes], mine[kFaceBytes];
     int      have;          /* orig/mine hold this picture */
+    char     label[8]; uint8_t style[4];   /* what mine shows */
+    int      key;           /* its glyph, E001 + key */
 };
+static int face_key_of(const HudFace& f) { return f.label[0] ? f.key : -1; }
 HudFace s_face[8];
 int s_nface;
 
@@ -205,6 +208,16 @@ static void hud_faces_sync(bool keyboard)
             fprintf(stderr, "[prompts] HUD face picture at %08X: changed, left alone until the next scan%c", f.ea, 10);
             f.ea = 0; f.have = 0; continue;
         }
+        if (keyboard && f.have && f.label[0]) {
+            /* Shows another label than wanted now (keys <-> controller, a remap): the game's
+             * picture back, and the key is made again from it on the next pass. */
+            const int key = face_key_of(f);
+            char want[8]; PromptStyle st; prompt_label_for((unsigned)key, want, &st);
+            if (key >= 0 && (strcmp(want, f.label) || memcmp(st.ink, f.style, 3) || st.round != f.style[3])) {
+                if (is_mine) hud_write_checked(f.entry, 0, f.ea, f.mine, f.orig, kFaceBytes);
+                f.have = 0; continue;
+            }
+        }
         if (!is_mine && !is_orig) {
             if (!keyboard) continue;    /* made on first need, from the game's own picture */
             /* Work from a copy taken now: hud_write_checked then writes only if
@@ -215,8 +228,9 @@ static void hud_faces_sync(bool keyboard)
             dxt5_to_rgba(snap, kFacePitch, kFaceCols, kFaceCols, a);
             const int key = face_key(a, kFaceW, kFaceW);
             if (key < 0) { fprintf(stderr, "[prompts] HUD face picture at %08X: not a face button, left alone%c", f.ea, 10); f.ea = 0; continue; }
-            char label[8]; desktop_label((unsigned)key, label);
-            keycap_rgba(kFaceW, kFaceW, label, b);
+            char label[8]; PromptStyle st; prompt_label_for((unsigned)key, label, &st);
+            keycap_rgba(kFaceW, kFaceW, label, b, st);
+            snprintf(f.label, sizeof f.label, "%s", label); memcpy(f.style, st.ink, 3); f.style[3] = st.round; f.key = key;
             memcpy(f.orig, snap, kFaceBytes);
             rgba_to_dxt5(b, kFaceCols, kFaceCols, kFacePitch, 0, kFaceCols, f.orig, f.mine);
             dxt5_to_rgba(f.mine, kFacePitch, kFaceCols, kFaceCols, b);
@@ -284,7 +298,15 @@ struct {
     uint32_t ea;
     uint8_t  before[kHudRows * kHudPitch], keys[kHudRows * kHudPitch];
     int      have;
+    char     labels[24];    /* what keys shows: its two labels and looks */
 } s_hudkb;
+/* The tether picture's two labels and their looks in the prompts' mode now, as one string to compare. */
+static void hud_tether_labels(char r2[8], PromptStyle* r2s, char sq[8], PromptStyle* sqs, char all[24])
+{
+    prompt_label_for(11, r2, r2s);   /* R2 */
+    prompt_label_for(1, sq, sqs);    /* SQUARE */
+    snprintf(all, 24, "%s/%d%d%d%d/%s/%d", r2, r2s->ink[0], r2s->ink[1], r2s->round, sqs->round, sq, sqs->ink[0]);
+}
 
 static void hud_keys_sync(bool keyboard)
 {
@@ -321,6 +343,13 @@ static void hud_keys_sync(bool keyboard)
             fprintf(stderr, "[prompts] HUD picture \"R2 + square\" at %08X: put back%c", s_hud.ea, 10);
         return;
     }
+    char r2[8], sq[8], all[24]; PromptStyle r2s, sqs;
+    hud_tether_labels(r2, &r2s, sq, &sqs, all);
+    if (is_keys && strcmp(all, s_hudkb.labels)) {
+        /* Other labels now: the picture as it was back, keyed again on the next pass. */
+        hud_write_checked(s_hud.entry, 0, s_hud.ea, s_hudkb.keys, s_hudkb.before, bytes);
+        s_hudkb.have = 0; return;
+    }
     if (is_keys) return;
     /* Identify, key and check against one copy taken now, so a new occupant
      * that arrives meanwhile fails hud_write_checked's compare. */
@@ -344,12 +373,10 @@ static void hud_keys_sync(bool keyboard)
     dxt5_to_rgba(snap, kHudPitch, cols, kHudRows, a);
     memcpy(b, a, sizeof b);
     static uint8_t key[kKeyW * kKeyH * 4];
-    char label[8];
-    desktop_label(11, label);           /* R2 */
-    keycap_rgba(kKeyW, kKeyH, label, key);
+    keycap_rgba(kKeyW, kKeyH, r2, key, r2s);       /* R2 */
     for (int y = 0; y < kKeyH; y++) memcpy(b + 4 * (y * w), key + 4 * (y * kKeyW), 4 * kKeyW);
-    desktop_label(1, label);            /* SQUARE */
-    keycap_rgba(kFaceW, kKeyH, label, key);
+    keycap_rgba(kFaceW, kKeyH, sq, key, sqs);      /* SQUARE */
+    snprintf(s_hudkb.labels, sizeof s_hudkb.labels, "%s", all);
     const int sx = kHudW - kFaceW;
     for (int y = 0; y < kKeyH; y++) memcpy(b + 4 * (y * w + sx), key + 4 * (y * kFaceW), 4 * kFaceW);
     rgba_to_dxt5(b, cols, kHudRows, kHudPitch, 0, (kHudW + 3) / 4, s_hudkb.before, s_hudkb.keys);
@@ -370,7 +397,18 @@ static void hud_keys_sync(bool keyboard)
 /* The quick select badges with keys: "L1" -> the previous-ring key, "R1" -> the next-ring key.
  * The badge's letter tells which: an "R" has ink in the upper right of its
  * box, an "L" none. */
-struct { uint32_t ea; uint8_t before[kBadgeBytes], keys[kBadgeBytes]; int have; } s_badgekb[2];
+struct { uint32_t ea; uint8_t before[kBadgeBytes], keys[kBadgeBytes]; int have; unsigned key; char label[16]; } s_badgekb[2];
+/* A ring badge's label in the prompts' mode now (`key` 10 R1, 6 L1), and its look. The keys
+ * that page the ring while it is open: QS_NEXT_RING / QS_PREV_RING (R / T), or on a
+ * controller what presses the game's R1 / L1. */
+static void badge_label(unsigned key, char label[8], PromptStyle* st, char all[16])
+{
+    *st = kKeyStyle;
+    if (s_prompt_mode == 2) prompt_label_for(key, label, st);
+    else if (key == 10) desktop_binding_label("QS_NEXT_RING", "T", label);
+    else desktop_binding_label("QS_PREV_RING", "R", label);
+    snprintf(all, 16, "%s/%d%d", label, st->ink[0], st->round);
+}
 
 static void badge_keys_sync(bool keyboard)
 {
@@ -395,7 +433,11 @@ static void badge_keys_sync(bool keyboard)
                 fprintf(stderr, "[prompts] quick select badge at %08X: put back%c", bd.ea, 10);
             continue;
         }
-        if (is_keys) continue;
+        if (is_keys) {
+            char l[8], all[16]; PromptStyle st; badge_label(k.key, l, &st, all);
+            if (strcmp(all, k.label) && hud_write_checked(bd.entry, 1, bd.ea, k.keys, k.before, kBadgeBytes)) k.have = 0;   /* keyed again next pass */
+            continue;
+        }
         static uint8_t snap[kBadgeBytes];   /* identified, keyed and checked as one copy */
         memcpy(snap, tex, kBadgeBytes);
         static uint8_t a[kBadgeW * kBadgeH * 4], b[kBadgeW * kBadgeH * 4];
@@ -415,10 +457,9 @@ static void badge_keys_sync(bool keyboard)
          * don't (left click is the previous ring), so the badge shows the keys
          * that do: QS_PREV_RING / QS_NEXT_RING, R / T by default. */
         const unsigned key = ur > 0 ? 10 : 6;   /* E00B R1 / E007 L1 */
-        char label[8];
-        if (key == 10) desktop_binding_label("QS_NEXT_RING", "T", label);
-        else desktop_binding_label("QS_PREV_RING", "R", label);
-        keycap_rgba(kBadgeW, kBadgeH, label, b);
+        char label[8], all[16]; PromptStyle st; badge_label(key, label, &st, all);
+        keycap_rgba(kBadgeW, kBadgeH, label, b, st);
+        k.key = key; snprintf(k.label, sizeof k.label, "%s", all);
         memcpy(k.before, snap, kBadgeBytes);
         rgba_to_dxt5(b, kBadgeW / 4, kBadgeH / 4, kBadgePitch, 0, kBadgeW / 4, k.before, k.keys);
         if (!k.have) {
