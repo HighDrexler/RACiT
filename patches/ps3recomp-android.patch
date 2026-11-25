@@ -68904,7 +68904,7 @@ index 9d717ac..28f338c 100644
      const u8* ucode, u32 max_bytes, u32 vtex_mask, u32 input_mask,
      char* out, u32 out_size);
 diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
-index e2687b7..ff0bc8d 100644
+index e2687b7..6fd25a0 100644
 --- a/libs/video/rsx_vulkan_backend.c
 +++ b/libs/video/rsx_vulkan_backend.c
 @@ -38,10 +38,16 @@
@@ -69073,9 +69073,14 @@ index e2687b7..ff0bc8d 100644
      vk_image         tex[RSX_MAX_TEXTURES];   /* decoded guest textures  */
      int              tex_ready[RSX_MAX_TEXTURES];
      /* Guest path only: each unit's sampler, built from its wrap, filter and
-@@ -203,6 +265,8 @@ typedef struct vk_state {
-     VkImage          sc_images[8];
-     VkSemaphore      sc_done[8];      /* per image: the present waits on it */
+@@ -200,9 +262,11 @@ typedef struct vk_state {
+     VkSwapchainKHR   swapchain;
+     VkExtent2D       sc_extent;
+     u32              sc_count;
+-    VkImage          sc_images[8];
+-    VkSemaphore      sc_done[8];      /* per image: the present waits on it */
++    VkImage*         sc_images;
++    VkSemaphore*     sc_done;       /* per image: the present waits on it */
      VkSemaphore      sem_acquire;
 +    VkFence          acquire_done;  /* sync path: acquire completion on abort */
 +    int              acquire_pending;
@@ -70860,7 +70865,7 @@ index e2687b7..ff0bc8d 100644
      /* Whole target, as the null backend's ndc_to_px maps it. */
      VkViewport vp = { 0.0f, 0.0f, (float)s_vk.width, (float)s_vk.height, 0.0f, 1.0f };
      VkRect2D sc = { { 0, 0 }, { s_vk.width, s_vk.height } };
-@@ -1578,11 +3045,50 @@ static int vk_env_on(const char* name)
+@@ -1578,46 +3045,124 @@ static int vk_env_on(const char* name)
      return v && v[0] && v[0] != '0';
  }
  
@@ -70902,16 +70907,36 @@ index e2687b7..ff0bc8d 100644
 +    return 0;
 +}
 +
++/* Presentation has stopped using these images and semaphores. */
++static void vk_destroy_swapchain(void)
++{
++    for (u32 i = 0; i < s_vk.sc_count; i++)
++        pvkDestroySemaphore(s_vk.device, s_vk.sc_done[i], NULL);
++    free(s_vk.sc_done);
++    free(s_vk.sc_images);
++    s_vk.sc_done = NULL;
++    s_vk.sc_images = NULL;
++    s_vk.sc_count = 0;
++    if (s_vk.swapchain && pvkDestroySwapchainKHR)
++        pvkDestroySwapchainKHR(s_vk.device, s_vk.swapchain, NULL);
++    s_vk.swapchain = VK_NULL_HANDLE;
++}
++
  static void vk_window_drop(const char* why)
  {
      if (why) VK_LOG("window disabled, continuing headless: %s\n", why);
      if (s_vk.device && pvkDeviceWaitIdle) {
          pvkDeviceWaitIdle(s_vk.device);
+-        for (u32 i = 0; i < 8; i++)
+-            if (s_vk.sc_done[i]) {
+-                pvkDestroySemaphore(s_vk.device, s_vk.sc_done[i], NULL);
+-                s_vk.sc_done[i] = VK_NULL_HANDLE;
+-            }
 +        if (vk_present_drop_acquire()) return;
-         for (u32 i = 0; i < 8; i++)
-             if (s_vk.sc_done[i]) {
-                 pvkDestroySemaphore(s_vk.device, s_vk.sc_done[i], NULL);
-@@ -1594,8 +3100,14 @@ static void vk_window_drop(const char* why)
++        vk_destroy_swapchain();
+         if (s_vk.sem_acquire) pvkDestroySemaphore(s_vk.device, s_vk.sem_acquire, NULL);
+-        if (s_vk.swapchain && pvkDestroySwapchainKHR)
+-            pvkDestroySwapchainKHR(s_vk.device, s_vk.swapchain, NULL);
      }
      if (s_vk.surface && s_vk.instance && pvkDestroySurfaceKHR)
          pvkDestroySurfaceKHR(s_vk.instance, s_vk.surface, NULL);
@@ -70926,7 +70951,13 @@ index e2687b7..ff0bc8d 100644
          SDL_QuitSubSystem(SDL_INIT_VIDEO);
      }
      s_vk.window = NULL;
-@@ -1609,15 +3121,41 @@ static void vk_window_drop(const char* why)
+     s_vk.surface = VK_NULL_HANDLE;
+-    s_vk.swapchain = VK_NULL_HANDLE;
+     s_vk.sem_acquire = VK_NULL_HANDLE;
+-    s_vk.sc_count = 0;
+     s_vk.windowed = 0;
+ }
+ 
  static void vk_window_open(const char* title)
  {
      if (!vk_env_on("PS3RECOMP_VK_WINDOW")) return;
@@ -70969,7 +71000,7 @@ index e2687b7..ff0bc8d 100644
      s_vk.windowed = 1;          /* so vk_window_drop also shuts SDL video down */
      if (!s_vk.window) {
          char why[256];
-@@ -1625,6 +3163,9 @@ static void vk_window_open(const char* title)
+@@ -1625,6 +3170,9 @@ static void vk_window_open(const char* title)
          vk_window_drop(why);
          return;
      }
@@ -70979,15 +71010,40 @@ index e2687b7..ff0bc8d 100644
      unsigned n = 0;
      if (!SDL_Vulkan_GetInstanceExtensions(s_vk.window, &n, NULL) || n == 0 || n > 16 ||
          !SDL_Vulkan_GetInstanceExtensions(s_vk.window, &n, s_vk.inst_exts)) {
-@@ -1640,6 +3181,7 @@ static void vk_window_open(const char* title)
+@@ -1640,6 +3188,32 @@ static void vk_window_open(const char* title)
             SDL_GetCurrentVideoDriver(), n);
  }
  
 +static VkPresentModeKHR vk_pick_present_mode(void);
++static int vk_create_swapchain_images(void)
++{
++    u32 n = 0;
++    VK_CHECK(pvkGetSwapchainImagesKHR(s_vk.device, s_vk.swapchain, &n, NULL),
++             "vkGetSwapchainImagesKHR");
++    if (!n) { VK_LOG("swapchain returned no images\n"); return -1; }
++    /* The implementation may supply more than the requested minimum. */
++    s_vk.sc_images = calloc(n, sizeof(*s_vk.sc_images));
++    s_vk.sc_done = calloc(n, sizeof(*s_vk.sc_done));
++    if (!s_vk.sc_images || !s_vk.sc_done) {
++        VK_LOG("could not allocate state for %u swapchain images\n", n);
++        return -1;
++    }
++    VK_CHECK(pvkGetSwapchainImagesKHR(s_vk.device, s_vk.swapchain, &n, s_vk.sc_images),
++             "vkGetSwapchainImagesKHR");
++
++    VkSemaphoreCreateInfo semi = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
++    for (u32 i = 0; i < n; i++) {
++        VK_CHECK(pvkCreateSemaphore(s_vk.device, &semi, NULL, &s_vk.sc_done[i]),
++                 "vkCreateSemaphore");
++        s_vk.sc_count++;
++    }
++    return 0;
++}
++
  static int vk_create_swapchain(void)
  {
      VkSurfaceCapabilitiesKHR caps;
-@@ -1675,6 +3217,22 @@ static int vk_create_swapchain(void)
+@@ -1675,6 +3249,22 @@ static int vk_create_swapchain(void)
      }
  
      VkExtent2D ext = caps.currentExtent;
@@ -71010,7 +71066,7 @@ index e2687b7..ff0bc8d 100644
      if (ext.width == 0xFFFFFFFFu) {
          int w = 0, hh = 0;
          SDL_Vulkan_GetDrawableSize(s_vk.window, &w, &hh);
-@@ -1684,7 +3242,15 @@ static int vk_create_swapchain(void)
+@@ -1684,7 +3274,15 @@ static int vk_create_swapchain(void)
          if (ext.width  > caps.maxImageExtent.width)  ext.width  = caps.maxImageExtent.width;
          if (ext.height > caps.maxImageExtent.height) ext.height = caps.maxImageExtent.height;
      }
@@ -71027,7 +71083,7 @@ index e2687b7..ff0bc8d 100644
  
      u32 count = caps.minImageCount + 1;
      if (caps.maxImageCount && count > caps.maxImageCount) count = caps.maxImageCount;
-@@ -1697,6 +3263,14 @@ static int vk_create_swapchain(void)
+@@ -1697,6 +3295,14 @@ static int vk_create_swapchain(void)
      for (size_t k = 0; k < 4; k++)
          if (caps.supportedCompositeAlpha & alphas[k]) { alpha = alphas[k]; break; }
  
@@ -71042,7 +71098,7 @@ index e2687b7..ff0bc8d 100644
      VkSwapchainKHR old = s_vk.swapchain;
      VkSwapchainCreateInfoKHR sci = {
          .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
-@@ -1705,8 +3279,8 @@ static int vk_create_swapchain(void)
+@@ -1705,947 +3311,4135 @@ static int vk_create_swapchain(void)
          .imageExtent = ext, .imageArrayLayers = 1,
          .imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT,
          .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
@@ -71053,10 +71109,25 @@ index e2687b7..ff0bc8d 100644
          .clipped = VK_TRUE, .oldSwapchain = old,
      };
      VkSwapchainKHR sc = VK_NULL_HANDLE;
-@@ -1736,26 +3310,774 @@ static int vk_create_swapchain(void)
-     return 0;
- }
+     VkResult r = pvkCreateSwapchainKHR(s_vk.device, &sci, NULL, &sc);
+-    if (old) pvkDestroySwapchainKHR(s_vk.device, old, NULL);
+-    s_vk.swapchain = VK_NULL_HANDLE;
++    vk_destroy_swapchain();
+     if (r != VK_SUCCESS) { VK_LOG("vkCreateSwapchainKHR failed (VkResult %d)\n", (int)r); return -1; }
+     s_vk.swapchain = sc;
++    if (vk_create_swapchain_images()) {
++        vk_destroy_swapchain();
++        return -1;
++    }
++    s_vk.sc_extent = ext;
++    VK_LOG("window swapchain %ux%u, %u images, format %d\n", ext.width, ext.height, s_vk.sc_count, (int)fmt.format);
++    return 0;
++}
  
+-    u32 n = 0;
+-    VK_CHECK(pvkGetSwapchainImagesKHR(s_vk.device, sc, &n, NULL), "vkGetSwapchainImagesKHR");
+-    if (n == 0 || n > 8) { VK_LOG("unsupported swapchain image count %u\n", n); return -1; }
+-    VK_CHECK(pvkGetSwapchainImagesKHR(s_vk.device, sc, &n, s_vk.sc_images), "vkGetSwapchainImagesKHR");
 +/* Set while the window has no drawable area (minimised). Dropping the window
 + * for that left the title headless for the rest of the session: minimise once
 + * and the picture never came back, while the game and its audio ran on. */
@@ -71077,17 +71148,11 @@ index e2687b7..ff0bc8d 100644
 +static void vk_android_defer_surface(const char* why)
 +{
 +    if (vk_present_drop_acquire()) return;
-+    for (u32 i = 0; i < 8; i++) {
-+        if (s_vk.sc_done[i]) pvkDestroySemaphore(s_vk.device, s_vk.sc_done[i], NULL);
-+        s_vk.sc_done[i] = VK_NULL_HANDLE;
-+    }
++    vk_destroy_swapchain();
 +    if (s_vk.sem_acquire) pvkDestroySemaphore(s_vk.device, s_vk.sem_acquire, NULL);
-+    if (s_vk.swapchain) pvkDestroySwapchainKHR(s_vk.device, s_vk.swapchain, NULL);
 +    if (s_vk.surface) pvkDestroySurfaceKHR(s_vk.instance, s_vk.surface, NULL);
 +    s_vk.sem_acquire = VK_NULL_HANDLE;
-+    s_vk.swapchain = VK_NULL_HANDLE;
 +    s_vk.surface = VK_NULL_HANDLE;
-+    s_vk.sc_count = 0;
 +    s_android_surface_pending = 1;
 +    s_vk_win_minimized = 1;
 +    s_android_surface_retry_at = SDL_GetTicks64() + 250u;
@@ -71095,7 +71160,11 @@ index e2687b7..ff0bc8d 100644
 +    if (n <= 3u || !(n & (n - 1u)))
 +        VK_LOG("Android presentation waiting for surface (%u): %s\n", n, why);
 +}
-+
+ 
+-    for (u32 i = 0; i < 8; i++)
+-        if (s_vk.sc_done[i]) {
+-            pvkDestroySemaphore(s_vk.device, s_vk.sc_done[i], NULL);
+-            s_vk.sc_done[i] = VK_NULL_HANDLE;
 +static int vk_android_restore_surface(void)
 +{
 +    if (SDL_AtomicGet(&s_present_fatal)) return 0;
@@ -71117,7 +71186,10 @@ index e2687b7..ff0bc8d 100644
 +        if (pvkCreateSemaphore(s_vk.device, &ci, NULL, &s_vk.sem_acquire) != VK_SUCCESS) {
 +            vk_android_defer_surface("acquire semaphore creation failed");
 +            return 0;
-+        }
+         }
+-    VkSemaphoreCreateInfo semi = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
+-    for (u32 i = 0; i < n; i++)
+-        VK_CHECK(pvkCreateSemaphore(s_vk.device, &semi, NULL, &s_vk.sc_done[i]), "vkCreateSemaphore");
 +    }
 +    const int r = vk_create_swapchain();
 +    if (r == 1) { /* Surface exists, but has no drawable area yet. */
@@ -71135,7 +71207,11 @@ index e2687b7..ff0bc8d 100644
 +    return 1;
 +}
 +#endif
-+
+ 
+-    s_vk.sc_extent = ext;
+-    s_vk.sc_count = n;
+-    VK_LOG("window swapchain %ux%u, %u images, format %d\n", ext.width, ext.height, n, (int)fmt.format);
+-    return 0;
 +/* Rebuild the swapchain; a 0x0 surface parks the window instead of losing it. */
 +static void vk_swapchain_rebuild(void)
 +{
@@ -71155,50 +71231,118 @@ index e2687b7..ff0bc8d 100644
 +    }
 +    if (s_vk_win_minimized) VK_LOG("window restored -- presenting resumed\n");
 +    s_vk_win_minimized = 0;
-+}
-+
+ }
+ 
  static void vk_swapchain_lost(void)
  {
      pvkDeviceWaitIdle(s_vk.device);
 -    if (vk_create_swapchain()) vk_window_drop("the swapchain could not be recreated");
 +    vk_swapchain_rebuild();
-+}
-+
+ }
+ 
+-/* Blit the offscreen target into the next swapchain image and present it. */
+-static void vk_present_window(void)
 +/* The window behind the surface went away (Android destroys the native
 + * window when the app is backgrounded and makes a new one on resume):
 + * rebuild the surface itself, then the swapchain on it. */
 +static void vk_surface_lost(void)
-+{
+ {
+-    if (!s_vk.windowed || !s_vk.swapchain) return;
+-
+-    u32 idx = 0;
+-    VkResult r = pvkAcquireNextImageKHR(s_vk.device, s_vk.swapchain, UINT64_MAX,
+-                                        s_vk.sem_acquire, VK_NULL_HANDLE, &idx);
+-    if (r == VK_ERROR_OUT_OF_DATE_KHR) { vk_swapchain_lost(); return; }
+-    if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) {
+-        VK_LOG("vkAcquireNextImageKHR failed (VkResult %d)\n", (int)r); return;
 +    pvkDeviceWaitIdle(s_vk.device);
 +#ifdef __ANDROID__
 +    vk_android_defer_surface("native surface changed or was lost");
 +    s_android_surface_retry_at = 0; /* Retry immediately once foregrounded. */
 +#else
-+    if (s_vk.swapchain) { pvkDestroySwapchainKHR(s_vk.device, s_vk.swapchain, NULL); s_vk.swapchain = VK_NULL_HANDLE; }
++    vk_destroy_swapchain();
 +    if (s_vk.surface) { pvkDestroySurfaceKHR(s_vk.instance, s_vk.surface, NULL); s_vk.surface = VK_NULL_HANDLE; }
 +    if (!SDL_Vulkan_CreateSurface(s_vk.window, s_vk.instance, &s_vk.surface)) {
 +        char why[256];
 +        snprintf(why, sizeof why, "SDL_Vulkan_CreateSurface (after surface loss) failed: %s", SDL_GetError());
 +        vk_window_drop(why);
 +        return;
-+    }
+     }
+-
+-    if (vk_begin()) return;
+-    vk_barrier_image(s_vk.color.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
+-    VkImageMemoryBarrier b = {
+-        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+-        .srcAccessMask = 0, .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+-        .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED, .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+-        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+-        .image = s_vk.sc_images[idx], .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
+-    };
+-    pvkCmdPipelineBarrier(s_vk.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+-                          0, 0, NULL, 0, NULL, 1, &b);
+-    VkImageBlit blit = {
+-        .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+-        .srcOffsets = { { 0, 0, 0 }, { (int32_t)s_vk.width, (int32_t)s_vk.height, 1 } },
+-        .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+-        .dstOffsets = { { 0, 0, 0 },
+-                        { (int32_t)s_vk.sc_extent.width, (int32_t)s_vk.sc_extent.height, 1 } },
+-    };
+-    pvkCmdBlitImage(s_vk.cmd, s_vk.color.img, VK_IMAGE_LAYOUT_GENERAL,
+-                    s_vk.sc_images[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+-                    1, &blit, VK_FILTER_LINEAR);
+-    b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+-    b.dstAccessMask = 0;
+-    b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+-    b.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+-    pvkCmdPipelineBarrier(s_vk.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+-                          0, 0, NULL, 0, NULL, 1, &b);
+-    if (pvkEndCommandBuffer(s_vk.cmd) != VK_SUCCESS) { VK_LOG("vkEndCommandBuffer failed\n"); return; }
+-
+-    VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+-    VkSubmitInfo si = {
+-        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+-        .waitSemaphoreCount = 1, .pWaitSemaphores = &s_vk.sem_acquire,
+-        .pWaitDstStageMask = &wait_stage,
+-        .commandBufferCount = 1, .pCommandBuffers = &s_vk.cmd,
+-        .signalSemaphoreCount = 1, .pSignalSemaphores = &s_vk.sc_done[idx],
+-    };
+-    pvkResetFences(s_vk.device, 1, &s_vk.fence);
+-    if (pvkQueueSubmit(s_vk.queue, 1, &si, s_vk.fence) != VK_SUCCESS) {
+-        VK_LOG("vkQueueSubmit (window) failed\n"); return;
 +    VkBool32 ok = VK_FALSE;
 +    if (pvkGetPhysicalDeviceSurfaceSupportKHR(s_vk.phys, s_vk.queue_family, s_vk.surface, &ok) != VK_SUCCESS || !ok) {
 +        vk_window_drop("the recreated surface cannot be presented from the graphics queue");
 +        return;
-+    }
+     }
+-    pvkWaitForFences(s_vk.device, 1, &s_vk.fence, VK_TRUE, UINT64_MAX);
+-
+-    VkPresentInfoKHR pi = {
+-        .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+-        .waitSemaphoreCount = 1, .pWaitSemaphores = &s_vk.sc_done[idx],
+-        .swapchainCount = 1, .pSwapchains = &s_vk.swapchain, .pImageIndices = &idx,
+-    };
+-    r = pvkQueuePresentKHR(s_vk.queue, &pi);
+-    if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) vk_swapchain_lost();
+-    else if (r != VK_SUCCESS) VK_LOG("vkQueuePresentKHR failed (VkResult %d)\n", (int)r);
 +    VK_LOG("window surface recreated\n");
 +    vk_swapchain_rebuild();
 +#endif
-+}
-+
+ }
+ 
+-static void vk_dump_ppm(const unsigned char* rgba)
 +/* If presentation fails before submission, the acquire signal may still be
 + * pending outside our queue. Its own fence makes completion explicit: after
 + * this wait, retiring its semaphore is safe without another queue submission
 + * (which could also fail under allocation pressure). Normal frames check this
 + * fence only when the completed submission slot is reused. */
 +static void vk_present_abandon(VkFence acquire_done, int* acquire_pending)
-+{
+ {
+-    FILE* f = fopen(s_vk.dump_path, "wb");
+-    if (!f) { VK_LOG("cannot open %s for the frame dump\n", s_vk.dump_path); return; }
+-    fprintf(f, "P6\n%u %u\n255\n", s_vk.width, s_vk.height);
+-    for (size_t i = 0; i < (size_t)s_vk.width * s_vk.height; i++)
+-        fwrite(rgba + i * 4, 1, 3, f);
+-    fclose(f);
 +    if (vk_present_wait_acquire(acquire_done, acquire_pending)) return;
 +    pvkDeviceWaitIdle(s_vk.device);
 +    if (s_bt.ready) {
@@ -71222,13 +71366,44 @@ index e2687b7..ff0bc8d 100644
 +            vk_window_drop("acquire semaphore recreation failed");
 +    }
 +#endif
-+}
-+
+ }
+ 
+-static void vk_cb_present(void* ud, u32 buffer_id)
 +/* SUBOPTIMAL also comes back every frame when we deliberately present with
 + * an IDENTITY transform on a rotated panel (see vk_create_swapchain), so only
 + * rebuild when the surface size really changed. */
 +static void vk_swapchain_suboptimal(void)
-+{
+ {
+-    (void)ud; (void)buffer_id;
+-    if (!s_vk.device) return;
+-
+-    if (vk_begin()) return;
+-    vk_barrier_image(s_vk.color.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
+-    VkBufferImageCopy region = {
+-        .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+-        .imageExtent = { s_vk.width, s_vk.height, 1 },
+-    };
+-    pvkCmdCopyImageToBuffer(s_vk.cmd, s_vk.color.img, VK_IMAGE_LAYOUT_GENERAL,
+-                            s_vk.readback.buf, 1, &region);
+-    VkBufferMemoryBarrier host = {
+-        .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+-        .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT,
+-        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+-        .buffer = s_vk.readback.buf, .offset = 0, .size = VK_WHOLE_SIZE,
+-    };
+-    pvkCmdPipelineBarrier(s_vk.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
+-                          0, 0, NULL, 1, &host, 0, NULL);
+-    if (vk_submit_and_wait()) return;
+-
+-    vk_invalidate(&s_vk.readback);
+-    const unsigned char* px = (const unsigned char*)s_vk.readback.ptr;
+-    size_t c = ((size_t)(s_vk.height / 2) * s_vk.width + s_vk.width / 2) * 4;
+-    s_vk.last_center = ((u32)px[c] << 16) | ((u32)px[c + 1] << 8) | (u32)px[c + 2];
+-    s_vk.presented++;
+-    s_g.last_draws = s_g.draws;
+-    s_g.draws = 0;
+-    if (s_vk.dump_path) vk_dump_ppm(px);
+-    vk_present_window();
 +    VkSurfaceCapabilitiesKHR caps;
 +    const VkResult r = pvkGetPhysicalDeviceSurfaceCapabilitiesKHR(s_vk.phys, s_vk.surface, &caps);
 +    if (r == VK_ERROR_SURFACE_LOST_KHR) { vk_surface_lost(); return; }
@@ -71244,12 +71419,26 @@ index e2687b7..ff0bc8d 100644
 +    if (e.height > e.width) { u32 t = e.width; e.width = e.height; e.height = t; }
 +#endif
 +    if (e.width != s_vk.sc_extent.width || e.height != s_vk.sc_extent.height) vk_swapchain_lost();
-+}
-+
-+/* ---------------------------------------------------------------------------
+ }
+ 
+ /* ---------------------------------------------------------------------------
+- * Register-file draw engine backend (rsx_draw_engine.h)
+- *
+- * The path the Metal backend takes: the shared engine walks the register
+- * file, owns surfaces, texture caching, vertex compaction and pipeline keys,
+- * and drives this backend through rsx_draw_backend. Selected with
+- * PS3RECOMP_RSX_ENGINE=dispatch; only one of the two paths is registered at a
+- * time, since the FIFO walker feeds both and would record every draw twice.
+- *
+- * Every operation is still one synchronous submission, so submit_and_wait has
+- * nothing left to do by the time the engine calls it -- which is exactly the
+- * contract it asks for (staging is free to reuse on return).
 + * Presentation: aspect ratio, upscaling, brightness and the host overlay
 + * (the settings menu and FPS counter, rsx_host_ui.h)
-+ *
+  *
+- * Stage E1: colour and depth targets, clears, present and readback.
+- * Pipelines, draws and textures are the next stages; until then
+- * pipeline_create reports 0, which the engine caches as "cannot build".
 + * The frame reaches the window one of two ways:
 + *   - plain: the display image is blitted into the swapchain image, fitted to
 + *     the guest's 16:9 with black bars (or stretched, as before), linear or
@@ -71261,7 +71450,26 @@ index e2687b7..ff0bc8d 100644
 + *     is copied 1:1 into the swapchain image.
 + * The shaders are HLSL, translated by the same glslang path as the guest's.
 + * Any failure here falls back to the plain path for the rest of the run.
-+ * -------------------------------------------------------------------------*/
+  * -------------------------------------------------------------------------*/
+-#define VK_ENG_MAX_OBJ 2048          /* the engine's texture cache is 1024 */
+-
+-enum { VK_ENG_FREE = 0, VK_ENG_COLOR, VK_ENG_DEPTH, VK_ENG_TEXTURE, VK_ENG_VIEW };
+-
+-typedef struct vk_eng_obj {
+-    u8       kind;
+-    VkFormat fmt;
+-    u32      bpp;                    /* bytes per texel, 0 for depth     */
+-    u32      w, h;
+-    vk_image im;                     /* a VIEW owns only im.view            */
+-    u32      block;                  /* bytes per 4x4 block, 0 = not BC     */
+-    u32      surface, remap, rsx_fmt;/* VIEW: what it is a view of          */
+-} vk_eng_obj;
+-
+-static vk_eng_obj s_eobj[VK_ENG_MAX_OBJ];
+-
+-/* Defined with the E2 pipeline state further down. */
+-static void vk_eng_drop_framebuffers(void);
+-static void vk_eng2_shutdown(void* user);
 +static int vk_eng_upload_rows(VkImage img, u32 layer, u32 mip, u32 w, u32 h,
 +                              size_t tight, u32 rows, const void* src, u32 row_bytes);
 +
@@ -71337,8 +71545,12 @@ index e2687b7..ff0bc8d 100644
 +"}\n";
 +
 +#define VK_UI_MAX_VERTS 98304u
-+
-+static struct {
+ 
+ static struct {
+-    u32 rt[RSX_BE_MAX_COLOR_TARGETS], nrt, depth;
+-} s_eng_bound;
+-
+-static VkFormat vk_eng_format(rsx_be_format f, u32* bpp)
 +    int failed, ready;
 +    VkDescriptorSetLayout dsl;
 +    VkPipelineLayout layout;
@@ -71354,19 +71566,45 @@ index e2687b7..ff0bc8d 100644
 +} s_pp;
 +
 +static int vk_pp_shader(const char* hlsl, int stage, VkShaderModule* out)
-+{
+ {
+-    switch (f) {
+-    case RSX_BE_FMT_R8:            *bpp = 1;  return VK_FORMAT_R8_UNORM;
+-    case RSX_BE_FMT_R8G8:          *bpp = 2;  return VK_FORMAT_R8G8_UNORM;
+-    case RSX_BE_FMT_R8G8B8A8:      *bpp = 4;  return VK_FORMAT_R8G8B8A8_UNORM;
+-    case RSX_BE_FMT_R16:           *bpp = 2;  return VK_FORMAT_R16_UNORM;
+-    case RSX_BE_FMT_R16G16:        *bpp = 4;  return VK_FORMAT_R16G16_UNORM;
+-    case RSX_BE_FMT_R16G16F:       *bpp = 4;  return VK_FORMAT_R16G16_SFLOAT;
+-    case RSX_BE_FMT_R16G16B16A16F: *bpp = 8;  return VK_FORMAT_R16G16B16A16_SFLOAT;
+-    case RSX_BE_FMT_R32F:          *bpp = 4;  return VK_FORMAT_R32_SFLOAT;
+-    case RSX_BE_FMT_R32G32B32A32F: *bpp = 16; return VK_FORMAT_R32G32B32A32_SFLOAT;
+-    case RSX_BE_FMT_BC1:           *bpp = 8;  return VK_FORMAT_BC1_RGBA_UNORM_BLOCK;  /* per block */
+-    case RSX_BE_FMT_BC2:           *bpp = 16; return VK_FORMAT_BC2_UNORM_BLOCK;
+-    case RSX_BE_FMT_BC3:           *bpp = 16; return VK_FORMAT_BC3_UNORM_BLOCK;
+-    default:                       *bpp = 0;  return VK_FORMAT_UNDEFINED;
 +    u32 words = 0;
 +    if (rsx_hlsl_to_spirv(hlsl, stage, s_g.spv, VK_SPV_WORDS, &words, s_g.log, sizeof s_g.log) || !words) {
 +        VK_LOG("presentation shader: %s\n", s_g.log);
 +        return -1;
-+    }
+     }
 +    VkShaderModuleCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
 +                                    .codeSize = (size_t)words * 4u, .pCode = s_g.spv };
 +    return pvkCreateShaderModule(s_vk.device, &ci, NULL, out) == VK_SUCCESS ? 0 : -1;
-+}
-+
+ }
+ 
+-static u32 vk_eng_alloc(void)
 +static VkPipeline vk_pp_pipeline(VkShaderModule vs, VkShaderModule fs, int ui)
-+{
+ {
+-    for (u32 i = 1; i < VK_ENG_MAX_OBJ; i++)
+-        if (s_eobj[i].kind == VK_ENG_FREE) return i;
+-    VK_LOG("engine: object table full (%d)\n", VK_ENG_MAX_OBJ);
+-    return 0;
+-}
+-
+-static vk_eng_obj* vk_eng_get(u32 handle, int kind)
+-{
+-    if (!handle || handle >= VK_ENG_MAX_OBJ) return NULL;
+-    vk_eng_obj* o = &s_eobj[handle];
+-    return (o->kind == kind) ? o : NULL;
 +    VkPipelineShaderStageCreateInfo st[2] = {
 +        { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT,
 +          .module = vs, .pName = "main" },
@@ -71410,11 +71648,30 @@ index e2687b7..ff0bc8d 100644
 +    if ((s_vkc[5]++, pvkCreateGraphicsPipelines(s_vk.device, VK_NULL_HANDLE, 1, &gci, NULL, &p)) != VK_SUCCESS)
 +        return VK_NULL_HANDLE;
 +    return p;
-+}
-+
+ }
+ 
+-/* Copy `rows` rows of `w` texels from host memory into one level / layer of
+- * an image that is in GENERAL. */
+-static int vk_eng_upload_rows(VkImage img, u32 layer, u32 mip, u32 w, u32 h,
+-                              size_t tight, u32 rows, const void* src, u32 row_bytes)
 +/* Build the pass's objects once; 0 when usable. */
 +static int vk_pp_init(void)
-+{
+ {
+-    if (tight > row_bytes) tight = row_bytes;
+-    vk_buffer st = {0};
+-    if (vk_create_host_buffer(&st, (VkDeviceSize)tight * rows, VK_BUFFER_USAGE_TRANSFER_SRC_BIT) ||
+-        !st.coherent) { vk_destroy_buffer(&st); return -1; }
+-    for (u32 y = 0; y < rows; y++)
+-        memcpy((u8*)st.ptr + (size_t)y * tight, (const u8*)src + (size_t)y * row_bytes, tight);
+-    int rc = vk_begin();
+-    if (!rc) {
+-        vk_barrier_image(img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
+-        VkBufferImageCopy region = {
+-            .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, mip, layer, 1 },
+-            .imageExtent = { w, h, 1 },
+-        };
+-        pvkCmdCopyBufferToImage(s_vk.cmd, st.buf, img, VK_IMAGE_LAYOUT_GENERAL, 1, &region);
+-        rc = vk_submit_and_wait();
 +    if (s_pp.ready) return 0;
 +    if (s_pp.failed || !s_bt.ready || !s_g.spv || !rsx_hlsl_to_spirv_available()) return -1;
 +    s_pp.failed = 1;
@@ -71454,7 +71711,9 @@ index e2687b7..ff0bc8d 100644
 +        s_pp.post = vk_pp_pipeline(vs, fs, 0);
 +        s_pp.ui = vk_pp_pipeline(uvs, ufs, 1);
 +        bad = !s_pp.post || !s_pp.ui;
-+    }
+     }
+-    vk_destroy_buffer(&st);
+-    return rc;
 +    if (vs) pvkDestroyShaderModule(s_vk.device, vs, NULL);
 +    if (fs) pvkDestroyShaderModule(s_vk.device, fs, NULL);
 +    if (uvs) pvkDestroyShaderModule(s_vk.device, uvs, NULL);
@@ -71465,10 +71724,13 @@ index e2687b7..ff0bc8d 100644
 +    s_pp.failed = 0; s_pp.ready = 1;
 +    VK_LOG("presentation pass ready (upscaling, brightness, settings overlay)\n");
 +    return 0;
-+}
-+
+ }
+ 
+-static int vk_eng_upload(VkImage img, u32 layer, u32 mip, u32 w, u32 h, u32 bpp,
+-                         const void* src, u32 row_bytes)
 +static void vk_pp_shutdown(void)
-+{
+ {
+-    return vk_eng_upload_rows(img, layer, mip, w, h, (size_t)w * bpp, h, src, row_bytes);
 +    if (!s_vk.device) return;
 +    if (s_pp.fb) pvkDestroyFramebuffer(s_vk.device, s_pp.fb, NULL);
 +    vk_destroy_image(&s_pp.img);
@@ -71483,11 +71745,23 @@ index e2687b7..ff0bc8d 100644
 +    free(s_pp.verts);
 +    free(s_pp.cpu_font.pixels);
 +    memset(&s_pp, 0, sizeof s_pp);
-+}
-+
+ }
+ 
+-/* NV4097 TEXTURE_CONTROL1 crossbar as a Vulkan component mapping: the shared
+- * rsx_texture_component_remap() gives, in A,R,G,B order, which uploaded
+- * channel (0..3 = R,G,B,A) or constant each output takes -- the table the
+- * Metal backend's swizzle_sel reads. */
+-static VkComponentSwizzle vk_remap_sel(u8 sel)
 +/* The window-sized image the pass draws into. */
 +static int vk_pp_target(u32 w, u32 h)
-+{
+ {
+-    switch (sel) {
+-    case 0: return VK_COMPONENT_SWIZZLE_R;
+-    case 1: return VK_COMPONENT_SWIZZLE_G;
+-    case 2: return VK_COMPONENT_SWIZZLE_B;
+-    case 3: return VK_COMPONENT_SWIZZLE_A;
+-    case RSX_REMAP_ONE: return VK_COMPONENT_SWIZZLE_ONE;
+-    default: return VK_COMPONENT_SWIZZLE_ZERO;
 +    if (s_pp.img.img && s_pp.w == w && s_pp.h == h) return 0;
 +    if (s_pp.fb && !vk_bt_defer_framebuffer(s_pp.fb)) pvkDestroyFramebuffer(s_vk.device, s_pp.fb, NULL);
 +    s_pp.fb = VK_NULL_HANDLE;
@@ -71501,16 +71775,22 @@ index e2687b7..ff0bc8d 100644
 +                                    .width = w, .height = h, .layers = 1 };
 +    if ((s_vkc[2]++, pvkCreateFramebuffer(s_vk.device, &fci, NULL, &s_pp.fb)) != VK_SUCCESS) {
 +        vk_destroy_image(&s_pp.img); return -1;
-+    }
+     }
 +    s_pp.w = w; s_pp.h = h;
 +    return 0;
-+}
+ }
+-static VkComponentMapping vk_remap(u32 remap, u32 rsx_fmt)
 +
 +/* The overlay's atlas at the size this window wants, on the GPU: the font
 + * (white, coverage in alpha) with the save screen's icon sheet below it
 + * (rsx_host_ui_atlas_size). */
 +static int vk_pp_font(u32 w, u32 h)
-+{
+ {
+-    u8 sel[4];
+-    rsx_texture_component_remap(remap, rsx_fmt & 0x9Fu, sel);
+-    VkComponentMapping m = { vk_remap_sel(sel[1]), vk_remap_sel(sel[2]),
+-                             vk_remap_sel(sel[3]), vk_remap_sel(sel[0]) };
+-    return m;
 +    const int font_new = rsx_host_ui_font_for(&s_pp.cpu_font, (int)w, (int)h);
 +    const unsigned sheet_gen = rsx_host_ui_sheet(NULL);
 +    if (!font_new && s_pp.font.img && s_pp.font_gen == s_pp.cpu_font.gen && s_pp.sheet_gen == sheet_gen) return 0;
@@ -71548,10 +71828,18 @@ index e2687b7..ff0bc8d 100644
 +    if (rc) return -1;
 +    s_pp.font_gen = f->gen; s_pp.sheet_gen = got; s_pp.atlas_w = aw; s_pp.atlas_h = ah;
 +    return 0;
-+}
+ }
+-static int vk_eng_make_view(VkImage img, VkFormat fmt, u32 levels, VkComponentMapping map,
+-                            VkImageView* out)
 +
 +static VkDescriptorSet vk_pp_set(VkImageView view, VkSampler smp)
-+{
+ {
+-    VkImageViewCreateInfo vci = {
+-        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = img,
+-        .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = fmt, .components = map,
+-        .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, levels ? levels : 1, 0, 1 },
+-    };
+-    return pvkCreateImageView(s_vk.device, &vci, NULL, out) == VK_SUCCESS ? 0 : -1;
 +    VkDescriptorSet set = VK_NULL_HANDLE;
 +    VkDescriptorSetAllocateInfo dai = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
 +                                        .descriptorPool = s_bt.s[s_bt.cur].pool, .descriptorSetCount = 1,
@@ -71566,25 +71854,43 @@ index e2687b7..ff0bc8d 100644
 +          .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER, .pImageInfo = &si } };
 +    pvkUpdateDescriptorSets(s_vk.device, 2, w, 0, NULL);
 +    return set;
-+}
-+
+ }
+ 
+-static int vk_eng_init(void* user, u32 width, u32 height)
 +/* Where the guest's frame goes in a w x h window. */
 +static void vk_pp_rect(const rsx_host_options* o, u32 w, u32 h, int32_t r[4])
-+{
+ {
+-    (void)user; (void)width; (void)height;
+-    memset(s_eobj, 0, sizeof s_eobj);
+-    memset(&s_eng_bound, 0, sizeof s_eng_bound);
+-    return s_vk.device ? 0 : -1;
 +    r[0] = 0; r[1] = 0; r[2] = (int32_t)w; r[3] = (int32_t)h;
 +    if (!o->keep_aspect || !s_vk.guest_w || !s_vk.guest_h) return;
 +    const double ga = (double)s_vk.guest_w / (double)s_vk.guest_h, wa = (double)w / (double)h;
 +    if (wa > ga + 1e-3) { const int32_t dw = (int32_t)(h * ga + 0.5); r[0] = ((int32_t)w - dw) / 2; r[2] = dw; }
 +    else if (wa < ga - 1e-3) { const int32_t dh = (int32_t)(w / ga + 0.5); r[1] = ((int32_t)h - dh) / 2; r[3] = dh; }
-+}
-+
+ }
+ 
+-static void vk_eng_release(void* user, u32 handle)
 +static struct { vk_buffer b; char path[512]; u32 w, h; int pending; } s_pp_shot;
 +static void vk_pp_write_shot(void);
 +
 +/* Record the frame into swapchain image `dst` (in TRANSFER_DST_OPTIMAL).
 + * Returns 0 when it did, -1 to have the caller do the plain blit. */
 +static int vk_pp_compose(VkImage dst, u32 w, u32 h, const rsx_host_options* o)
-+{
+ {
+-    (void)user;
+-    if (!handle || handle >= VK_ENG_MAX_OBJ || s_eobj[handle].kind == VK_ENG_FREE) return;
+-    if (s_eobj[handle].kind == VK_ENG_COLOR)
+-        for (u32 i = 1; i < VK_ENG_MAX_OBJ; i++)
+-            if (s_eobj[i].kind == VK_ENG_VIEW && s_eobj[i].surface == handle) {
+-                vk_destroy_image(&s_eobj[i].im);
+-                memset(&s_eobj[i], 0, sizeof s_eobj[i]);
+-            }
+-    if (s_eobj[handle].kind == VK_ENG_DEPTH && s_eobj[handle].surface) {
+-        const u32 snap = s_eobj[handle].surface;
+-        s_eobj[handle].surface = 0;
+-        if (vk_eng_get(snap, VK_ENG_TEXTURE)) vk_eng_release(user, snap);
 +    if (!s_pp.shot[0]) rsx_host_ui_take_shot(s_pp.shot, (int)sizeof s_pp.shot);
 +    const int ui = rsx_host_ui_visible();
 +    const int need = o->upscale == RSX_UI_UPSCALE_SHARP || o->brightness || ui || s_pp.shot[0];
@@ -71630,7 +71936,11 @@ index e2687b7..ff0bc8d 100644
 +        pvkCmdPushConstants(s_vk.cmd, s_pp.layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof upc, upc);
 +        pvkCmdBindVertexBuffers(s_vk.cmd, 0, 1, &s_bt.s[s_bt.cur].arena.buf, &voff);
 +        pvkCmdDraw(s_vk.cmd, (u32)nv, 1, 0, 0);
-+    }
+     }
+-    if (s_eobj[handle].kind == VK_ENG_COLOR || s_eobj[handle].kind == VK_ENG_DEPTH)
+-        vk_eng_drop_framebuffers();
+-    vk_destroy_image(&s_eobj[handle].im);      /* idle: submissions are waited on */
+-    memset(&s_eobj[handle], 0, sizeof s_eobj[handle]);
 +    pvkCmdEndRenderPass(s_vk.cmd);
 +    vk_full_barrier();
 +    VkImageCopy cp = { .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
@@ -71642,13 +71952,16 @@ index e2687b7..ff0bc8d 100644
 +                    1, &bl, VK_FILTER_NEAREST);
 +    if (s_pp.shot[0]) vk_pp_write_shot();
 +    return 0;
-+}
-+
+ }
+ 
+-static void vk_eng_shutdown(void* user)
 +/* Dev: the composed frame as a PPM (RACACIT_UI_FILE "shot <path>"). The
 + * copy is recorded with the frame; vk_pp_flush_shot writes the file once the
 + * present's batch has been submitted. Waits for the GPU, so only on request. */
 +static void vk_pp_write_shot(void)
-+{
+ {
+-    vk_eng2_shutdown(user);
+-    for (u32 i = 1; i < VK_ENG_MAX_OBJ; i++) vk_eng_release(user, i);
 +    vk_buffer st = {0};
 +    if (s_pp_shot.pending ||
 +        vk_create_host_buffer(&st, (VkDeviceSize)s_pp.w * s_pp.h * 4u, VK_BUFFER_USAGE_TRANSFER_DST_BIT)) {
@@ -71662,10 +71975,12 @@ index e2687b7..ff0bc8d 100644
 +    snprintf(s_pp_shot.path, sizeof s_pp_shot.path, "%s", s_pp.shot);
 +    s_pp_shot.pending = 1;
 +    s_pp.shot[0] = 0;
-+}
-+
+ }
+ 
+-static void vk_eng_submit_and_wait(void* user, u32 reason)
 +static void vk_pp_flush_shot(void)
-+{
+ {
+-    (void)user; (void)reason;      /* every submission has already completed */
 +    if (!s_pp_shot.pending) return;
 +    s_pp_shot.pending = 0;
 +    vk_bt_submit(1, VK_NULL_HANDLE, VK_NULL_HANDLE);
@@ -71682,12 +71997,31 @@ index e2687b7..ff0bc8d 100644
 +        VK_LOG("composed frame written to %s\n", s_pp_shot.path);
 +    }
 +    vk_destroy_buffer(&s_pp_shot.b);
-+}
-+
+ }
+ 
+-static u32 vk_eng_color_target_create(void* user, rsx_be_format fmt, u32 w, u32 h,
+-                                      const void* seed, u32 seed_row_bytes)
 +/* The plain path: the display image into `r` of the swapchain image, bars
 + * cleared to black. */
 +static void vk_pp_plain(VkImage dst, u32 w, u32 h, const rsx_host_options* o)
-+{
+ {
+-    (void)user;
+-    u32 bpp;
+-    const VkFormat vf = vk_eng_format(fmt, &bpp);
+-    /* E1: the render pass is built for R8G8B8A8, so that is the one colour
+-     * target format for now; FP16 HDR targets need their own pass. */
+-    if (vf != VK_FORMAT_R8G8B8A8_UNORM || !w || !h || w > 4096u || h > 4096u) {
+-        VK_LOG("engine: colour target format %d %ux%u not supported yet\n", (int)fmt, w, h);
+-        return 0;
+-    }
+-    const u32 hd = vk_eng_alloc();
+-    if (!hd) return 0;
+-    vk_eng_obj* o = &s_eobj[hd];
+-    if (vk_create_image(&o->im, vf, w, h,
+-                        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+-                        VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+-                        VK_IMAGE_ASPECT_COLOR_BIT)) {
+-        vk_destroy_image(&o->im); return 0;
 +    int32_t r[4]; vk_pp_rect(o, w, h, r);
 +    if (r[2] != (int32_t)w || r[3] != (int32_t)h) {
 +        VkClearColorValue black = { .float32 = { 0.0f, 0.0f, 0.0f, 1.0f } };
@@ -71700,7 +72034,19 @@ index e2687b7..ff0bc8d 100644
 +            .image = dst, .subresourceRange = rr };
 +        pvkCmdPipelineBarrier(s_vk.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
 +                              0, 0, NULL, 0, NULL, 1, &b);
-+    }
+     }
+-    o->kind = VK_ENG_COLOR; o->fmt = vf; o->bpp = bpp; o->w = w; o->h = h;
+-    /* UNDEFINED -> GENERAL, then the guest's own bytes when the engine could
+-     * resolve them, else transparent black so the contents are defined. */
+-    if (vk_begin()) { vk_eng_release(user, hd); return 0; }
+-    vk_barrier_image(o->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED);
+-    VkClearColorValue zero = { .float32 = { 0.0f, 0.0f, 0.0f, 0.0f } };
+-    VkImageSubresourceRange r = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+-    pvkCmdClearColorImage(s_vk.cmd, o->im.img, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &r);
+-    if (vk_submit_and_wait()) { vk_eng_release(user, hd); return 0; }
+-    if (seed && seed_row_bytes)
+-        vk_eng_upload(o->im.img, 0, 0, w, h, bpp, seed, seed_row_bytes);
+-    return hd;
 +    VkImageBlit blit = {
 +        .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
 +        .srcOffsets = { { 0, 0, 0 }, { (int32_t)s_vk.width, (int32_t)s_vk.height, 1 } },
@@ -71711,11 +72057,22 @@ index e2687b7..ff0bc8d 100644
 +                    1, &blit, o->upscale == RSX_UI_UPSCALE_NEAREST ? VK_FILTER_NEAREST : VK_FILTER_LINEAR);
  }
  
- /* Blit the offscreen target into the next swapchain image and present it. */
+-static u32 vk_eng_depth_target_create(void* user, u32 w, u32 h)
++/* Blit the offscreen target into the next swapchain image and present it. */
 +/* RACACIT_PRESENT_MODE=fifo|mailbox|immediate (default mailbox when the
 + * device has it, else fifo -- the one mode every driver has). */
 +static VkPresentModeKHR vk_pick_present_mode(void)
-+{
+ {
+-    (void)user;
+-    if (!w || !h || w > 4096u || h > 4096u) return 0;
+-    const u32 hd = vk_eng_alloc();
+-    if (!hd) return 0;
+-    vk_eng_obj* o = &s_eobj[hd];
+-    if (vk_create_image(&o->im, s_vk.depth_format, w, h,
+-                        VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
+-                        VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+-                        VK_IMAGE_ASPECT_DEPTH_BIT)) {
+-        vk_destroy_image(&o->im); return 0;
 +    rsx_host_options o; rsx_host_ui_options(&o);
 +    VkPresentModeKHR want = o.vsync == RSX_UI_VSYNC_FIFO ? VK_PRESENT_MODE_FIFO_KHR
 +                          : o.vsync == RSX_UI_VSYNC_IMMEDIATE ? VK_PRESENT_MODE_IMMEDIATE_KHR
@@ -71730,19 +72087,34 @@ index e2687b7..ff0bc8d 100644
 +                break;
 +            }
 +        }
-+    }
+     }
+-    o->kind = VK_ENG_DEPTH; o->fmt = s_vk.depth_format; o->w = w; o->h = h;
+-    /* Far plane, for the reason the display depth starts there. */
+-    if (vk_begin()) { vk_eng_release(user, hd); return 0; }
+-    vk_barrier_image(o->im.img, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_UNDEFINED);
+-    VkClearDepthStencilValue far_plane = { 1.0f, 0 };
+-    VkImageSubresourceRange r = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1 };
+-    pvkCmdClearDepthStencilImage(s_vk.cmd, o->im.img, VK_IMAGE_LAYOUT_GENERAL, &far_plane, 1, &r);
+-    if (vk_submit_and_wait()) { vk_eng_release(user, hd); return 0; }
+-    return hd;
 +    VK_LOG("present mode %s%c", picked == VK_PRESENT_MODE_MAILBOX_KHR ? "mailbox" :
 +           picked == VK_PRESENT_MODE_IMMEDIATE_KHR ? "immediate" : "fifo", 10);
 +    return picked;
-+}
-+
+ }
+ 
+-static void vk_eng_bind_targets(void* user, const u32* surfaces, u32 count, u32 depth)
 +/* Where the window present spends its time, for vk_eng_present's slow-present
 + * line: acquire, compose + submit (the batch, which can wait for an earlier
 + * frame), queue present. */
 +static unsigned long long s_pw_acq, s_pw_sub, s_pw_qp, s_pw_ui, s_pw_blit;
- static void vk_present_window(void)
++static void vk_present_window(void)
  {
--    if (!s_vk.windowed || !s_vk.swapchain) return;
+-    (void)user;
+-    if (count > RSX_BE_MAX_COLOR_TARGETS) count = RSX_BE_MAX_COLOR_TARGETS;
+-    for (u32 i = 0; i < RSX_BE_MAX_COLOR_TARGETS; i++)
+-        s_eng_bound.rt[i] = (i < count && surfaces) ? surfaces[i] : 0;
+-    s_eng_bound.nrt = count;
+-    s_eng_bound.depth = depth;
 +    extern unsigned long long ps3_qpc_us(void);
 +    s_pw_acq = s_pw_sub = s_pw_qp = 0;
 +    if (SDL_AtomicGet(&s_present_fatal)) return;
@@ -71775,7 +72147,7 @@ index e2687b7..ff0bc8d 100644
 +        vk_swapchain_lost();
 +        if (s_vk_win_minimized || !s_vk.windowed || !s_vk.swapchain) return;
 +    }
- 
++
 +    /* The acquire signal is waited by this slot's presentation submission.
 +     * Complete its previous submission BEFORE reusing its semaphore (VUID
 +     * vkAcquireNextImageKHR-semaphore-01779). Other slots stay in flight. */
@@ -71805,9 +72177,7 @@ index e2687b7..ff0bc8d 100644
 +    if (pvkResetFences(s_vk.device, 1, acquire_done) != VK_SUCCESS) {
 +        VK_LOG("acquire fence reset failed\n"); return;
 +    }
-     u32 idx = 0;
--    VkResult r = pvkAcquireNextImageKHR(s_vk.device, s_vk.swapchain, UINT64_MAX,
--                                        s_vk.sem_acquire, VK_NULL_HANDLE, &idx);
++    u32 idx = 0;
 +    unsigned long long pw0 = ps3_qpc_us();
 +#ifdef __ANDROID__
 +    /* A native surface can disappear between the lifecycle check and this
@@ -71821,53 +72191,32 @@ index e2687b7..ff0bc8d 100644
 +                                        acquire, *acquire_done, &idx);
 +    s_pw_acq = ps3_qpc_us() - pw0; pw0 += s_pw_acq;
 +    if (r == VK_TIMEOUT || r == VK_NOT_READY) return;
-     if (r == VK_ERROR_OUT_OF_DATE_KHR) { vk_swapchain_lost(); return; }
++    if (r == VK_ERROR_OUT_OF_DATE_KHR) { vk_swapchain_lost(); return; }
 +    if (r == VK_ERROR_SURFACE_LOST_KHR) { vk_surface_lost(); return; }
-     if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) {
-         VK_LOG("vkAcquireNextImageKHR failed (VkResult %d)\n", (int)r); return;
-     }
++    if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) {
++        VK_LOG("vkAcquireNextImageKHR failed (VkResult %d)\n", (int)r); return;
++    }
 +    *acquire_pending = 1;
- 
--    if (vk_begin()) return;
++
 +    if (vk_begin()) { vk_present_abandon(*acquire_done, acquire_pending); return; }
-     vk_barrier_image(s_vk.color.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
-     VkImageMemoryBarrier b = {
-         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-@@ -1766,67 +4088,371 @@ static void vk_present_window(void)
-     };
-     pvkCmdPipelineBarrier(s_vk.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                           0, 0, NULL, 0, NULL, 1, &b);
--    VkImageBlit blit = {
--        .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
--        .srcOffsets = { { 0, 0, 0 }, { (int32_t)s_vk.width, (int32_t)s_vk.height, 1 } },
--        .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
--        .dstOffsets = { { 0, 0, 0 },
--                        { (int32_t)s_vk.sc_extent.width, (int32_t)s_vk.sc_extent.height, 1 } },
--    };
--    pvkCmdBlitImage(s_vk.cmd, s_vk.color.img, VK_IMAGE_LAYOUT_GENERAL,
--                    s_vk.sc_images[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
--                    1, &blit, VK_FILTER_LINEAR);
++    vk_barrier_image(s_vk.color.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
++    VkImageMemoryBarrier b = {
++        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
++        .srcAccessMask = 0, .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
++        .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED, .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
++        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++        .image = s_vk.sc_images[idx], .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
++    };
++    pvkCmdPipelineBarrier(s_vk.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
++                          0, 0, NULL, 0, NULL, 1, &b);
 +    if (vk_pp_compose(s_vk.sc_images[idx], s_vk.sc_extent.width, s_vk.sc_extent.height, &opt))
 +        vk_pp_plain(s_vk.sc_images[idx], s_vk.sc_extent.width, s_vk.sc_extent.height, &opt);
-     b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-     b.dstAccessMask = 0;
-     b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-     b.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-     pvkCmdPipelineBarrier(s_vk.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-                           0, 0, NULL, 0, NULL, 1, &b);
--    if (pvkEndCommandBuffer(s_vk.cmd) != VK_SUCCESS) { VK_LOG("vkEndCommandBuffer failed\n"); return; }
--
--    VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
--    VkSubmitInfo si = {
--        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
--        .waitSemaphoreCount = 1, .pWaitSemaphores = &s_vk.sem_acquire,
--        .pWaitDstStageMask = &wait_stage,
--        .commandBufferCount = 1, .pCommandBuffers = &s_vk.cmd,
--        .signalSemaphoreCount = 1, .pSignalSemaphores = &s_vk.sc_done[idx],
--    };
--    pvkResetFences(s_vk.device, 1, &s_vk.fence);
--    if (pvkQueueSubmit(s_vk.queue, 1, &si, s_vk.fence) != VK_SUCCESS) {
--        VK_LOG("vkQueueSubmit (window) failed\n"); return;
++    b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
++    b.dstAccessMask = 0;
++    b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
++    b.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
++    pvkCmdPipelineBarrier(s_vk.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
++                          0, 0, NULL, 0, NULL, 1, &b);
 +    if (s_bt.ready) {
 +        /* The frame's batch goes to the GPU here, gated on the acquire and
 +         * signalling the present -- no CPU wait. */
@@ -71891,28 +72240,40 @@ index e2687b7..ff0bc8d 100644
 +            VK_LOG("vkQueueSubmit (window) failed\n"); vk_present_abandon(*acquire_done, acquire_pending); return;
 +        }
 +        pvkWaitForFences(s_vk.device, 1, &s_vk.fence, VK_TRUE, UINT64_MAX);
-     }
--    pvkWaitForFences(s_vk.device, 1, &s_vk.fence, VK_TRUE, UINT64_MAX);
- 
-     VkPresentInfoKHR pi = {
-         .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-         .waitSemaphoreCount = 1, .pWaitSemaphores = &s_vk.sc_done[idx],
-         .swapchainCount = 1, .pSwapchains = &s_vk.swapchain, .pImageIndices = &idx,
-     };
++    }
++
++    VkPresentInfoKHR pi = {
++        .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
++        .waitSemaphoreCount = 1, .pWaitSemaphores = &s_vk.sc_done[idx],
++        .swapchainCount = 1, .pSwapchains = &s_vk.swapchain, .pImageIndices = &idx,
++    };
 +    s_pw_sub = ps3_qpc_us() - pw0; pw0 += s_pw_sub;
-     r = pvkQueuePresentKHR(s_vk.queue, &pi);
--    if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) vk_swapchain_lost();
++    r = pvkQueuePresentKHR(s_vk.queue, &pi);
 +    s_pw_qp = ps3_qpc_us() - pw0;
 +    vk_pp_flush_shot();
 +    if (r == VK_ERROR_OUT_OF_DATE_KHR) vk_swapchain_lost();
 +    else if (r == VK_ERROR_SURFACE_LOST_KHR) vk_surface_lost();
 +    else if (r == VK_SUBOPTIMAL_KHR) vk_swapchain_suboptimal();
-     else if (r != VK_SUCCESS) VK_LOG("vkQueuePresentKHR failed (VkResult %d)\n", (int)r);
++    else if (r != VK_SUCCESS) VK_LOG("vkQueuePresentKHR failed (VkResult %d)\n", (int)r);
  }
  
- static void vk_dump_ppm(const unsigned char* rgba)
+-static void vk_eng_clear_color(void* user, u32 surface, const float rgba[4])
++static void vk_dump_ppm(const unsigned char* rgba)
  {
--    FILE* f = fopen(s_vk.dump_path, "wb");
+-    (void)user;
+-    /* The debug hook reports the last colour asked for, as Metal's does. */
+-    s_vk.clear_argb = ((u32)(rgba[3] * 255.0f + 0.5f) << 24) |
+-                      ((u32)(rgba[0] * 255.0f + 0.5f) << 16) |
+-                      ((u32)(rgba[1] * 255.0f + 0.5f) <<  8) |
+-                       (u32)(rgba[2] * 255.0f + 0.5f);
+-    vk_eng_obj* o = vk_eng_get(surface, VK_ENG_COLOR);
+-    if (!o || vk_begin()) return;
+-    VkClearColorValue v;
+-    memcpy(v.float32, rgba, sizeof v.float32);
+-    VkImageSubresourceRange r = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+-    vk_barrier_image(o->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
+-    pvkCmdClearColorImage(s_vk.cmd, o->im.img, VK_IMAGE_LAYOUT_GENERAL, &v, 1, &r);
+-    vk_submit_and_wait();
 +    /* A path with a printf conversion ("frame_%04u.ppm") writes numbered
 +     * frames instead of overwriting one file, and PS3RECOMP_VK_DUMP_EVERY=<n>
 +     * keeps only every n-th present -- what a long headless boot needs to show
@@ -71932,10 +72293,8 @@ index e2687b7..ff0bc8d 100644
 +    else
 +        snprintf(path, sizeof path, "%s", s_vk.dump_path);
 +    FILE* f = fopen(path, "wb");
-     if (!f) { VK_LOG("cannot open %s for the frame dump\n", s_vk.dump_path); return; }
-     fprintf(f, "P6\n%u %u\n255\n", s_vk.width, s_vk.height);
--    for (size_t i = 0; i < (size_t)s_vk.width * s_vk.height; i++)
--        fwrite(rgba + i * 4, 1, 3, f);
++    if (!f) { VK_LOG("cannot open %s for the frame dump\n", s_vk.dump_path); return; }
++    fprintf(f, "P6\n%u %u\n255\n", s_vk.width, s_vk.height);
 +    /* One write: a call per pixel made each dump a ~170 ms hitch. */
 +    const size_t px = (size_t)s_vk.width * s_vk.height;
 +    unsigned char* rgb = (unsigned char*)malloc(px * 3);
@@ -71946,10 +72305,11 @@ index e2687b7..ff0bc8d 100644
 +    } else {
 +        for (size_t i = 0; i < px; i++) fwrite(rgba + i * 4, 1, 3, f);
 +    }
-     fclose(f);
++    fclose(f);
  }
  
--static void vk_cb_present(void* ud, u32 buffer_id)
+-static void vk_eng_clear_depth_stencil(void* user, u32 depth, u32 flags,
+-                                       float depth_value, u8 stencil)
 +/* ---------------------------------------------------------------------------
 + * Host overlay: on-screen touch controls (touch_controls.h)
 + *
@@ -71970,13 +72330,14 @@ index e2687b7..ff0bc8d 100644
 +
 +static void ov_push(float px, float py, const float c[4])
  {
--    (void)ud; (void)buffer_id;
--    if (!s_vk.device) return;
--
--    if (vk_begin()) return;
--    vk_barrier_image(s_vk.color.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
--    VkBufferImageCopy region = {
--        .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+-    (void)user; (void)stencil;      /* E1: no stencil in the depth format yet */
+-    vk_eng_obj* o = vk_eng_get(depth, VK_ENG_DEPTH);
+-    if (!o || !(flags & RSX_BE_CLEAR_DEPTH) || vk_begin()) return;
+-    VkClearDepthStencilValue d = { depth_value, 0 };
+-    VkImageSubresourceRange r = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1 };
+-    vk_barrier_image(o->im.img, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_GENERAL);
+-    pvkCmdClearDepthStencilImage(s_vk.cmd, o->im.img, VK_IMAGE_LAYOUT_GENERAL, &d, 1, &r);
+-    vk_submit_and_wait();
 +    if (s_ov.n == s_ov.cap) {
 +        u32 cap = s_ov.cap ? s_ov.cap * 2 : 4096;
 +        vk_ov_vtx* nv = (vk_ov_vtx*)realloc(s_ov.v, cap * sizeof *nv);
@@ -71984,22 +72345,46 @@ index e2687b7..ff0bc8d 100644
 +        s_ov.v = nv; s_ov.cap = cap;
 +    }
 +    s_ov.v[s_ov.n++] = (vk_ov_vtx){ px * s_ov.sx - 1.0f, py * s_ov.sy - 1.0f, c[0], c[1], c[2], c[3] };
-+}
+ }
+-
+-/* The named surface becomes the frame: blit it onto the display image, then
+- * the existing present does the readback, the PPM dump and the window. */
+-static void vk_eng_present(void* user, u32 surface)
 +static void ov_tri(float x0, float y0, float x1, float y1, float x2, float y2, const float c[4])
 +{ ov_push(x0, y0, c); ov_push(x1, y1, c); ov_push(x2, y2, c); }
 +static void ov_quad(float x0, float y0, float x1, float y1, float x2, float y2, float x3, float y3, const float c[4])
 +{ ov_tri(x0, y0, x1, y1, x2, y2, c); ov_tri(x0, y0, x2, y2, x3, y3, c); }
 +/* Ellipse (rx already squashed by the caller via s_ov.ax). */
 +static void ov_disc(float cx, float cy, float rx, float ry, const float c[4])
-+{
+ {
+-    (void)user;
+-    vk_eng_obj* o = vk_eng_get(surface, VK_ENG_COLOR);
+-    if (o && !vk_begin()) {
+-        vk_barrier_image(o->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
+-        vk_barrier_image(s_vk.color.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
+-        VkImageBlit blit = {
+-            .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+-            .srcOffsets = { { 0, 0, 0 }, { (int32_t)o->w, (int32_t)o->h, 1 } },
+-            .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+-            .dstOffsets = { { 0, 0, 0 }, { (int32_t)s_vk.width, (int32_t)s_vk.height, 1 } },
+-        };
+-        pvkCmdBlitImage(s_vk.cmd, o->im.img, VK_IMAGE_LAYOUT_GENERAL,
+-                        s_vk.color.img, VK_IMAGE_LAYOUT_GENERAL, 1, &blit,
+-                        (o->w == s_vk.width && o->h == s_vk.height) ? VK_FILTER_NEAREST
+-                                                                    : VK_FILTER_LINEAR);
+-        vk_submit_and_wait();
 +    const int N = 28;
 +    for (int i = 0; i < N; i++) {
 +        float a0 = 6.2831853f * i / N, a1 = 6.2831853f * (i + 1) / N;
 +        ov_tri(cx, cy, cx + cosf(a0) * rx, cy + sinf(a0) * ry, cx + cosf(a1) * rx, cy + sinf(a1) * ry, c);
-+    }
-+}
+     }
+-    vk_cb_present(&s_vk, 0);
+ }
+-
+-static void vk_eng_readback(void* user, u32 surface, u32 x, u32 y, u32 w, u32 h,
+-                            void* out, u32 out_pitch)
 +static void ov_ring(float cx, float cy, float rx, float ry, float t, const float c[4])
-+{
+ {
 +    const int N = 28;
 +    for (int i = 0; i < N; i++) {
 +        float a0 = 6.2831853f * i / N, a1 = 6.2831853f * (i + 1) / N;
@@ -72238,55 +72623,88 @@ index e2687b7..ff0bc8d 100644
 +    vk_barrier_image(s_vk.color.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
 +    VkBufferImageCopy region = {
 +        .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
-         .imageExtent = { s_vk.width, s_vk.height, 1 },
-     };
-     pvkCmdCopyImageToBuffer(s_vk.cmd, s_vk.color.img, VK_IMAGE_LAYOUT_GENERAL,
-@@ -1869,30 +4495,132 @@ static void vk_cb_present(void* ud, u32 buffer_id)
-  * Pipelines, draws and textures are the next stages; until then
-  * pipeline_create reports 0, which the engine caches as "cannot build".
-  * -------------------------------------------------------------------------*/
--#define VK_ENG_MAX_OBJ 2048          /* the engine's texture cache is 1024 */
++        .imageExtent = { s_vk.width, s_vk.height, 1 },
++    };
++    pvkCmdCopyImageToBuffer(s_vk.cmd, s_vk.color.img, VK_IMAGE_LAYOUT_GENERAL,
++                            s_vk.readback.buf, 1, &region);
++    VkBufferMemoryBarrier host = {
++        .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
++        .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT,
++        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++        .buffer = s_vk.readback.buf, .offset = 0, .size = VK_WHOLE_SIZE,
++    };
++    pvkCmdPipelineBarrier(s_vk.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
++                          0, 0, NULL, 1, &host, 0, NULL);
++    if (vk_submit_and_wait()) return;
++
++    vk_invalidate(&s_vk.readback);
++    const unsigned char* px = (const unsigned char*)s_vk.readback.ptr;
++    size_t c = ((size_t)(s_vk.height / 2) * s_vk.width + s_vk.width / 2) * 4;
++    s_vk.last_center = ((u32)px[c] << 16) | ((u32)px[c + 1] << 8) | (u32)px[c + 2];
++    s_vk.presented++;
++    s_g.last_draws = s_g.draws;
++    s_g.draws = 0;
++    if (s_vk.dump_path) vk_dump_ppm(px);
++    vk_present_window();
++}
++
++/* ---------------------------------------------------------------------------
++ * Register-file draw engine backend (rsx_draw_engine.h)
++ *
++ * The path the Metal backend takes: the shared engine walks the register
++ * file, owns surfaces, texture caching, vertex compaction and pipeline keys,
++ * and drives this backend through rsx_draw_backend. Selected with
++ * PS3RECOMP_RSX_ENGINE=dispatch; only one of the two paths is registered at a
++ * time, since the FIFO walker feeds both and would record every draw twice.
++ *
++ * Every operation is still one synchronous submission, so submit_and_wait has
++ * nothing left to do by the time the engine calls it -- which is exactly the
++ * contract it asks for (staging is free to reuse on return).
++ *
++ * Stage E1: colour and depth targets, clears, present and readback.
++ * Pipelines, draws and textures are the next stages; until then
++ * pipeline_create reports 0, which the engine caches as "cannot build".
++ * -------------------------------------------------------------------------*/
 +#define VK_ENG_MAX_OBJ 32768         /* the engine's texture cache is 16384, plus targets, depth, views */
- 
- enum { VK_ENG_FREE = 0, VK_ENG_COLOR, VK_ENG_DEPTH, VK_ENG_TEXTURE, VK_ENG_VIEW };
- 
- typedef struct vk_eng_obj {
-     u8       kind;
++
++enum { VK_ENG_FREE = 0, VK_ENG_COLOR, VK_ENG_DEPTH, VK_ENG_TEXTURE, VK_ENG_VIEW };
++
++typedef struct vk_eng_obj {
++    u8       kind;
 +    u8       lazy;                   /* COLOR: no image yet (vk_eng_color_back) */
-     VkFormat fmt;
-     u32      bpp;                    /* bytes per texel, 0 for depth     */
--    u32      w, h;
++    VkFormat fmt;
++    u32      bpp;                    /* bytes per texel, 0 for depth     */
 +    u32      w, h;                   /* the image's own size                */
 +    u32      lw, lh;                 /* the guest's: w,h / RACACIT_RES_SCALE for
 +                                        targets and their snapshots         */
 +    float    sc;                     /* DEPTH and its snapshots: the scale it is drawn
 +                                        at when not the scene's (a shadow map's), else 0 */
-     vk_image im;                     /* a VIEW owns only im.view            */
-     u32      block;                  /* bytes per 4x4 block, 0 = not BC     */
++    vk_image im;                     /* a VIEW owns only im.view            */
++    u32      block;                  /* bytes per 4x4 block, 0 = not BC     */
 +    u8       soft;                   /* TEXTURE: decoded on upload, a VK_SOFT_* */
-     u32      surface, remap, rsx_fmt;/* VIEW: what it is a view of          */
++    u32      surface, remap, rsx_fmt;/* VIEW: what it is a view of          */
 +    u8       cube;                   /* TEXTURE: six layers, a CUBE view   */
 +    u32      views;                  /* COLOR: its first VIEW, 0 = none     */
 +    u32      next_view;              /* VIEW: the next view of its surface  */
 +    u32      spare;                  /* DEPTH: the snapshot at the other size it is read at */
 +    u8       pend;                   /* COLOR, DEPTH: a clear not yet done: 1 colour or depth, 2 stencil */
 +    VkClearValue pend_v;
- } vk_eng_obj;
- 
- static vk_eng_obj s_eobj[VK_ENG_MAX_OBJ];
++} vk_eng_obj;
++
++static vk_eng_obj s_eobj[VK_ENG_MAX_OBJ];
 +/* RSX_ENG_STATS: calls that return something the engine waits on. */
 +static unsigned long long s_sync_calls[11];
 +
- 
- /* Defined with the E2 pipeline state further down. */
- static void vk_eng_drop_framebuffers(void);
++
++/* Defined with the E2 pipeline state further down. */
++static void vk_eng_drop_framebuffers(void);
 +static void vk_eng_drop_framebuffers_using(u32 handle);
- static void vk_eng2_shutdown(void* user);
- 
- static struct {
-     u32 rt[RSX_BE_MAX_COLOR_TARGETS], nrt, depth;
- } s_eng_bound;
- 
++static void vk_eng2_shutdown(void* user);
++
++static struct {
++    u32 rt[RSX_BE_MAX_COLOR_TARGETS], nrt, depth;
++} s_eng_bound;
++
 +/* Formats a GPU may not have. Vulkan makes BC optional, and Mali and PowerVR do not have it, so
 + * without this nearly every texture of the game was missing there; 16-bit UNORM is optional too.
 + * They are decoded on upload into what every GPU has, on the backend's thread. BC comes out at
@@ -72373,15 +72791,27 @@ index e2687b7..ff0bc8d 100644
 +    const VkFormatFeatureFlags need = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
 +    return (fp.optimalTilingFeatures & need) == need;
 +}
- static VkFormat vk_eng_format(rsx_be_format f, u32* bpp)
- {
-     switch (f) {
-@@ -1914,17 +4642,35 @@ static VkFormat vk_eng_format(rsx_be_format f, u32* bpp)
- 
- static u32 vk_eng_alloc(void)
- {
--    for (u32 i = 1; i < VK_ENG_MAX_OBJ; i++)
--        if (s_eobj[i].kind == VK_ENG_FREE) return i;
++static VkFormat vk_eng_format(rsx_be_format f, u32* bpp)
++{
++    switch (f) {
++    case RSX_BE_FMT_R8:            *bpp = 1;  return VK_FORMAT_R8_UNORM;
++    case RSX_BE_FMT_R8G8:          *bpp = 2;  return VK_FORMAT_R8G8_UNORM;
++    case RSX_BE_FMT_R8G8B8A8:      *bpp = 4;  return VK_FORMAT_R8G8B8A8_UNORM;
++    case RSX_BE_FMT_R16:           *bpp = 2;  return VK_FORMAT_R16_UNORM;
++    case RSX_BE_FMT_R16G16:        *bpp = 4;  return VK_FORMAT_R16G16_UNORM;
++    case RSX_BE_FMT_R16G16F:       *bpp = 4;  return VK_FORMAT_R16G16_SFLOAT;
++    case RSX_BE_FMT_R16G16B16A16F: *bpp = 8;  return VK_FORMAT_R16G16B16A16_SFLOAT;
++    case RSX_BE_FMT_R32F:          *bpp = 4;  return VK_FORMAT_R32_SFLOAT;
++    case RSX_BE_FMT_R32G32B32A32F: *bpp = 16; return VK_FORMAT_R32G32B32A32_SFLOAT;
++    case RSX_BE_FMT_BC1:           *bpp = 8;  return VK_FORMAT_BC1_RGBA_UNORM_BLOCK;  /* per block */
++    case RSX_BE_FMT_BC2:           *bpp = 16; return VK_FORMAT_BC2_UNORM_BLOCK;
++    case RSX_BE_FMT_BC3:           *bpp = 16; return VK_FORMAT_BC3_UNORM_BLOCK;
++    default:                       *bpp = 0;  return VK_FORMAT_UNDEFINED;
++    }
++}
++
++static u32 vk_eng_alloc(void)
++{
 +    s_eobj_gen++;
 +    /* Round-robin from the last allocation: snapshots and texture refreshes
 +     * allocate every frame, and a scan from 1 walked the whole live table. */
@@ -72390,20 +72820,18 @@ index e2687b7..ff0bc8d 100644
 +        const u32 i = 1u + (next - 1u + k) % (VK_ENG_MAX_OBJ - 1u);
 +        if (s_eobj[i].kind == VK_ENG_FREE) { next = i + 1u; return i; }
 +    }
-     VK_LOG("engine: object table full (%d)\n", VK_ENG_MAX_OBJ);
-     return 0;
- }
- 
--static vk_eng_obj* vk_eng_get(u32 handle, int kind)
++    VK_LOG("engine: object table full (%d)\n", VK_ENG_MAX_OBJ);
++    return 0;
++}
++
 +static int vk_eng_color_back(vk_eng_obj* o);
 +/* Getting a colour target means using it: this is what gives it its image. */
 +static void vk_eng_do_clear(vk_eng_obj* o);
 +/* As vk_eng_get, leaving a clear pending: for a pass about to take it as a load op, or a new clear. */
 +static vk_eng_obj* vk_eng_peek(u32 handle, int kind)
- {
-     if (!handle || handle >= VK_ENG_MAX_OBJ) return NULL;
-     vk_eng_obj* o = &s_eobj[handle];
--    return (o->kind == kind) ? o : NULL;
++{
++    if (!handle || handle >= VK_ENG_MAX_OBJ) return NULL;
++    vk_eng_obj* o = &s_eobj[handle];
 +    if (o->kind != kind) return NULL;
 +    if (o->lazy && vk_eng_color_back(o)) return NULL;
 +    return o;
@@ -72413,28 +72841,16 @@ index e2687b7..ff0bc8d 100644
 +    vk_eng_obj* o = vk_eng_peek(handle, kind);
 +    if (o && o->pend) vk_eng_do_clear(o);
 +    return o;
- }
- 
- /* Copy `rows` rows of `w` texels from host memory into one level / layer of
-@@ -1933,22 +4679,31 @@ static int vk_eng_upload_rows(VkImage img, u32 layer, u32 mip, u32 w, u32 h,
-                               size_t tight, u32 rows, const void* src, u32 row_bytes)
- {
-     if (tight > row_bytes) tight = row_bytes;
--    vk_buffer st = {0};
--    if (vk_create_host_buffer(&st, (VkDeviceSize)tight * rows, VK_BUFFER_USAGE_TRANSFER_SRC_BIT) ||
--        !st.coherent) { vk_destroy_buffer(&st); return -1; }
--    for (u32 y = 0; y < rows; y++)
--        memcpy((u8*)st.ptr + (size_t)y * tight, (const u8*)src + (size_t)y * row_bytes, tight);
++}
++
++/* Copy `rows` rows of `w` texels from host memory into one level / layer of
++ * an image that is in GENERAL. */
++static int vk_eng_upload_rows(VkImage img, u32 layer, u32 mip, u32 w, u32 h,
++                              size_t tight, u32 rows, const void* src, u32 row_bytes)
++{
++    if (tight > row_bytes) tight = row_bytes;
 +    const VkDeviceSize bytes = (VkDeviceSize)tight * rows;
-     int rc = vk_begin();
--    if (!rc) {
--        vk_barrier_image(img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
--        VkBufferImageCopy region = {
--            .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, mip, layer, 1 },
--            .imageExtent = { w, h, 1 },
--        };
--        pvkCmdCopyBufferToImage(s_vk.cmd, st.buf, img, VK_IMAGE_LAYOUT_GENERAL, 1, &region);
--        rc = vk_submit_and_wait();
++    int rc = vk_begin();
 +    if (rc) return rc;
 +    /* Staging from the batch arena when it fits (no allocation per upload);
 +     * a dedicated buffer otherwise, released with the batch. */
@@ -72447,8 +72863,7 @@ index e2687b7..ff0bc8d 100644
 +        if (vk_create_host_buffer(&st, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT) || !st.coherent) {
 +            vk_destroy_buffer(&st); return -1; }
 +        dst = (u8*)st.ptr; src_buf = st.buf; src_off = 0;
-     }
--    vk_destroy_buffer(&st);
++    }
 +    for (u32 y = 0; y < rows; y++)
 +        memcpy(dst + (size_t)y * tight, (const u8*)src + (size_t)y * row_bytes, tight);
 +    VkBufferImageCopy region = {
@@ -72459,27 +72874,47 @@ index e2687b7..ff0bc8d 100644
 +    pvkCmdCopyBufferToImage(s_vk.cmd, src_buf, img, VK_IMAGE_LAYOUT_GENERAL, 1, &region);
 +    rc = vk_defer();
 +    if (st.buf) vk_destroy_buffer(&st);
-     return rc;
- }
- 
-@@ -1981,15 +4736,55 @@ static VkComponentMapping vk_remap(u32 remap, u32 rsx_fmt)
-                              vk_remap_sel(sel[3]), vk_remap_sel(sel[0]) };
-     return m;
- }
--static int vk_eng_make_view(VkImage img, VkFormat fmt, u32 levels, VkComponentMapping map,
--                            VkImageView* out)
++    return rc;
++}
++
++static int vk_eng_upload(VkImage img, u32 layer, u32 mip, u32 w, u32 h, u32 bpp,
++                         const void* src, u32 row_bytes)
++{
++    return vk_eng_upload_rows(img, layer, mip, w, h, (size_t)w * bpp, h, src, row_bytes);
++}
++
++/* NV4097 TEXTURE_CONTROL1 crossbar as a Vulkan component mapping: the shared
++ * rsx_texture_component_remap() gives, in A,R,G,B order, which uploaded
++ * channel (0..3 = R,G,B,A) or constant each output takes -- the table the
++ * Metal backend's swizzle_sel reads. */
++static VkComponentSwizzle vk_remap_sel(u8 sel)
++{
++    switch (sel) {
++    case 0: return VK_COMPONENT_SWIZZLE_R;
++    case 1: return VK_COMPONENT_SWIZZLE_G;
++    case 2: return VK_COMPONENT_SWIZZLE_B;
++    case 3: return VK_COMPONENT_SWIZZLE_A;
++    case RSX_REMAP_ONE: return VK_COMPONENT_SWIZZLE_ONE;
++    default: return VK_COMPONENT_SWIZZLE_ZERO;
++    }
++}
++static VkComponentMapping vk_remap(u32 remap, u32 rsx_fmt)
++{
++    u8 sel[4];
++    rsx_texture_component_remap(remap, rsx_fmt & 0x9Fu, sel);
++    VkComponentMapping m = { vk_remap_sel(sel[1]), vk_remap_sel(sel[2]),
++                             vk_remap_sel(sel[3]), vk_remap_sel(sel[0]) };
++    return m;
++}
 +static int vk_eng_make_view_ex(VkImage img, VkFormat fmt, u32 levels, VkComponentMapping map,
 +                               int cube, VkImageView* out)
- {
-     VkImageViewCreateInfo vci = {
-         .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = img,
--        .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = fmt, .components = map,
--        .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, levels ? levels : 1, 0, 1 },
++{
++    VkImageViewCreateInfo vci = {
++        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = img,
 +        .viewType = cube ? VK_IMAGE_VIEW_TYPE_CUBE : VK_IMAGE_VIEW_TYPE_2D,
 +        .format = fmt, .components = map,
 +        .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, levels ? levels : 1, 0, cube ? 6u : 1u },
-     };
--    return pvkCreateImageView(s_vk.device, &vci, NULL, out) == VK_SUCCESS ? 0 : -1;
++    };
 +    VK_CHECK_CREATED((s_vkc[4]++, pvkCreateImageView(s_vk.device, &vci, NULL, out)), *out, "vkCreateImageView(engine)");
 +    return 0;
 +}
@@ -72520,22 +72955,28 @@ index e2687b7..ff0bc8d 100644
 +    for (u32 f = 0; f < 6; f++)
 +        if (vk_eng_upload_rows(d->img, f, 0, 1, 1, 4, 1, magenta, 4)) return -1;
 +    return 0;
- }
- 
- static int vk_eng_init(void* user, u32 width, u32 height)
-@@ -2005,19 +4800,39 @@ static void vk_eng_release(void* user, u32 handle)
-     (void)user;
-     if (!handle || handle >= VK_ENG_MAX_OBJ || s_eobj[handle].kind == VK_ENG_FREE) return;
-     if (s_eobj[handle].kind == VK_ENG_COLOR)
--        for (u32 i = 1; i < VK_ENG_MAX_OBJ; i++)
++}
++
++static int vk_eng_init(void* user, u32 width, u32 height)
++{
++    (void)user; (void)width; (void)height;
++    memset(s_eobj, 0, sizeof s_eobj);
++    memset(&s_eng_bound, 0, sizeof s_eng_bound);
++    return s_vk.device ? 0 : -1;
++}
++
++static void vk_eng_release(void* user, u32 handle)
++{
++    (void)user;
++    if (!handle || handle >= VK_ENG_MAX_OBJ || s_eobj[handle].kind == VK_ENG_FREE) return;
++    if (s_eobj[handle].kind == VK_ENG_COLOR)
 +        for (u32 i = s_eobj[handle].views; i && i < VK_ENG_MAX_OBJ; ) {
 +            const u32 next = s_eobj[i].next_view;
-             if (s_eobj[i].kind == VK_ENG_VIEW && s_eobj[i].surface == handle) {
++            if (s_eobj[i].kind == VK_ENG_VIEW && s_eobj[i].surface == handle) {
 +                vk_eng_drop_framebuffers_using(i);
-                 vk_destroy_image(&s_eobj[i].im);
-                 memset(&s_eobj[i], 0, sizeof s_eobj[i]);
-             }
--    if (s_eobj[handle].kind == VK_ENG_DEPTH && s_eobj[handle].surface) {
++                vk_destroy_image(&s_eobj[i].im);
++                memset(&s_eobj[i], 0, sizeof s_eobj[i]);
++            }
 +            i = next;
 +        }
 +    if (s_eobj[handle].kind == VK_ENG_VIEW) {   /* unlink from its surface */
@@ -72546,13 +72987,10 @@ index e2687b7..ff0bc8d 100644
 +    }
 +    if ((s_eobj[handle].kind == VK_ENG_DEPTH || s_eobj[handle].kind == VK_ENG_COLOR) &&
 +        s_eobj[handle].surface) {          /* its snapshot texture */
-         const u32 snap = s_eobj[handle].surface;
-         s_eobj[handle].surface = 0;
-         if (vk_eng_get(snap, VK_ENG_TEXTURE)) vk_eng_release(user, snap);
-     }
--    if (s_eobj[handle].kind == VK_ENG_COLOR || s_eobj[handle].kind == VK_ENG_DEPTH)
--        vk_eng_drop_framebuffers();
--    vk_destroy_image(&s_eobj[handle].im);      /* idle: submissions are waited on */
++        const u32 snap = s_eobj[handle].surface;
++        s_eobj[handle].surface = 0;
++        if (vk_eng_get(snap, VK_ENG_TEXTURE)) vk_eng_release(user, snap);
++    }
 +    if (s_eobj[handle].kind == VK_ENG_DEPTH && s_eobj[handle].spare) {
 +        const u32 sp = s_eobj[handle].spare;
 +        s_eobj[handle].spare = 0;
@@ -72565,22 +73003,22 @@ index e2687b7..ff0bc8d 100644
 +      if (!o->lazy && !((o->kind == VK_ENG_COLOR || o->kind == VK_ENG_DEPTH) &&
 +            vk_rbin_park((u32)o->kind, o->fmt, o->w, o->h, o->kind == VK_ENG_DEPTH ? 8u : o->bpp, &o->im)))
 +          vk_destroy_image(&o->im);              /* idle: submissions are waited on */ }
-     memset(&s_eobj[handle], 0, sizeof s_eobj[handle]);
- }
- 
-@@ -2025,69 +4840,151 @@ static void vk_eng_shutdown(void* user)
- {
-     vk_eng2_shutdown(user);
-     for (u32 i = 1; i < VK_ENG_MAX_OBJ; i++) vk_eng_release(user, i);
++    memset(&s_eobj[handle], 0, sizeof s_eobj[handle]);
++}
++
++static void vk_eng_shutdown(void* user)
++{
++    vk_eng2_shutdown(user);
++    for (u32 i = 1; i < VK_ENG_MAX_OBJ; i++) vk_eng_release(user, i);
 +    vk_rbin_flush();
- }
- 
- static void vk_eng_submit_and_wait(void* user, u32 reason)
- {
++}
++
++static void vk_eng_submit_and_wait(void* user, u32 reason)
++{
 +    s_sync_calls[0]++;
-     (void)user; (void)reason;      /* every submission has already completed */
- }
- 
++    (void)user; (void)reason;      /* every submission has already completed */
++}
++
 +/* ---- RACACIT_RES_SCALE: internal resolution ------------------------------
 + * Every colour and depth target -- and the copies made of them for sampling
 + * -- is created this many times the size the guest asked for, and viewports,
@@ -72655,29 +73093,21 @@ index e2687b7..ff0bc8d 100644
 +    return vk_defer() ? -1 : 0;
 +}
 +
- static u32 vk_eng_color_target_create(void* user, rsx_be_format fmt, u32 w, u32 h,
-                                       const void* seed, u32 seed_row_bytes)
- {
++static u32 vk_eng_color_target_create(void* user, rsx_be_format fmt, u32 w, u32 h,
++                                      const void* seed, u32 seed_row_bytes)
++{
 +    s_sync_calls[2]++;
-     (void)user;
-     u32 bpp;
-     const VkFormat vf = vk_eng_format(fmt, &bpp);
--    /* E1: the render pass is built for R8G8B8A8, so that is the one colour
--     * target format for now; FP16 HDR targets need their own pass. */
--    if (vf != VK_FORMAT_R8G8B8A8_UNORM || !w || !h || w > 4096u || h > 4096u) {
++    (void)user;
++    u32 bpp;
++    const VkFormat vf = vk_eng_format(fmt, &bpp);
 +    /* The formats with a render pass (vk_eng_rt_fi): RGBA8 and RGBA16F. */
 +    if (vk_eng_rt_fi(vf) < 0 || !w || !h || w > 4096u || h > 4096u) {
-         VK_LOG("engine: colour target format %d %ux%u not supported yet\n", (int)fmt, w, h);
-         return 0;
-     }
-     const u32 hd = vk_eng_alloc();
-     if (!hd) return 0;
-     vk_eng_obj* o = &s_eobj[hd];
--    if (vk_create_image(&o->im, vf, w, h,
--                        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
--                        VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
--                        VK_IMAGE_ASPECT_COLOR_BIT)) {
--        vk_destroy_image(&o->im); return 0;
++        VK_LOG("engine: colour target format %d %ux%u not supported yet\n", (int)fmt, w, h);
++        return 0;
++    }
++    const u32 hd = vk_eng_alloc();
++    if (!hd) return 0;
++    vk_eng_obj* o = &s_eobj[hd];
 +    const u32 pw = vk_rs(w), ph = vk_rs(h);
 +    o->kind = VK_ENG_COLOR; o->fmt = vf; o->bpp = bpp; o->w = pw; o->h = ph; o->lw = w; o->lh = h;
 +    /* No image until something uses it. Every shadow map has a colour target at its
@@ -72690,34 +73120,18 @@ index e2687b7..ff0bc8d 100644
 +    {
 +        if (pw == w && ph == h) vk_eng_upload(o->im.img, 0, 0, w, h, bpp, seed, seed_row_bytes);
 +        else vk_eng_seed_scaled(o, w, h, bpp, seed, seed_row_bytes);
-     }
--    o->kind = VK_ENG_COLOR; o->fmt = vf; o->bpp = bpp; o->w = w; o->h = h;
--    /* UNDEFINED -> GENERAL, then the guest's own bytes when the engine could
--     * resolve them, else transparent black so the contents are defined. */
--    if (vk_begin()) { vk_eng_release(user, hd); return 0; }
--    vk_barrier_image(o->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED);
--    VkClearColorValue zero = { .float32 = { 0.0f, 0.0f, 0.0f, 0.0f } };
--    VkImageSubresourceRange r = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
--    pvkCmdClearColorImage(s_vk.cmd, o->im.img, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &r);
--    if (vk_submit_and_wait()) { vk_eng_release(user, hd); return 0; }
--    if (seed && seed_row_bytes)
--        vk_eng_upload(o->im.img, 0, 0, w, h, bpp, seed, seed_row_bytes);
-     return hd;
- }
- 
- static u32 vk_eng_depth_target_create(void* user, u32 w, u32 h)
- {
++    }
++    return hd;
++}
++
++static u32 vk_eng_depth_target_create(void* user, u32 w, u32 h)
++{
 +    s_sync_calls[4]++;
-     (void)user;
-     if (!w || !h || w > 4096u || h > 4096u) return 0;
-     const u32 hd = vk_eng_alloc();
-     if (!hd) return 0;
-     vk_eng_obj* o = &s_eobj[hd];
--    if (vk_create_image(&o->im, s_vk.depth_format, w, h,
--                        VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
--                        VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
--                        VK_IMAGE_ASPECT_DEPTH_BIT)) {
--        vk_destroy_image(&o->im); return 0;
++    (void)user;
++    if (!w || !h || w > 4096u || h > 4096u) return 0;
++    const u32 hd = vk_eng_alloc();
++    if (!hd) return 0;
++    vk_eng_obj* o = &s_eobj[hd];
 +    extern int rsx_depth_target_is_map(u32 w, u32 h);
 +    const float zsc = rsx_depth_target_is_map(w, h) ? rsx_depth_target_scale(w, h) : 0.0f;
 +    const u32 pw = zsc > 0.0f ? (u32)((float)w * zsc + 0.5f) : vk_rs(w);
@@ -72730,28 +73144,30 @@ index e2687b7..ff0bc8d 100644
 +                            s_vk.eng_depth_aspect)) {
 +            vk_destroy_image(&o->im); return 0;
 +        }
-     }
--    o->kind = VK_ENG_DEPTH; o->fmt = s_vk.depth_format; o->w = w; o->h = h;
++    }
 +    o->kind = VK_ENG_DEPTH; o->fmt = s_vk.eng_depth_format; o->w = pw; o->h = ph; o->lw = w; o->lh = h;
 +    o->sc = zsc;
 +    if (zsc > 0.0f) s_zhi_made++;
-     /* Far plane, for the reason the display depth starts there. */
-     if (vk_begin()) { vk_eng_release(user, hd); return 0; }
--    vk_barrier_image(o->im.img, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_UNDEFINED);
++    /* Far plane, for the reason the display depth starts there. */
++    if (vk_begin()) { vk_eng_release(user, hd); return 0; }
 +    vk_barrier_image(o->im.img, s_vk.eng_depth_aspect, VK_IMAGE_LAYOUT_UNDEFINED);
-     VkClearDepthStencilValue far_plane = { 1.0f, 0 };
--    VkImageSubresourceRange r = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1 };
++    VkClearDepthStencilValue far_plane = { 1.0f, 0 };
 +    VkImageSubresourceRange r = { s_vk.eng_depth_aspect, 0, 1, 0, 1 };
-     pvkCmdClearDepthStencilImage(s_vk.cmd, o->im.img, VK_IMAGE_LAYOUT_GENERAL, &far_plane, 1, &r);
--    if (vk_submit_and_wait()) { vk_eng_release(user, hd); return 0; }
++    pvkCmdClearDepthStencilImage(s_vk.cmd, o->im.img, VK_IMAGE_LAYOUT_GENERAL, &far_plane, 1, &r);
 +    if (vk_defer()) { vk_eng_release(user, hd); return 0; }
-     return hd;
- }
- 
-@@ -2101,6 +4998,49 @@ static void vk_eng_bind_targets(void* user, const u32* surfaces, u32 count, u32
-     s_eng_bound.depth = depth;
- }
- 
++    return hd;
++}
++
++static void vk_eng_bind_targets(void* user, const u32* surfaces, u32 count, u32 depth)
++{
++    (void)user;
++    if (count > RSX_BE_MAX_COLOR_TARGETS) count = RSX_BE_MAX_COLOR_TARGETS;
++    for (u32 i = 0; i < RSX_BE_MAX_COLOR_TARGETS; i++)
++        s_eng_bound.rt[i] = (i < count && surfaces) ? surfaces[i] : 0;
++    s_eng_bound.nrt = count;
++    s_eng_bound.depth = depth;
++}
++
 +/* Clears wait for the pass that follows. A tile GPU starts a pass by copying the attachments into
 + * tile memory, unless told they are to be cleared: a clear outside the pass (two full barriers and
 + * every pixel written) then a load of the result cost what a load op of CLEAR does for nothing. A
@@ -72795,38 +73211,23 @@ index e2687b7..ff0bc8d 100644
 +    if (!on || !s_bt.ready) { vk_eng_do_clear(o); }
 +}
 +
- static void vk_eng_clear_color(void* user, u32 surface, const float rgba[4])
- {
-     (void)user;
-@@ -2109,27 +5049,23 @@ static void vk_eng_clear_color(void* user, u32 surface, const float rgba[4])
-                       ((u32)(rgba[0] * 255.0f + 0.5f) << 16) |
-                       ((u32)(rgba[1] * 255.0f + 0.5f) <<  8) |
-                        (u32)(rgba[2] * 255.0f + 0.5f);
--    vk_eng_obj* o = vk_eng_get(surface, VK_ENG_COLOR);
--    if (!o || vk_begin()) return;
--    VkClearColorValue v;
--    memcpy(v.float32, rgba, sizeof v.float32);
--    VkImageSubresourceRange r = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
--    vk_barrier_image(o->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
--    pvkCmdClearColorImage(s_vk.cmd, o->im.img, VK_IMAGE_LAYOUT_GENERAL, &v, 1, &r);
--    vk_submit_and_wait();
++static void vk_eng_clear_color(void* user, u32 surface, const float rgba[4])
++{
++    (void)user;
++    /* The debug hook reports the last colour asked for, as Metal's does. */
++    s_vk.clear_argb = ((u32)(rgba[3] * 255.0f + 0.5f) << 24) |
++                      ((u32)(rgba[0] * 255.0f + 0.5f) << 16) |
++                      ((u32)(rgba[1] * 255.0f + 0.5f) <<  8) |
++                       (u32)(rgba[2] * 255.0f + 0.5f);
 +    vk_eng_obj* o = vk_eng_peek(surface, VK_ENG_COLOR);
 +    if (!o) return;
 +    memcpy(o->pend_v.color.float32, rgba, sizeof o->pend_v.color.float32);
 +    vk_eng_defer_clear(surface, o, 1u);
- }
- 
- static void vk_eng_clear_depth_stencil(void* user, u32 depth, u32 flags,
-                                        float depth_value, u8 stencil)
- {
--    (void)user; (void)stencil;      /* E1: no stencil in the depth format yet */
--    vk_eng_obj* o = vk_eng_get(depth, VK_ENG_DEPTH);
--    if (!o || !(flags & RSX_BE_CLEAR_DEPTH) || vk_begin()) return;
--    VkClearDepthStencilValue d = { depth_value, 0 };
--    VkImageSubresourceRange r = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1 };
--    vk_barrier_image(o->im.img, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_GENERAL);
--    pvkCmdClearDepthStencilImage(s_vk.cmd, o->im.img, VK_IMAGE_LAYOUT_GENERAL, &d, 1, &r);
--    vk_submit_and_wait();
++}
++
++static void vk_eng_clear_depth_stencil(void* user, u32 depth, u32 flags,
++                                       float depth_value, u8 stencil)
++{
 +    (void)user;
 +    vk_eng_obj* o = vk_eng_peek(depth, VK_ENG_DEPTH);
 +    u8 bits = 0;
@@ -72835,13 +73236,14 @@ index e2687b7..ff0bc8d 100644
 +        bits |= 2u; if (o) o->pend_v.depthStencil.stencil = stencil; }
 +    if (!o || !bits) return;
 +    vk_eng_defer_clear(depth, o, bits);
- }
- 
- /* The named surface becomes the frame: blit it onto the display image, then
-@@ -2138,6 +5074,43 @@ static void vk_eng_present(void* user, u32 surface)
- {
-     (void)user;
-     vk_eng_obj* o = vk_eng_get(surface, VK_ENG_COLOR);
++}
++
++/* The named surface becomes the frame: blit it onto the display image, then
++ * the existing present does the readback, the PPM dump and the window. */
++static void vk_eng_present(void* user, u32 surface)
++{
++    (void)user;
++    vk_eng_obj* o = vk_eng_get(surface, VK_ENG_COLOR);
 +    extern unsigned long long ps3_qpc_us(void);
 +    const unsigned long long b0 = ps3_qpc_us();
 +    /* Twice a second, how close the card is: past 88% of its budget new shadow
@@ -72879,20 +73281,25 @@ index e2687b7..ff0bc8d 100644
 +                       (unsigned long long)(vk_geo_size_() >> 20), 10);
 +            } }
 +    }
-     if (o && !vk_begin()) {
-         vk_barrier_image(o->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
-         vk_barrier_image(s_vk.color.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
-@@ -2151,29 +5124,84 @@ static void vk_eng_present(void* user, u32 surface)
-                         s_vk.color.img, VK_IMAGE_LAYOUT_GENERAL, 1, &blit,
-                         (o->w == s_vk.width && o->h == s_vk.height) ? VK_FILTER_NEAREST
-                                                                     : VK_FILTER_LINEAR);
--        vk_submit_and_wait();
++    if (o && !vk_begin()) {
++        vk_barrier_image(o->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
++        vk_barrier_image(s_vk.color.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
++        VkImageBlit blit = {
++            .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
++            .srcOffsets = { { 0, 0, 0 }, { (int32_t)o->w, (int32_t)o->h, 1 } },
++            .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
++            .dstOffsets = { { 0, 0, 0 }, { (int32_t)s_vk.width, (int32_t)s_vk.height, 1 } },
++        };
++        pvkCmdBlitImage(s_vk.cmd, o->im.img, VK_IMAGE_LAYOUT_GENERAL,
++                        s_vk.color.img, VK_IMAGE_LAYOUT_GENERAL, 1, &blit,
++                        (o->w == s_vk.width && o->h == s_vk.height) ? VK_FILTER_NEAREST
++                                                                    : VK_FILTER_LINEAR);
 +        vk_defer();
-     }
++    }
 +    s_pw_blit = ps3_qpc_us() - b0;
 +    const unsigned long long t0 = ps3_qpc_us();
 +    const int saving = SDL_AtomicGet(&s_pcache_busy);
-     vk_cb_present(&s_vk, 0);
++    vk_cb_present(&s_vk, 0);
 +    const unsigned long long t1 = ps3_qpc_us();
 +    vk_pcache_save(0);
 +    const unsigned long long t2 = ps3_qpc_us();
@@ -72902,9 +73309,8 @@ index e2687b7..ff0bc8d 100644
 +            VK_LOG("[present-slow] %.1f ms: blit %.1f, ui %.1f, acquire %.1f, compose+submit %.1f, queue-present %.1f, cache save %.1f%s%c",
 +                   (t2 - t0 + s_pw_blit) / 1e3, s_pw_blit / 1e3, s_pw_ui / 1e3, s_pw_acq / 1e3, s_pw_sub / 1e3, s_pw_qp / 1e3, (t2 - t1) / 1e3,
 +                   saving ? " -- pipeline-cache save was running" : "", 10); }
- }
- 
--static void vk_eng_readback(void* user, u32 surface, u32 x, u32 y, u32 w, u32 h,
++}
++
 +static int vk_eng_readback_(void* user, u32 surface, u32 x, u32 y, u32 w, u32 h,
 +                            void* out, u32 out_pitch);
 +/* Every read-back waits for the GPU to finish what is queued: counted and
@@ -72920,22 +73326,20 @@ index e2687b7..ff0bc8d 100644
 +    return rc;
 +}
 +static int vk_eng_readback_(void* user, u32 surface, u32 x, u32 y, u32 w, u32 h,
-                             void* out, u32 out_pitch)
- {
++                            void* out, u32 out_pitch)
++{
 +    s_sync_calls[9]++;
-     (void)user;
-     vk_eng_obj* o = vk_eng_get(surface, VK_ENG_COLOR);
--    if (!o || !out || !out_pitch || !w || !h || x + w > o->w || y + h > o->h) return;
++    (void)user;
++    vk_eng_obj* o = vk_eng_get(surface, VK_ENG_COLOR);
 +    if (!o) o = vk_eng_get(surface, VK_ENG_TEXTURE);    /* a depth snapshot (R32F) */
 +    if (!o || !out || !out_pitch || !w || !h ||
 +        (u64)x + w > vk_lw(o) || (u64)y + h > vk_lh(o)) return -1;
-     const size_t tight = (size_t)w * o->bpp;
++    const size_t tight = (size_t)w * o->bpp;
 +    if (!o->bpp || out_pitch < tight) return -1;           /* rows would overlap */
-     vk_buffer st = {0};
-     if (vk_create_host_buffer(&st, (VkDeviceSize)tight * h, VK_BUFFER_USAGE_TRANSFER_DST_BIT)) {
--        vk_destroy_buffer(&st); return;
++    vk_buffer st = {0};
++    if (vk_create_host_buffer(&st, (VkDeviceSize)tight * h, VK_BUFFER_USAGE_TRANSFER_DST_BIT)) {
 +        vk_destroy_buffer(&st); return -1;
-     }
++    }
 +    /* A scaled image goes back to the guest's size first: the region is
 +     * stretched into a temporary of w x h (averaged for colour; depth is
 +     * point-sampled, as an average of depths is no depth at all). */
@@ -72946,8 +73350,8 @@ index e2687b7..ff0bc8d 100644
 +        vk_destroy_image(&down); vk_destroy_buffer(&st); return -1;
 +    }
 +    int rc = -1;
-     if (!vk_begin()) {
-         vk_barrier_image(o->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
++    if (!vk_begin()) {
++        vk_barrier_image(o->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
 +        VkImage src = o->im.img;
 +        int32_t rx = (int32_t)x, ry = (int32_t)y;
 +        if (scaled) {
@@ -72963,51 +73367,46 @@ index e2687b7..ff0bc8d 100644
 +            vk_full_barrier();
 +            src = down.img; rx = ry = 0;
 +        }
-         VkBufferImageCopy region = {
-             .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
--            .imageOffset = { (int32_t)x, (int32_t)y, 0 }, .imageExtent = { w, h, 1 },
++        VkBufferImageCopy region = {
++            .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
 +            .imageOffset = { rx, ry, 0 }, .imageExtent = { w, h, 1 },
-         };
--        pvkCmdCopyImageToBuffer(s_vk.cmd, o->im.img, VK_IMAGE_LAYOUT_GENERAL, st.buf, 1, &region);
++        };
 +        pvkCmdCopyImageToBuffer(s_vk.cmd, src, VK_IMAGE_LAYOUT_GENERAL, st.buf, 1, &region);
-         VkBufferMemoryBarrier hb = {
-             .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
-             .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT,
-@@ -2182,13 +5210,15 @@ static void vk_eng_readback(void* user, u32 surface, u32 x, u32 y, u32 w, u32 h,
-         };
-         pvkCmdPipelineBarrier(s_vk.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
-                               0, 0, NULL, 1, &hb, 0, NULL);
--        if (!vk_submit_and_wait()) {
--            vk_invalidate(&st);
++        VkBufferMemoryBarrier hb = {
++            .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
++            .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT,
++            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++            .buffer = st.buf, .offset = 0, .size = VK_WHOLE_SIZE,
++        };
++        pvkCmdPipelineBarrier(s_vk.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
++                              0, 0, NULL, 1, &hb, 0, NULL);
 +        if (!vk_submit_and_wait() && !vk_invalidate(&st)) {
-             for (u32 row = 0; row < h; row++)
-                 memcpy((u8*)out + (size_t)row * out_pitch, (const u8*)st.ptr + (size_t)row * tight, tight);
++            for (u32 row = 0; row < h; row++)
++                memcpy((u8*)out + (size_t)row * out_pitch, (const u8*)st.ptr + (size_t)row * tight, tight);
 +            rc = 0;
-         }
-     }
++        }
++    }
 +    vk_destroy_image(&down);
-     vk_destroy_buffer(&st);
++    vk_destroy_buffer(&st);
 +    return rc;
- }
- 
- /* ---- E3: textures ---------------------------------------------------------
-@@ -2200,45 +5230,47 @@ static void vk_eng_readback(void* user, u32 surface, u32 x, u32 y, u32 w, u32 h,
- static u32 vk_eng_texture_create(void* user, rsx_be_format fmt, u32 w, u32 h,
-                                  u32 mips, u32 faces, u32 remap, u32 rsx_fmt)
- {
++}
++
++/* ---- E3: textures ---------------------------------------------------------
++ * The engine decodes every level to host rows (rsx_texture_decode) and hands
++ * them over one upload each; the crossbar is a property of the view, so it
++ * becomes the image view's component mapping. Cube maps are not handled yet:
++ * the pixel decompiler declares cube units as separate bindings, which the
++ * shared set layout does not have, so faces == 6 reports 0 (placeholder). */
++static u32 vk_eng_texture_create(void* user, rsx_be_format fmt, u32 w, u32 h,
++                                 u32 mips, u32 faces, u32 remap, u32 rsx_fmt)
++{
 +    s_sync_calls[1]++;
-     (void)user;
-     u32 bpp;
--    const VkFormat vf = vk_eng_format(fmt, &bpp);
++    (void)user;
++    u32 bpp;
 +    VkFormat vf = vk_eng_format(fmt, &bpp);
-     const int bc = (fmt == RSX_BE_FMT_BC1 || fmt == RSX_BE_FMT_BC2 || fmt == RSX_BE_FMT_BC3);
--    if (vf == VK_FORMAT_UNDEFINED || !w || !h || w > 4096u || h > 4096u || (bc && !s_vk.bc_ok))
--        return 0;
--    if (faces == 6) {
--        static int warned_cube;
--        if (!warned_cube) { VK_LOG("engine: cube textures not supported yet\n"); warned_cube = 1; }
++    const int bc = (fmt == RSX_BE_FMT_BC1 || fmt == RSX_BE_FMT_BC2 || fmt == RSX_BE_FMT_BC3);
 +    if (vf == VK_FORMAT_UNDEFINED || !w || !h || w > 4096u || h > 4096u)
-         return 0;
++        return 0;
 +    u8 soft = VK_SOFT_NONE;
 +    if (bc && !s_vk.bc_ok) {
 +        soft = fmt == RSX_BE_FMT_BC1 ? VK_SOFT_BC1 : fmt == RSX_BE_FMT_BC2 ? VK_SOFT_BC2 : VK_SOFT_BC3;
@@ -73016,60 +73415,47 @@ index e2687b7..ff0bc8d 100644
 +        soft = VK_SOFT_R16; vf = VK_FORMAT_R16_SFLOAT;
 +    } else if (fmt == RSX_BE_FMT_R16G16 && !vk_format_samples(vf)) {
 +        soft = VK_SOFT_RG16; vf = VK_FORMAT_R16G16_SFLOAT;
-     }
++    }
 +    const int cube = (faces == 6);
 +    if (cube && w != h) return 0;            /* Vulkan cube faces are square */
-     if (!mips) mips = 1;
-     const u32 hd = vk_eng_alloc();
-     if (!hd) return 0;
-     vk_eng_obj* o = &s_eobj[hd];
-     VkImageCreateInfo ici = {
--        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
--        .format = vf, .extent = { w, h, 1 }, .mipLevels = mips, .arrayLayers = 1,
++    if (!mips) mips = 1;
++    const u32 hd = vk_eng_alloc();
++    if (!hd) return 0;
++    vk_eng_obj* o = &s_eobj[hd];
++    VkImageCreateInfo ici = {
 +        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
 +        .flags = cube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0u, .imageType = VK_IMAGE_TYPE_2D,
 +        .format = vf, .extent = { w, h, 1 }, .mipLevels = mips, .arrayLayers = cube ? 6u : 1u,
-         .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
-         .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-         .sharingMode = VK_SHARING_MODE_EXCLUSIVE, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED };
--    VkMemoryRequirements req;
--    u32 type;
--    if (pvkCreateImage(s_vk.device, &ici, NULL, &o->im.img) != VK_SUCCESS) goto fail;
--    pvkGetImageMemoryRequirements(s_vk.device, o->im.img, &req);
--    if (vk_find_memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &type) &&
--        vk_find_memory_type(req.memoryTypeBits, 0, &type)) goto fail;
--    VkMemoryAllocateInfo mai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
--                                 .allocationSize = req.size, .memoryTypeIndex = type };
--    if (pvkAllocateMemory(s_vk.device, &mai, NULL, &o->im.mem) != VK_SUCCESS ||
--        pvkBindImageMemory(s_vk.device, o->im.img, o->im.mem, 0) != VK_SUCCESS ||
--        vk_eng_make_view(o->im.img, vf, mips, vk_remap(remap, rsx_fmt), &o->im.view))
++        .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
++        .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
++        .sharingMode = VK_SHARING_MODE_EXCLUSIVE, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED };
 +    s_img_why[2]++;
 +    o->im.sub = 0; o->im.mem = VK_NULL_HANDLE;
 +    if ((s_vkc[0]++, pvkCreateImage(s_vk.device, &ici, NULL, &o->im.img)) != VK_SUCCESS) goto fail;
 +    if (vk_image_memory(&o->im) ||
 +        vk_eng_make_view_ex(o->im.img, vf, mips, vk_remap(remap, rsx_fmt), cube, &o->im.view))
-         goto fail;
--    o->kind = VK_ENG_TEXTURE; o->fmt = vf; o->w = w; o->h = h;
--    o->bpp = bc ? 0 : bpp; o->block = bc ? bpp : 0;
++        goto fail;
 +    o->kind = VK_ENG_TEXTURE; o->fmt = vf; o->w = w; o->h = h; o->cube = (u8)cube;
 +    o->bpp = bc ? 0 : bpp; o->block = bc ? bpp : 0; o->soft = soft;
-     /* UNDEFINED -> GENERAL for every level before the uploads arrive. */
-     if (vk_begin()) goto fail;
-     vk_barrier_image(o->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED);
--    if (vk_submit_and_wait()) goto fail;
++    /* UNDEFINED -> GENERAL for every level before the uploads arrive. */
++    if (vk_begin()) goto fail;
++    vk_barrier_image(o->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED);
 +    if (vk_defer()) goto fail;
-     return hd;
- fail:
-     vk_destroy_image(&o->im);
-@@ -2251,22 +5283,40 @@ static void vk_eng_texture_upload(void* user, u32 texture, u32 face, u32 mip, u3
- {
-     (void)user;
-     vk_eng_obj* o = vk_eng_get(texture, VK_ENG_TEXTURE);
--    if (!o || !src || !row_bytes || !rows || face) return;
++    return hd;
++fail:
++    vk_destroy_image(&o->im);
++    memset(o, 0, sizeof *o);
++    return 0;
++}
++
++static void vk_eng_texture_upload(void* user, u32 texture, u32 face, u32 mip, u32 w, u32 h,
++                                  const void* src, u32 row_bytes, u32 rows)
++{
++    (void)user;
++    vk_eng_obj* o = vk_eng_get(texture, VK_ENG_TEXTURE);
 +    if (!o || !src || !row_bytes || !rows || face >= (o->cube ? 6u : 1u)) return;
-     /* A BC row is a row of 4x4 blocks; the engine's `rows` already counts them. */
-     const size_t tight = o->block ? (size_t)((w + 3u) / 4u) * o->block : (size_t)w * o->bpp;
--    vk_eng_upload_rows(o->im.img, 0, mip, w, h, tight, rows, src, row_bytes);
++    /* A BC row is a row of 4x4 blocks; the engine's `rows` already counts them. */
++    const size_t tight = o->block ? (size_t)((w + 3u) / 4u) * o->block : (size_t)w * o->bpp;
 +    if (o->soft) {
 +        const int blocks = o->soft <= VK_SOFT_BC3;
 +        const u32 out_rows = blocks ? h : rows;
@@ -73087,49 +73473,43 @@ index e2687b7..ff0bc8d 100644
 +        return;
 +    }
 +    vk_eng_upload_rows(o->im.img, face, mip, w, h, tight, rows, src, row_bytes);
- }
- 
- /* A colour target sampled with a unit's crossbar: an extra view of the same
-  * image, cached by (surface, crossbar, format) and released with the target. */
- static u32 vk_eng_surface_view(void* user, u32 surface, u32 remap, u32 rsx_format)
- {
++}
++
++/* A colour target sampled with a unit's crossbar: an extra view of the same
++ * image, cached by (surface, crossbar, format) and released with the target. */
++static u32 vk_eng_surface_view(void* user, u32 surface, u32 remap, u32 rsx_format)
++{
 +    s_sync_calls[3]++;
-     (void)user;
-     vk_eng_obj* t = vk_eng_get(surface, VK_ENG_COLOR);
-     if (!t) return 0;
--    for (u32 i = 1; i < VK_ENG_MAX_OBJ; i++)
--        if (s_eobj[i].kind == VK_ENG_VIEW && s_eobj[i].surface == surface &&
--            s_eobj[i].remap == remap && s_eobj[i].rsx_fmt == rsx_format)
++    (void)user;
++    vk_eng_obj* t = vk_eng_get(surface, VK_ENG_COLOR);
++    if (!t) return 0;
 +    /* Its own views only: a scan of the whole object table here was ~7% of
 +     * the RSX thread in Zolar Forest. */
 +    for (u32 i = t->views; i; i = s_eobj[i].next_view)
 +        if (s_eobj[i].remap == remap && s_eobj[i].rsx_fmt == rsx_format)
-             return i;
-     const u32 hd = vk_eng_alloc();
-     if (!hd) return 0;
-@@ -2274,8 +5324,9 @@ static u32 vk_eng_surface_view(void* user, u32 surface, u32 remap, u32 rsx_forma
-     if (vk_eng_make_view(t->im.img, t->fmt, 1, vk_remap(remap, rsx_format), &o->im.view)) {
-         memset(o, 0, sizeof *o); return 0;
-     }
--    o->kind = VK_ENG_VIEW; o->fmt = t->fmt; o->w = t->w; o->h = t->h;
++            return i;
++    const u32 hd = vk_eng_alloc();
++    if (!hd) return 0;
++    vk_eng_obj* o = &s_eobj[hd];
++    if (vk_eng_make_view(t->im.img, t->fmt, 1, vk_remap(remap, rsx_format), &o->im.view)) {
++        memset(o, 0, sizeof *o); return 0;
++    }
 +    o->kind = VK_ENG_VIEW; o->fmt = t->fmt; o->w = t->w; o->h = t->h; o->lw = t->lw; o->lh = t->lh;
-     o->surface = surface; o->remap = remap; o->rsx_fmt = rsx_format;
++    o->surface = surface; o->remap = remap; o->rsx_fmt = rsx_format;
 +    o->next_view = t->views; t->views = hd;
-     return hd;
- }
- /* ---- E4: depth snapshots --------------------------------------------------
-@@ -2283,55 +5334,289 @@ static u32 vk_eng_surface_view(void* user, u32 surface, u32 remap, u32 rsx_forma
-  * depth-writing draw. Metal resolves it with a fullscreen pass into R32Float;
-  * Vulkan can do it with two copies on the GPU, since a D32_SFLOAT depth
-  * aspect copies out as 32-bit floats: depth -> buffer -> an R32_SFLOAT
-- * texture. Other depth formats would need a conversion pass: they report 0.
++    return hd;
++}
++/* ---- E4: depth snapshots --------------------------------------------------
++ * A depth target read as a texture, which the engine asks for only after a
++ * depth-writing draw. Metal resolves it with a fullscreen pass into R32Float;
++ * Vulkan can do it with two copies on the GPU, since a D32_SFLOAT depth
++ * aspect copies out as 32-bit floats: depth -> buffer -> an R32_SFLOAT
 + * texture. D24 uses a small compute pass on that buffer to normalize its
 + * packed UNORM values first, so filters, remaps and readbacks stay identical.
-  *
-  * Each depth target keeps ONE snapshot texture (its handle in `surface`),
-  * refilled on every request, so nothing accumulates however often the engine
-  * invalidates and asks again; it goes when the depth target goes. */
--static u32 vk_eng_depth_snapshot(void* user, u32 depth, u32 w, u32 h)
++ *
++ * Each depth target keeps ONE snapshot texture (its handle in `surface`),
++ * refilled on every request, so nothing accumulates however often the engine
++ * invalidates and asks again; it goes when the depth target goes. */
 +static struct {
 +    vk_buffer snapshot, scaled;
 +    vk_image a, b;
@@ -73147,14 +73527,7 @@ index e2687b7..ff0bc8d 100644
 +
 +/* Called after all submitted work is complete, also on partial init failure. */
 +static void vk_depth_copy_shutdown(void)
- {
--    vk_eng_obj* z = vk_eng_get(depth, VK_ENG_DEPTH);
--    if (!z) return 0;
--    if (s_vk.depth_format != VK_FORMAT_D32_SFLOAT) {
--        static int warned_fmt;
--        if (!warned_fmt) { VK_LOG("engine: depth snapshots need D32_SFLOAT, this device uses %d\n",
--                                  (int)s_vk.depth_format); warned_fmt = 1; }
--        return 0;
++{
 +    if (s_zcopy.pool) pvkDestroyDescriptorPool(s_vk.device, s_zcopy.pool, NULL);
 +    if (s_zcopy.pipeline) pvkDestroyPipeline(s_vk.device, s_zcopy.pipeline, NULL);
 +    if (s_zcopy.pipe_layout) pvkDestroyPipelineLayout(s_vk.device, s_zcopy.pipe_layout, NULL);
@@ -73216,10 +73589,7 @@ index e2687b7..ff0bc8d 100644
 +        const VkDescriptorPoolCreateInfo pool = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
 +            .maxSets = 1, .poolSizeCount = 1, .pPoolSizes = &size };
 +        VK_CHECK_CREATED(pvkCreateDescriptorPool(s_vk.device, &pool, NULL, &s_zcopy.pool), s_zcopy.pool, "D24 descriptor pool");
-     }
--    if (w > z->w) w = z->w;
--    if (h > z->h) h = z->h;
--    if (!w || !h) return 0;
++    }
 +    const VkDescriptorSetAllocateInfo set = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
 +        .descriptorPool = s_zcopy.pool, .descriptorSetCount = 1, .pSetLayouts = &s_zcopy.set_layout };
 +    VK_CHECK(pvkAllocateDescriptorSets(s_vk.device, &set, &s_zcopy.set), "D24 descriptor set");
@@ -73230,8 +73600,7 @@ index e2687b7..ff0bc8d 100644
 +    pvkUpdateDescriptorSets(s_vk.device, 1, &write, 0, NULL);
 +    return 0;
 +}
- 
--    u32 snap = z->surface;
++
 +static void vk_d24_convert(u32 width, u32 height)
 +{
 +    VkBufferMemoryBarrier barrier = { .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
@@ -73271,34 +73640,27 @@ index e2687b7..ff0bc8d 100644
 +    if (w > c->w) w = c->w;
 +    if (h > c->h) h = c->h;
 +    u32 snap = c->surface;
-     vk_eng_obj* t = vk_eng_get(snap, VK_ENG_TEXTURE);
--    if (!t || t->w != w || t->h != h) {
++    vk_eng_obj* t = vk_eng_get(snap, VK_ENG_TEXTURE);
 +    if (!t || t->w != w || t->h != h || t->fmt != c->fmt) {
-         if (t) vk_eng_release(user, snap);
--        z->surface = 0;
++        if (t) vk_eng_release(user, snap);
 +        c->surface = 0;
-         snap = vk_eng_alloc();
-         if (!snap) return 0;
++        snap = vk_eng_alloc();
++        if (!snap) return 0;
 +        c = vk_eng_get(color, VK_ENG_COLOR);
-         t = &s_eobj[snap];
--        if (vk_create_image(&t->im, VK_FORMAT_R32_SFLOAT, w, h,
++        t = &s_eobj[snap];
 +        s_img_why[3]++;
 +        if (vk_create_image(&t->im, c->fmt, w, h,
-                             VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-                             VK_IMAGE_ASPECT_COLOR_BIT)) {
-             vk_destroy_image(&t->im); memset(t, 0, sizeof *t); return 0;
-         }
--        t->kind = VK_ENG_TEXTURE; t->fmt = VK_FORMAT_R32_SFLOAT; t->bpp = 4; t->w = w; t->h = h;
--        z = vk_eng_get(depth, VK_ENG_DEPTH);          /* same slot; reload for clarity */
--        z->surface = snap;
++                            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
++                            VK_IMAGE_ASPECT_COLOR_BIT)) {
++            vk_destroy_image(&t->im); memset(t, 0, sizeof *t); return 0;
++        }
 +        t->kind = VK_ENG_TEXTURE; t->fmt = c->fmt; t->bpp = c->bpp; t->w = w; t->h = h;
 +        t->lw = lw; t->lh = lh;
 +        c->surface = snap;
-         if (vk_begin()) return 0;
-         vk_barrier_image(t->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED);
--        if (vk_submit_and_wait()) return 0;
++        if (vk_begin()) return 0;
++        vk_barrier_image(t->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED);
 +        if (vk_defer()) return 0;
-     }
++    }
 +    t->lw = lw; t->lh = lh;
 +    if (vk_begin()) return 0;
 +    vk_barrier_image(c->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
@@ -73309,11 +73671,7 @@ index e2687b7..ff0bc8d 100644
 +    pvkCmdCopyImage(s_vk.cmd, c->im.img, VK_IMAGE_LAYOUT_GENERAL, t->im.img, VK_IMAGE_LAYOUT_GENERAL, 1, &rg);
 +    return vk_defer() ? 0 : snap;
 +}
- 
--    vk_buffer st = {0};
--    if (vk_create_host_buffer(&st, (VkDeviceSize)w * h * 4u,
--                              VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT)) {
--        vk_destroy_buffer(&st); return 0;
++
 +static u32 vk_eng_depth_snapshot_sized(void* user, u32 depth, u32 w, u32 h, u32 tw, u32 th)
 +{
 +    s_sync_calls[5]++;
@@ -73325,11 +73683,7 @@ index e2687b7..ff0bc8d 100644
 +        if (!warned_fmt) { VK_LOG("engine: unsupported depth snapshot format %d\n",
 +                                  (int)s_vk.eng_depth_format); warned_fmt = 1; }
 +        return 0;
-     }
--    int rc = vk_begin();
--    if (!rc) {
--        vk_barrier_image(z->im.img, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_GENERAL);
--        vk_barrier_image(t->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
++    }
 +    if (!tw || !th) { tw = w; th = h; }
 +    if (tw > 4096u || th > 4096u) return 0;
 +    if (w > vk_lw(z)) w = vk_lw(z);
@@ -73433,25 +73787,22 @@ index e2687b7..ff0bc8d 100644
 +            pvkCmdClearColorImage(s_vk.cmd, t->im.img, VK_IMAGE_LAYOUT_GENERAL, &far_, 1, &cr);
 +            vk_full_barrier();
 +        }
-         VkBufferImageCopy out = { .imageSubresource = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1 },
-                                   .imageExtent = { w, h, 1 } };
-         pvkCmdCopyImageToBuffer(s_vk.cmd, z->im.img, VK_IMAGE_LAYOUT_GENERAL, st.buf, 1, &out);
-@@ -2340,16 +5625,184 @@ static u32 vk_eng_depth_snapshot(void* user, u32 depth, u32 w, u32 h)
-             .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
-             .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-             .buffer = st.buf, .offset = 0, .size = VK_WHOLE_SIZE };
--        pvkCmdPipelineBarrier(s_vk.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
--                              0, 0, NULL, 1, &bb, 0, NULL);
++        VkBufferImageCopy out = { .imageSubresource = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1 },
++                                  .imageExtent = { w, h, 1 } };
++        pvkCmdCopyImageToBuffer(s_vk.cmd, z->im.img, VK_IMAGE_LAYOUT_GENERAL, st.buf, 1, &out);
++        VkBufferMemoryBarrier bb = {
++            .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
++            .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
++            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++            .buffer = st.buf, .offset = 0, .size = VK_WHOLE_SIZE };
 +        if (d24) vk_d24_convert(w, h);
 +        else pvkCmdPipelineBarrier(s_vk.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
 +                                   0, 0, NULL, 1, &bb, 0, NULL);
-         VkBufferImageCopy in = { .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
-                                  .imageExtent = { w, h, 1 } };
-         pvkCmdCopyBufferToImage(s_vk.cmd, st.buf, t->im.img, VK_IMAGE_LAYOUT_GENERAL, 1, &in);
--        rc = vk_submit_and_wait();
++        VkBufferImageCopy in = { .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
++                                 .imageExtent = { w, h, 1 } };
++        pvkCmdCopyBufferToImage(s_vk.cmd, st.buf, t->im.img, VK_IMAGE_LAYOUT_GENERAL, 1, &in);
 +        rc = vk_defer();
-     }
--    vk_destroy_buffer(&st);
++    }
 +    /* RSX_VK_ZSNAP_DUMP=<dir>[,<skip>]: after <skip> snapshots (default
 +     * 20000), the next one of each guest size at the image's own resolution,
 +     * as z_<guest>_<image>.pgm (0 = near, 255 = far) -- what a
@@ -73484,8 +73835,8 @@ index e2687b7..ff0bc8d 100644
 +          }
 +          vk_destroy_buffer(&hb);
 +      } }
-     return rc ? 0 : snap;
- }
++    return rc ? 0 : snap;
++}
 +static u32 vk_eng_depth_snapshot(void* user, u32 depth, u32 w, u32 h)
 +{
 +    return vk_eng_depth_snapshot_sized(user, depth, w, h, w, h);
@@ -73583,7 +73934,13 @@ index e2687b7..ff0bc8d 100644
 +                       u32 dst, u32 dx, u32 dy, u32 dw, u32 dh)
 +{
 +    s_sync_calls[10]++;
-+    (void)user;
+     (void)user;
+-    vk_eng_obj* o = vk_eng_get(surface, VK_ENG_COLOR);
+-    if (!o || !out || !out_pitch || !w || !h || x + w > o->w || y + h > o->h) return;
+-    const size_t tight = (size_t)w * o->bpp;
+-    vk_buffer st = {0};
+-    if (vk_create_host_buffer(&st, (VkDeviceSize)tight * h, VK_BUFFER_USAGE_TRANSFER_DST_BIT)) {
+-        vk_destroy_buffer(&st); return;
 +    vk_eng_obj* s = vk_eng_get(src, VK_ENG_DEPTH);
 +    vk_eng_obj* d = s ? vk_eng_get(dst, VK_ENG_DEPTH) : NULL;
 +    VkImageAspectFlags aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
@@ -73622,41 +73979,47 @@ index e2687b7..ff0bc8d 100644
 +    return vk_defer() ? 0 : 1;
 +}
 +
- /* ---- E2: pipelines and draws ---------------------------------------------
-  * A pipeline handle carries the two translated modules and the render state
-  * the engine keyed it on. Topology is not part of that key (Metal sets it on
-@@ -2364,24 +5817,71 @@ static u32 vk_eng_depth_snapshot(void* user, u32 depth, u32 w, u32 h)
-  * samplers s0..s3 would alias the pixel samplers' binding), FP16 and other
-  * non-RGBA8 colour targets, depth-only passes, and stencil (the depth format
-  * has no stencil aspect yet, so the test is inert). */
--#define VK_ENG_MAX_PIPE   512
++/* ---- E2: pipelines and draws ---------------------------------------------
++ * A pipeline handle carries the two translated modules and the render state
++ * the engine keyed it on. Topology is not part of that key (Metal sets it on
++ * the encoder), but Vulkan 1.0 bakes it into the pipeline, so each handle
++ * builds its VkPipeline per topology on first use.
++ *
++ * Bindings are the translator's contract (rsx_shader_spirv.h), and the set
++ * layout, pipeline layout, descriptor set and constant UBO are the ones the
++ * vtable guest path already creates. Vertex inputs are the engine's compact
++ * layout: slot n is a float4 at n*16, at location n, as Metal reads it.
++ * Known gaps, stated rather than guessed: vertex-texture units (their
++ * samplers s0..s3 would alias the pixel samplers' binding), FP16 and other
++ * non-RGBA8 colour targets, depth-only passes, and stencil (the depth format
++ * has no stencil aspect yet, so the test is inert). */
 +/* As many as the engine will ask for (ENG_MAX_PIPELINES). At 512 a level
 + * filled the table and every later pipeline failed without a word -- in A
 + * Crack in Time the resolve and composite passes, so the scene was rendered
 + * into its 960x704 target and the display stayed black. */
 +#define VK_ENG_MAX_PIPE   (8192 + 256)   /* the engine retires its own at 8192 (ENG_MAX_PIPELINES); the rest is its helpers' */
- #define VK_ENG_TOPOLOGIES 5
- #define VK_ENG_FB_CACHE   64
- 
- typedef struct vk_eng_pipe {
-     int                 used;
-     VkShaderModule      vs, fs;
++#define VK_ENG_TOPOLOGIES 5
++#define VK_ENG_FB_CACHE   64
++
++typedef struct vk_eng_pipe {
++    int                 used;
++    VkShaderModule      vs, fs;
 +    u64                 vs_hash, fs_hash;   /* their SPIR-V (vk_spv_hash), for pipelinelist.bin */
 +    u32                 vs_words, fs_words;
-     rsx_be_render_state rs;
-     u32                 nslots, stride, rt_count;
++    rsx_be_render_state rs;
++    u32                 nslots, stride, rt_count;
 +    u32                 rt_fi;              /* colour format: vk_eng_rt_fi */
 +    u32                 wpos;               /* its pixel program reads WPOS (baked at the scene's scale) */
-     VkPipeline          variant[VK_ENG_TOPOLOGIES];
++    VkPipeline          variant[VK_ENG_TOPOLOGIES];
 +    /* vk_eng_variant's background builds: 0 none, 1 queued or building,
 +     * 2 done (ready holds it, or NULL when it failed). */
 +    SDL_atomic_t        pend[VK_ENG_TOPOLOGIES];
 +    VkPipeline          ready[VK_ENG_TOPOLOGIES];
 +    u32                 skipped[VK_ENG_TOPOLOGIES], build_ms[VK_ENG_TOPOLOGIES];
 +    u32                 vlo, vhi;   /* the bytes of vp_c[] its vertex program reads (vk_vs_const_range) */
- } vk_eng_pipe;
- 
- static vk_eng_pipe s_epipe[VK_ENG_MAX_PIPE];
++} vk_eng_pipe;
++
++static vk_eng_pipe s_epipe[VK_ENG_MAX_PIPE];
 +/* The background pipeline builder (vk_eng_variant). */
 +#define VK_AP_QUEUE 128
 +static struct {
@@ -73688,23 +74051,26 @@ index e2687b7..ff0bc8d 100644
 +    VkImageView dview;
 +    u32 n, w, h;
 +} vk_eng_fb;
- 
- static struct {
--    VkRenderPass rp[RSX_BE_MAX_COLOR_TARGETS + 1];      /* by colour count */
--    struct { u32 key[RSX_BE_MAX_COLOR_TARGETS + 1]; VkFramebuffer fb; } fb[VK_ENG_FB_CACHE];
--    u32          fb_count;
++
++static struct {
 +    VkRenderPass rp[2][RSX_BE_MAX_COLOR_TARGETS + 1];   /* by colour format, colour count */
 +    VkRenderPass rp_zonly[2];                            /* by colour format: vk_eng_make_render_pass */
 +    VkRenderPass rp_ops[2][RSX_BE_MAX_COLOR_TARGETS + 1][128]; /* by format, targets (0: depth-only), VK_RP_* */
 +    vk_eng_fb    fb[VK_ENG_FB_CACHE];
 +    u32          fb_count, fb_last;                     /* last hit's index + 1, 0 = none */
-     vk_image     scratch_depth;                          /* when no zeta is bound */
-     u32          scratch_w, scratch_h;
-     u32          pipeline;
-@@ -2395,34 +5895,144 @@ static struct {
-     u32          stencil_ref;
-     vk_buffer    indices;
-     u32          warned;
++    vk_image     scratch_depth;                          /* when no zeta is bound */
++    u32          scratch_w, scratch_h;
++    u32          pipeline;
++    u32          vs_bytes, ps_bytes;
++    u32          tex[RSX_BE_MAX_TEXTURES];
++    rsx_be_sampler_desc samp[RSX_BE_MAX_TEXTURES];
++    u32          tex_mask;
++    float        vp[4];
++    u32          sc[4];
++    int          have_vp, have_sc;
++    u32          stencil_ref;
++    vk_buffer    indices;
++    u32          warned;
 +    u8*          vs_shadow;   /* (unused: see vs_src) */
 +    const u8*    vs_src;      /* batched mode: the engine's constant block, copied
 +                               * into the arena per draw. The engine's buffers
@@ -73733,9 +74099,8 @@ index e2687b7..ff0bc8d 100644
 +    u32          half_rate, dyn_half_rate;   /* vk_eng_set_half_rate */
 +    u32          zrt[2];               /* by colour format: the colour image a depth-only
 +                                          pass into a shadow map draws with (vk_eng_draw) */
- } s_e2;
- 
--#define VK_ENG_SAMP_CACHE 64
++} s_e2;
++
 +/* One sampler per distinct guest sampler state (filters, wraps, LOD range,
 + * border class), found by hash. v62 kept 64 and gave every state after the
 + * 64th the null backend's nearest + repeat sampler, so the longer a session
@@ -73744,8 +74109,8 @@ index e2687b7..ff0bc8d 100644
 + * enemies and explosions". Vulkan allows 4000 samplers (NVIDIA's limit). */
 +#define VK_ENG_SAMP_CACHE 1024
 +#define VK_ENG_SAMP_HASH  2048
- static struct { u64 key; VkSampler s; } s_esamp[VK_ENG_SAMP_CACHE];
- static u32 s_esamp_count;
++static struct { u64 key; VkSampler s; } s_esamp[VK_ENG_SAMP_CACHE];
++static u32 s_esamp_count;
 +static u16 s_esamp_hash[VK_ENG_SAMP_HASH];   /* s_esamp index + 1; 0 = empty */
 +static u32 vk_esamp_slot(u64 key)
 +{
@@ -73793,22 +74158,18 @@ index e2687b7..ff0bc8d 100644
 +    }
 +    s_e2.fb_count = keep;
 +}
- 
- static void vk_eng_drop_framebuffers(void)
- {
++
++static void vk_eng_drop_framebuffers(void)
++{
 +    if (s_bt.recording) vk_bt_end_pass();      /* the open pass may be using one */
-     for (u32 i = 0; i < s_e2.fb_count; i++)
--        if (s_e2.fb[i].fb) pvkDestroyFramebuffer(s_vk.device, s_e2.fb[i].fb, NULL);
++    for (u32 i = 0; i < s_e2.fb_count; i++)
 +        if (s_e2.fb[i].fb && !vk_bt_defer_framebuffer(s_e2.fb[i].fb))
 +            pvkDestroyFramebuffer(s_vk.device, s_e2.fb[i].fb, NULL);
-     s_e2.fb_count = 0;
++    s_e2.fb_count = 0;
 +    s_e2.fb_last = 0;
 +    s_bt.fb = VK_NULL_HANDLE;
- }
- 
--/* The render pass for `n` RGBA8 colour attachments plus depth, LOAD/STORE in
-- * GENERAL like the vtable path's: clears are separate operations. */
--static VkRenderPass vk_eng_render_pass(u32 n)
++}
++
 +/* Colour target formats with a render pass of their own: 0 RGBA8, 1 RGBA16F
 + * (SET_SURFACE_FORMAT 0xB -- A Crack in Time draws its pause-menu backdrop
 + * into a 240x176 one; without it the menu opened on the magenta "missing
@@ -73833,37 +74194,31 @@ index e2687b7..ff0bc8d 100644
 +#define VK_RP_CLEAR_S    32u
 +#define VK_RP_DROP_Z     64u
 +static VkRenderPass vk_eng_make_render_pass_ops(u32 n, u32 fi, int zonly, u32 ops)
- {
--    if (n < 1 || n > RSX_BE_MAX_COLOR_TARGETS) return VK_NULL_HANDLE;
--    if (s_e2.rp[n]) return s_e2.rp[n];
-     VkAttachmentDescription att[RSX_BE_MAX_COLOR_TARGETS + 1];
-     VkAttachmentReference   cref[RSX_BE_MAX_COLOR_TARGETS];
-     for (u32 i = 0; i <= n; i++) {
++{
++    VkAttachmentDescription att[RSX_BE_MAX_COLOR_TARGETS + 1];
++    VkAttachmentReference   cref[RSX_BE_MAX_COLOR_TARGETS];
++    for (u32 i = 0; i <= n; i++) {
 +        const int discard = zonly && i < n;
 +        const int depth = i == n;
-         att[i] = (VkAttachmentDescription){
--            .format = (i < n) ? VK_FORMAT_R8G8B8A8_UNORM : s_vk.depth_format,
++        att[i] = (VkAttachmentDescription){
 +            .format = (i < n) ? (fi ? VK_FORMAT_R16G16B16A16_SFLOAT : VK_FORMAT_R8G8B8A8_UNORM) : s_vk.eng_depth_format,
-             .samples = VK_SAMPLE_COUNT_1_BIT,
--            .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
--            .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
--            .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
++            .samples = VK_SAMPLE_COUNT_1_BIT,
 +            .loadOp = discard ? VK_ATTACHMENT_LOAD_OP_DONT_CARE
 +                    : (depth ? (ops & (VK_RP_CLEAR_Z | VK_RP_DROP_Z)) : (ops & VK_RP_CLEAR_C(i))) ? VK_ATTACHMENT_LOAD_OP_CLEAR
 +                    : VK_ATTACHMENT_LOAD_OP_LOAD,
 +            .storeOp = discard || (depth && (ops & VK_RP_DROP_Z)) ? VK_ATTACHMENT_STORE_OP_DONT_CARE : VK_ATTACHMENT_STORE_OP_STORE,
 +            .stencilLoadOp = ops & (VK_RP_CLEAR_S | VK_RP_DROP_Z) ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD,
 +            .stencilStoreOp = ops & VK_RP_DROP_Z ? VK_ATTACHMENT_STORE_OP_DONT_CARE : VK_ATTACHMENT_STORE_OP_STORE,
-             .initialLayout = VK_IMAGE_LAYOUT_GENERAL, .finalLayout = VK_IMAGE_LAYOUT_GENERAL };
-         if (i < n) cref[i] = (VkAttachmentReference){ i, VK_IMAGE_LAYOUT_GENERAL };
-     }
-@@ -2433,9 +6043,24 @@ static VkRenderPass vk_eng_render_pass(u32 n)
-     VkRenderPassCreateInfo rci = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
-                                    .attachmentCount = n + 1, .pAttachments = att,
-                                    .subpassCount = 1, .pSubpasses = &sub };
--    if (pvkCreateRenderPass(s_vk.device, &rci, NULL, &s_e2.rp[n]) != VK_SUCCESS)
--        s_e2.rp[n] = VK_NULL_HANDLE;
--    return s_e2.rp[n];
++            .initialLayout = VK_IMAGE_LAYOUT_GENERAL, .finalLayout = VK_IMAGE_LAYOUT_GENERAL };
++        if (i < n) cref[i] = (VkAttachmentReference){ i, VK_IMAGE_LAYOUT_GENERAL };
++    }
++    VkAttachmentReference dref = { n, VK_IMAGE_LAYOUT_GENERAL };
++    VkSubpassDescription sub = { .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
++                                 .colorAttachmentCount = n, .pColorAttachments = cref,
++                                 .pDepthStencilAttachment = &dref };
++    VkRenderPassCreateInfo rci = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
++                                   .attachmentCount = n + 1, .pAttachments = att,
++                                   .subpassCount = 1, .pSubpasses = &sub };
 +    VkRenderPass rp = VK_NULL_HANDLE;
 +    if (pvkCreateRenderPass(s_vk.device, &rci, NULL, &rp) != VK_SUCCESS) rp = VK_NULL_HANDLE;
 +    return rp;
@@ -73882,25 +74237,88 @@ index e2687b7..ff0bc8d 100644
 +    if (fi > 1) return VK_NULL_HANDLE;
 +    if (!s_e2.rp_zonly[fi]) s_e2.rp_zonly[fi] = vk_eng_make_render_pass(1, fi, 1);
 +    return s_e2.rp_zonly[fi];
- }
- 
- /* Tables carried from the Metal backend, itself copied from the D3D12 live
-@@ -2454,6 +6079,10 @@ static VkBlendFactor vk_gcm_blend_factor(u32 f)
-     case 0x0306: return VK_BLEND_FACTOR_DST_COLOR;
-     case 0x0307: return VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR;
-     case 0x0308: return VK_BLEND_FACTOR_SRC_ALPHA_SATURATE;
++}
++
++/* Tables carried from the Metal backend, itself copied from the D3D12 live
++ * draw engine a title has shipped on. */
++static VkBlendFactor vk_gcm_blend_factor(u32 f)
++{
++    switch (f) {
++    case 0x0000: return VK_BLEND_FACTOR_ZERO;
++    case 0x0001: return VK_BLEND_FACTOR_ONE;
++    case 0x0300: return VK_BLEND_FACTOR_SRC_COLOR;
++    case 0x0301: return VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR;
++    case 0x0302: return VK_BLEND_FACTOR_SRC_ALPHA;
++    case 0x0303: return VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
++    case 0x0304: return VK_BLEND_FACTOR_DST_ALPHA;
++    case 0x0305: return VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA;
++    case 0x0306: return VK_BLEND_FACTOR_DST_COLOR;
++    case 0x0307: return VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR;
++    case 0x0308: return VK_BLEND_FACTOR_SRC_ALPHA_SATURATE;
 +    case 0x8001: return VK_BLEND_FACTOR_CONSTANT_COLOR;
 +    case 0x8002: return VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_COLOR;
 +    case 0x8003: return VK_BLEND_FACTOR_CONSTANT_ALPHA;
 +    case 0x8004: return VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA;
-     default:     return VK_BLEND_FACTOR_ONE;
++    default:     return VK_BLEND_FACTOR_ONE;
++    }
++}
++static VkBlendOp vk_gcm_blend_op(u32 e)
++{
++    switch (e) {
++    case 0x8007: return VK_BLEND_OP_MIN;
++    case 0x8008: return VK_BLEND_OP_MAX;
++    case 0x800A: return VK_BLEND_OP_SUBTRACT;
++    case 0x800B: return VK_BLEND_OP_REVERSE_SUBTRACT;
++    default:     return VK_BLEND_OP_ADD;                  /* FUNC_ADD 0x8006 */
      }
- }
-@@ -2495,157 +6124,1309 @@ static VkStencilOpState vk_gcm_stencil_face(u32 func, u32 fail, u32 zfail, u32 z
-     return s;
- }
- 
--static int vk_eng_translate(const char* hlsl, int stage, VkShaderModule* out)
+-    if (!vk_begin()) {
+-        vk_barrier_image(o->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
+-        VkBufferImageCopy region = {
+-            .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+-            .imageOffset = { (int32_t)x, (int32_t)y, 0 }, .imageExtent = { w, h, 1 },
+-        };
+-        pvkCmdCopyImageToBuffer(s_vk.cmd, o->im.img, VK_IMAGE_LAYOUT_GENERAL, st.buf, 1, &region);
+-        VkBufferMemoryBarrier hb = {
+-            .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+-            .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT,
+-            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+-            .buffer = st.buf, .offset = 0, .size = VK_WHOLE_SIZE,
+-        };
+-        pvkCmdPipelineBarrier(s_vk.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
+-                              0, 0, NULL, 1, &hb, 0, NULL);
+-        if (!vk_submit_and_wait()) {
+-            vk_invalidate(&st);
+-            for (u32 row = 0; row < h; row++)
+-                memcpy((u8*)out + (size_t)row * out_pitch, (const u8*)st.ptr + (size_t)row * tight, tight);
++}
++static VkCompareOp vk_gcm_compare(u32 f)
++{
++    return (f >= 0x0200u && f <= 0x0206u) ? (VkCompareOp)(f - 0x0200u) : VK_COMPARE_OP_ALWAYS;
++}
++static VkStencilOp vk_gcm_stencil_op(u32 op)
++{
++    switch (op) {
++    case 0x0000: return VK_STENCIL_OP_ZERO;
++    case 0x1E01: return VK_STENCIL_OP_REPLACE;
++    case 0x1E02: return VK_STENCIL_OP_INCREMENT_AND_CLAMP;
++    case 0x1E03: return VK_STENCIL_OP_DECREMENT_AND_CLAMP;
++    case 0x150A: return VK_STENCIL_OP_INVERT;
++    case 0x8507: return VK_STENCIL_OP_INCREMENT_AND_WRAP;
++    case 0x8508: return VK_STENCIL_OP_DECREMENT_AND_WRAP;
++    default:     return VK_STENCIL_OP_KEEP;               /* GL_KEEP 0x1E00 */
++    }
++}
++static VkStencilOpState vk_gcm_stencil_face(u32 func, u32 fail, u32 zfail, u32 zpass,
++                                            u32 cmp_mask, u32 write_mask)
++{
++    VkStencilOpState s = { .failOp = vk_gcm_stencil_op(fail), .passOp = vk_gcm_stencil_op(zpass),
++                           .depthFailOp = vk_gcm_stencil_op(zfail),
++                           .compareOp = vk_gcm_compare(func),
++                           .compareMask = cmp_mask & 0xFFu, .writeMask = write_mask & 0xFFu,
++                           .reference = 0 };                /* dynamic */
++    return s;
++}
++
 +/* RSX_ENG_STATS: shader translations / engine pipeline variants built, and
 + * the render-thread time they took. */
 +static unsigned long long s_vkt_spv, s_vkt_spv_us, s_vkt_var, s_vkt_var_us;
@@ -73914,25 +74332,24 @@ index e2687b7..ff0bc8d 100644
 +}
 +
 +static int vk_eng_translate(const char* hlsl, int stage, VkShaderModule* out, u64* hash, u32* nwords)
- {
-     u32 words = 0;
--    if (rsx_hlsl_to_spirv(hlsl, stage, s_g.spv, VK_SPV_WORDS, &words, s_g.log, sizeof s_g.log) || !words) {
++{
++    u32 words = 0;
 +    const unsigned long long _t0 = ps3_qpc_us();
 +    s_vkt_spv++;
 +    const int bad = rsx_hlsl_to_spirv(hlsl, stage, s_g.spv, VK_SPV_WORDS, &words, s_g.log, sizeof s_g.log) || !words;
 +    s_vkt_spv_us += ps3_qpc_us() - _t0;
 +    if (bad) {
-         VK_LOG("engine: %s translation failed: %s\n",
-                stage == RSX_SHADER_STAGE_VERTEX ? "vertex" : "fragment", s_g.log);
-         return -1;
-     }
-     VkShaderModuleCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-                                     .codeSize = (size_t)words * 4u, .pCode = s_g.spv };
++        VK_LOG("engine: %s translation failed: %s\n",
++               stage == RSX_SHADER_STAGE_VERTEX ? "vertex" : "fragment", s_g.log);
++        return -1;
++    }
++    VkShaderModuleCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
++                                    .codeSize = (size_t)words * 4u, .pCode = s_g.spv };
 +    *hash = vk_spv_hash(s_g.spv, words);
 +    *nwords = words;
-     return pvkCreateShaderModule(s_vk.device, &ci, NULL, out) == VK_SUCCESS ? 0 : -1;
- }
- 
++    return pvkCreateShaderModule(s_vk.device, &ci, NULL, out) == VK_SUCCESS ? 0 : -1;
++}
++
 +/* A draw that changes any vertex constant copied the whole 8 KB block for the GPU, 350 MB/s in a
 + * busy level: a quarter of the render worker, and memory bandwidth a phone does not have to spare.
 + * A program reads few of them, as its text says: a literal vp_c[n] each, or an index through an address
@@ -73994,15 +74411,24 @@ index e2687b7..ff0bc8d 100644
 +            u32 j = (u32)(s_pg.seen[i] ^ (s_pg.seen[i] >> 32)) & (cap - 1u);
 +            while (t[j]) j = (j + 1u) & (cap - 1u);
 +            t[j] = s_pg.seen[i];
-+        }
+         }
 +        free(s_pg.seen); s_pg.seen = t; s_pg.cap = cap;
-+    }
+     }
+-    vk_destroy_buffer(&st);
 +    u32 j = (u32)(k ^ (k >> 32)) & (s_pg.cap - 1u);
 +    while (s_pg.seen[j]) { if (s_pg.seen[j] == k) return 1; j = (j + 1u) & (s_pg.cap - 1u); }
 +    s_pg.seen[j] = k; s_pg.n++;
 +    return 0;
-+}
-+
+ }
+ 
+-/* ---- E3: textures ---------------------------------------------------------
+- * The engine decodes every level to host rows (rsx_texture_decode) and hands
+- * them over one upload each; the crossbar is a property of the view, so it
+- * becomes the image view's component mapping. Cube maps are not handled yet:
+- * the pixel decompiler declares cube units as separate bindings, which the
+- * shared set layout does not have, so faces == 6 reports 0 (placeholder). */
+-static u32 vk_eng_texture_create(void* user, rsx_be_format fmt, u32 w, u32 h,
+-                                 u32 mips, u32 faces, u32 remap, u32 rsx_fmt)
 +static u64 vk_prog_key(const rsx_prog_inputs* in, const u8* vp, const u8* fp)
 +{
 +    u64 k = vk_fnv1a64(in, sizeof *in, 1469598103934665603ull);
@@ -74114,37 +74540,65 @@ index e2687b7..ff0bc8d 100644
 +    s_pg.bytes += add;
 +}
 +
- static u32 vk_eng_pipeline_create(void* user, const char* vs_hlsl, const char* ps_hlsl,
-                                   const rsx_be_render_state* rs, const rsx_vertex_layout_plan* layout,
-                                   u32 vertex_stride, rsx_be_format rt_fmt, u32 rt_count)
++static u32 vk_eng_pipeline_create(void* user, const char* vs_hlsl, const char* ps_hlsl,
++                                  const rsx_be_render_state* rs, const rsx_vertex_layout_plan* layout,
++                                  u32 vertex_stride, rsx_be_format rt_fmt, u32 rt_count)
  {
 +    s_sync_calls[7]++;
      (void)user;
-     /* Same gate as Metal: no guest programs, no engine pipelines. */
-     if (!s_g.on || !vs_hlsl || !ps_hlsl || !rs || !layout || !vertex_stride) return 0;
--    if (rt_fmt != RSX_BE_FMT_R8G8B8A8) {
+-    u32 bpp;
+-    const VkFormat vf = vk_eng_format(fmt, &bpp);
+-    const int bc = (fmt == RSX_BE_FMT_BC1 || fmt == RSX_BE_FMT_BC2 || fmt == RSX_BE_FMT_BC3);
+-    if (vf == VK_FORMAT_UNDEFINED || !w || !h || w > 4096u || h > 4096u || (bc && !s_vk.bc_ok))
++    /* Same gate as Metal: no guest programs, no engine pipelines. */
++    if (!s_g.on || !vs_hlsl || !ps_hlsl || !rs || !layout || !vertex_stride) return 0;
 +    /* Vertex textures declare t16..t19 / s0..s3 bindings the shared set
 +     * layout does not have; a pipeline reading an undeclared descriptor
 +     * faults some drivers outright (llvmpipe). Drop those draws instead. */
 +    if (strstr(vs_hlsl, "rsx_vtex")) {
 +        if (!(s_e2.warned & 64u)) { VK_LOG("engine: vertex textures not supported yet; draws dropped\n"); s_e2.warned |= 64u; }
-+        return 0;
+         return 0;
+-    if (faces == 6) {
+-        static int warned_cube;
+-        if (!warned_cube) { VK_LOG("engine: cube textures not supported yet\n"); warned_cube = 1; }
 +    }
 +    if (s_vk_no_cube && strstr(ps_hlsl, "rsx_texcube")) return 0;
 +    if (rt_fmt != RSX_BE_FMT_R8G8B8A8 && rt_fmt != RSX_BE_FMT_R16G16B16A16F) {
-         if (!(s_e2.warned & 1u)) { VK_LOG("engine: colour format %d not supported yet\n", (int)rt_fmt); s_e2.warned |= 1u; }
++        if (!(s_e2.warned & 1u)) { VK_LOG("engine: colour format %d not supported yet\n", (int)rt_fmt); s_e2.warned |= 1u; }
          return 0;
      }
--    if (!rt_count) rt_count = 1;
--    if (rt_count > RSX_BE_MAX_COLOR_TARGETS) rt_count = RSX_BE_MAX_COLOR_TARGETS;
--    u32 slot = VK_ENG_MAX_PIPE;
--    for (u32 i = 0; i < VK_ENG_MAX_PIPE; i++) if (!s_epipe[i].used) { slot = i; break; }
--    if (slot == VK_ENG_MAX_PIPE) return 0;
--    vk_eng_pipe* P = &s_epipe[slot];
--    memset(P, 0, sizeof *P);
--    if (vk_eng_translate(vs_hlsl, RSX_SHADER_STAGE_VERTEX, &P->vs)) return 0;
--    if (vk_eng_translate(ps_hlsl, RSX_SHADER_STAGE_FRAGMENT, &P->fs)) {
--        pvkDestroyShaderModule(s_vk.device, P->vs, NULL); memset(P, 0, sizeof *P); return 0;
+-    if (!mips) mips = 1;
+-    const u32 hd = vk_eng_alloc();
+-    if (!hd) return 0;
+-    vk_eng_obj* o = &s_eobj[hd];
+-    VkImageCreateInfo ici = {
+-        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
+-        .format = vf, .extent = { w, h, 1 }, .mipLevels = mips, .arrayLayers = 1,
+-        .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
+-        .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+-        .sharingMode = VK_SHARING_MODE_EXCLUSIVE, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED };
+-    VkMemoryRequirements req;
+-    u32 type;
+-    if (pvkCreateImage(s_vk.device, &ici, NULL, &o->im.img) != VK_SUCCESS) goto fail;
+-    pvkGetImageMemoryRequirements(s_vk.device, o->im.img, &req);
+-    if (vk_find_memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &type) &&
+-        vk_find_memory_type(req.memoryTypeBits, 0, &type)) goto fail;
+-    VkMemoryAllocateInfo mai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+-                                 .allocationSize = req.size, .memoryTypeIndex = type };
+-    if (pvkAllocateMemory(s_vk.device, &mai, NULL, &o->im.mem) != VK_SUCCESS ||
+-        pvkBindImageMemory(s_vk.device, o->im.img, o->im.mem, 0) != VK_SUCCESS ||
+-        vk_eng_make_view(o->im.img, vf, mips, vk_remap(remap, rsx_fmt), &o->im.view))
+-        goto fail;
+-    o->kind = VK_ENG_TEXTURE; o->fmt = vf; o->w = w; o->h = h;
+-    o->bpp = bc ? 0 : bpp; o->block = bc ? bpp : 0;
+-    /* UNDEFINED -> GENERAL for every level before the uploads arrive. */
+-    if (vk_begin()) goto fail;
+-    vk_barrier_image(o->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED);
+-    if (vk_submit_and_wait()) goto fail;
+-    return hd;
+-fail:
+-    vk_destroy_image(&o->im);
+-    memset(o, 0, sizeof *o);
 +    if (!rt_count) rt_count = 1;
 +    if (rt_count > RSX_BE_MAX_COLOR_TARGETS) rt_count = RSX_BE_MAX_COLOR_TARGETS;
 +    u32 slot = VK_ENG_MAX_PIPE;
@@ -74445,9 +74899,11 @@ index e2687b7..ff0bc8d 100644
 +    u32 j = (u32)(k ^ (k >> 32)) & (s_pl.cap - 1u);
 +    while (s_pl.seen[j]) { if (s_pl.seen[j] == k) return 1; j = (j + 1u) & (s_pl.cap - 1u); }
 +    s_pl.seen[j] = k; s_pl.n++;
-+    return 0;
-+}
-+
+     return 0;
+ }
+ 
+-static void vk_eng_texture_upload(void* user, u32 texture, u32 face, u32 mip, u32 w, u32 h,
+-                                  const void* src, u32 row_bytes, u32 rows)
 +/* Render thread, after a variant was built. */
 +static void vk_plist_add(const vk_vdesc* d)
 +{
@@ -74519,17 +74975,38 @@ index e2687b7..ff0bc8d 100644
 +
 +/* A module of one program's words, read back from the shader cache. */
 +static VkShaderModule vk_pw_module(FILE* f, const vk_pw_spv* s, u32* buf)
-+{
+ {
+-    (void)user;
+-    vk_eng_obj* o = vk_eng_get(texture, VK_ENG_TEXTURE);
+-    if (!o || !src || !row_bytes || !rows || face) return;
+-    /* A BC row is a row of 4x4 blocks; the engine's `rows` already counts them. */
+-    const size_t tight = o->block ? (size_t)((w + 3u) / 4u) * o->block : (size_t)w * o->bpp;
+-    vk_eng_upload_rows(o->im.img, 0, mip, w, h, tight, rows, src, row_bytes);
 +    if (fseek(f, s->off + 24L, SEEK_SET) != 0 || fread(buf, 4, s->words, f) != s->words ||
 +        vk_spv_hash(buf, s->words) != s->hash) return VK_NULL_HANDLE;
 +    VkShaderModuleCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
 +                                    .codeSize = (size_t)s->words * 4u, .pCode = buf };
 +    VkShaderModule m = VK_NULL_HANDLE;
 +    return pvkCreateShaderModule(s_vk.device, &ci, NULL, &m) == VK_SUCCESS ? m : VK_NULL_HANDLE;
-+}
-+
+ }
+ 
+-/* A colour target sampled with a unit's crossbar: an extra view of the same
+- * image, cached by (surface, crossbar, format) and released with the target. */
+-static u32 vk_eng_surface_view(void* user, u32 surface, u32 remap, u32 rsx_format)
 +static int SDLCALL vk_prewarm_thread(void* arg)
-+{
+ {
+-    (void)user;
+-    vk_eng_obj* t = vk_eng_get(surface, VK_ENG_COLOR);
+-    if (!t) return 0;
+-    for (u32 i = 1; i < VK_ENG_MAX_OBJ; i++)
+-        if (s_eobj[i].kind == VK_ENG_VIEW && s_eobj[i].surface == surface &&
+-            s_eobj[i].remap == remap && s_eobj[i].rsx_fmt == rsx_format)
+-            return i;
+-    const u32 hd = vk_eng_alloc();
+-    if (!hd) return 0;
+-    vk_eng_obj* o = &s_eobj[hd];
+-    if (vk_eng_make_view(t->im.img, t->fmt, 1, vk_remap(remap, rsx_format), &o->im.view)) {
+-        memset(o, 0, sizeof *o); return 0;
 +    (void)arg;
 +    VK_PLACE_HELPER("pipeline-prewarm", 0);
 +    SDL_SetThreadPriority(SDL_THREAD_PRIORITY_LOW);
@@ -74555,7 +75032,10 @@ index e2687b7..ff0bc8d 100644
 +        for (u32 i = 0; i < ns; i++) if (!nw || wc[i] != wc[nw - 1]) wc[nw++] = wc[i];
 +        f = vk_pw_find_programs(sp, ns, wc, nw, buf, &found);
 +        if (!f) VK_LOG("pipeline pre-warm: no shader cache file to read the programs from\n");
-+    }
+     }
+-    o->kind = VK_ENG_VIEW; o->fmt = t->fmt; o->w = t->w; o->h = t->h;
+-    o->surface = surface; o->remap = remap; o->rsx_fmt = rsx_format;
+-    return hd;
 +    if (f) {
 +        VK_LOG("pipeline pre-warm: %u of the %u programs found in the shader cache (%.1f s)\n",
 +               found, ns, (ps3_qpc_us() - t0) / 1e6);
@@ -74607,13 +75087,31 @@ index e2687b7..ff0bc8d 100644
 +    free(s_pw.recs); s_pw.recs = NULL;
 +    s_pw_running = 0;
 +    return 0;
-+}
+ }
+-/* ---- E4: depth snapshots --------------------------------------------------
+- * A depth target read as a texture, which the engine asks for only after a
+- * depth-writing draw. Metal resolves it with a fullscreen pass into R32Float;
+- * Vulkan can do it with two copies on the GPU, since a D32_SFLOAT depth
+- * aspect copies out as 32-bit floats: depth -> buffer -> an R32_SFLOAT
+- * texture. Other depth formats would need a conversion pass: they report 0.
+- *
+- * Each depth target keeps ONE snapshot texture (its handle in `surface`),
+- * refilled on every request, so nothing accumulates however often the engine
+- * invalidates and asks again; it goes when the depth target goes. */
+-static u32 vk_eng_depth_snapshot(void* user, u32 depth, u32 w, u32 h)
 +
 +/* vk_pcache_init: load the list (dropping a torn tail, duplicates, and all
 + * but the newest half when it is over VK_PLIST_MAX), keep it open for
 + * appending, and start the pre-warm when the cache needs rebuilding. */
 +static void vk_plist_open(int rebuild)
-+{
+ {
+-    vk_eng_obj* z = vk_eng_get(depth, VK_ENG_DEPTH);
+-    if (!z) return 0;
+-    if (s_vk.depth_format != VK_FORMAT_D32_SFLOAT) {
+-        static int warned_fmt;
+-        if (!warned_fmt) { VK_LOG("engine: depth snapshots need D32_SFLOAT, this device uses %d\n",
+-                                  (int)s_vk.depth_format); warned_fmt = 1; }
+-        return 0;
 +    const char* path = getenv("RSX_PIPELINE_LIST");
 +    if (!path || !*path) return;
 +    vk_vdesc* recs = NULL;
@@ -74644,7 +75142,23 @@ index e2687b7..ff0bc8d 100644
 +            if (i != total) rewrite = 1;
 +        }
 +        fclose(f);
-+    }
+     }
+-    if (w > z->w) w = z->w;
+-    if (h > z->h) h = z->h;
+-    if (!w || !h) return 0;
+-
+-    u32 snap = z->surface;
+-    vk_eng_obj* t = vk_eng_get(snap, VK_ENG_TEXTURE);
+-    if (!t || t->w != w || t->h != h) {
+-        if (t) vk_eng_release(user, snap);
+-        z->surface = 0;
+-        snap = vk_eng_alloc();
+-        if (!snap) return 0;
+-        t = &s_eobj[snap];
+-        if (vk_create_image(&t->im, VK_FORMAT_R32_SFLOAT, w, h,
+-                            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+-                            VK_IMAGE_ASPECT_COLOR_BIT)) {
+-            vk_destroy_image(&t->im); memset(t, 0, sizeof *t); return 0;
 +    if (n > VK_PLIST_MAX) {                                  /* keep the newest half */
 +        const u32 drop = n - VK_PLIST_MAX / 2u;
 +        memmove(recs, recs + drop, (size_t)(n - drop) * sizeof *recs);
@@ -74670,15 +75184,44 @@ index e2687b7..ff0bc8d 100644
 +            VK_LOG("pipeline list: cannot write %s; variants are not recorded\n", path);
 +            free(recs);
 +            return;
-+        }
-+    }
+         }
+-        t->kind = VK_ENG_TEXTURE; t->fmt = VK_FORMAT_R32_SFLOAT; t->bpp = 4; t->w = w; t->h = h;
+-        z = vk_eng_get(depth, VK_ENG_DEPTH);          /* same slot; reload for clarity */
+-        z->surface = snap;
+-        if (vk_begin()) return 0;
+-        vk_barrier_image(t->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED);
+-        if (vk_submit_and_wait()) return 0;
+     }
+-
+-    vk_buffer st = {0};
+-    if (vk_create_host_buffer(&st, (VkDeviceSize)w * h * 4u,
+-                              VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT)) {
+-        vk_destroy_buffer(&st); return 0;
 +    s_pl.f = fopen(path, "ab");
 +    VK_LOG("pipeline list: %s, %u variants%s\n", path, n, s_pl.f ? "" : " (cannot append)");
 +    if (upgraded) { VK_LOG("pipeline list: %u variants take the blend constant now%c", upgraded, 10); rebuild = 1; }
 +    if (vk_prepare_mode()) {                                 /* rsx_vulkan_prepare_shaders builds them */
 +        s_pw.recs = recs; s_pw.n = n;
 +        return;
-+    }
+     }
+-    int rc = vk_begin();
+-    if (!rc) {
+-        vk_barrier_image(z->im.img, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_GENERAL);
+-        vk_barrier_image(t->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
+-        VkBufferImageCopy out = { .imageSubresource = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1 },
+-                                  .imageExtent = { w, h, 1 } };
+-        pvkCmdCopyImageToBuffer(s_vk.cmd, z->im.img, VK_IMAGE_LAYOUT_GENERAL, st.buf, 1, &out);
+-        VkBufferMemoryBarrier bb = {
+-            .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+-            .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
+-            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+-            .buffer = st.buf, .offset = 0, .size = VK_WHOLE_SIZE };
+-        pvkCmdPipelineBarrier(s_vk.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+-                              0, 0, NULL, 1, &bb, 0, NULL);
+-        VkBufferImageCopy in = { .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+-                                 .imageExtent = { w, h, 1 } };
+-        pvkCmdCopyBufferToImage(s_vk.cmd, st.buf, t->im.img, VK_IMAGE_LAYOUT_GENERAL, 1, &in);
+-        rc = vk_submit_and_wait();
 +    const char* pw = getenv("RSX_PIPELINE_PREWARM");
 +    if (pw && *pw) rebuild = pw[0] != '0';
 +    if (rebuild && n) {
@@ -74693,10 +75236,38 @@ index e2687b7..ff0bc8d 100644
 +        s_pw.recs = NULL; s_pw.n = 0; s_pw_running = 0;
 +    } else if (rebuild) {
 +        VK_LOG("pipeline pre-warm: nothing listed yet; expect shader-compile stutter the first time each area is seen\n");
-+    }
+     }
+-    vk_destroy_buffer(&st);
+-    return rc ? 0 : snap;
 +    free(recs);
-+}
-+
+ }
+-/* ---- E2: pipelines and draws ---------------------------------------------
+- * A pipeline handle carries the two translated modules and the render state
+- * the engine keyed it on. Topology is not part of that key (Metal sets it on
+- * the encoder), but Vulkan 1.0 bakes it into the pipeline, so each handle
+- * builds its VkPipeline per topology on first use.
+- *
+- * Bindings are the translator's contract (rsx_shader_spirv.h), and the set
+- * layout, pipeline layout, descriptor set and constant UBO are the ones the
+- * vtable guest path already creates. Vertex inputs are the engine's compact
+- * layout: slot n is a float4 at n*16, at location n, as Metal reads it.
+- * Known gaps, stated rather than guessed: vertex-texture units (their
+- * samplers s0..s3 would alias the pixel samplers' binding), FP16 and other
+- * non-RGBA8 colour targets, depth-only passes, and stencil (the depth format
+- * has no stencil aspect yet, so the test is inert). */
+-#define VK_ENG_MAX_PIPE   512
+-#define VK_ENG_TOPOLOGIES 5
+-#define VK_ENG_FB_CACHE   64
+-
+-typedef struct vk_eng_pipe {
+-    int                 used;
+-    VkShaderModule      vs, fs;
+-    rsx_be_render_state rs;
+-    u32                 nslots, stride, rt_count;
+-    VkPipeline          variant[VK_ENG_TOPOLOGIES];
+-} vk_eng_pipe;
+ 
+-static vk_eng_pipe s_epipe[VK_ENG_MAX_PIPE];
 +/* vk_guest_shutdown: the pre-warm stops after the pipeline it is building. */
 +static void vk_plist_close(void)
 +{
@@ -74709,25 +75280,49 @@ index e2687b7..ff0bc8d 100644
 +    free(s_pl.seen);
 +    memset(&s_pl, 0, sizeof s_pl);
 +}
-+
+ 
 +/* ---- the shader prepare (RACACIT_PREPARE=1) --------------------------------
 + * Every variant in pipelinelist.bin built again into the pipeline cache on all
 + * cores at once, in the foreground, before play: what the background pre-warm
 + * does on one low-priority thread while the game runs. The game activity reads
 + * the progress (NativeBridge.prepareProgress) for its bar. */
-+static struct {
+ static struct {
+-    VkRenderPass rp[RSX_BE_MAX_COLOR_TARGETS + 1];      /* by colour count */
+-    struct { u32 key[RSX_BE_MAX_COLOR_TARGETS + 1]; VkFramebuffer fb; } fb[VK_ENG_FB_CACHE];
+-    u32          fb_count;
+-    vk_image     scratch_depth;                          /* when no zeta is bound */
+-    u32          scratch_w, scratch_h;
+-    u32          pipeline;
+-    u32          vs_bytes, ps_bytes;
+-    u32          tex[RSX_BE_MAX_TEXTURES];
+-    rsx_be_sampler_desc samp[RSX_BE_MAX_TEXTURES];
+-    u32          tex_mask;
+-    float        vp[4];
+-    u32          sc[4];
+-    int          have_vp, have_sc;
+-    u32          stencil_ref;
+-    vk_buffer    indices;
+-    u32          warned;
+-} s_e2;
 +    SDL_atomic_t next, built, failed, absent, state;  /* state: rsx_vulkan_prepare_progress */
 +    const vk_pw_spv* sp;
 +    u32 ns;
 +    const char* spv_path;
 +} s_prep;
 +static u32 s_prep_total;
-+
+ 
+-#define VK_ENG_SAMP_CACHE 64
+-static struct { u64 key; VkSampler s; } s_esamp[VK_ENG_SAMP_CACHE];
+-static u32 s_esamp_count;
 +static int rsx_vk_regen_done(void);
 +static int rsx_vk_regen_total(void);
-+
+ 
+-static void vk_eng_drop_framebuffers(void)
 +void rsx_vulkan_prepare_progress(int out[5])
-+{
+ {
+-    for (u32 i = 0; i < s_e2.fb_count; i++)
+-        if (s_e2.fb[i].fb) pvkDestroyFramebuffer(s_vk.device, s_e2.fb[i].fb, NULL);
+-    s_e2.fb_count = 0;
 +    out[0] = SDL_AtomicGet(&s_prep.state);   /* 0 starting, 1 reading, 2 building, 3 done, 4 failed, 5 regenerating */
 +    if (out[0] == 5) {
 +        out[1] = rsx_vk_regen_done(); out[2] = rsx_vk_regen_total(); out[3] = out[4] = 0;
@@ -74737,10 +75332,26 @@ index e2687b7..ff0bc8d 100644
 +    out[2] = (int)s_prep_total;
 +    out[3] = SDL_AtomicGet(&s_prep.failed);
 +    out[4] = SDL_AtomicGet(&s_prep.absent);
-+}
-+
+ }
+ 
+-/* The render pass for `n` RGBA8 colour attachments plus depth, LOAD/STORE in
+- * GENERAL like the vtable path's: clears are separate operations. */
+-static VkRenderPass vk_eng_render_pass(u32 n)
 +static int SDLCALL vk_prep_worker(void* arg)
-+{
+ {
+-    if (n < 1 || n > RSX_BE_MAX_COLOR_TARGETS) return VK_NULL_HANDLE;
+-    if (s_e2.rp[n]) return s_e2.rp[n];
+-    VkAttachmentDescription att[RSX_BE_MAX_COLOR_TARGETS + 1];
+-    VkAttachmentReference   cref[RSX_BE_MAX_COLOR_TARGETS];
+-    for (u32 i = 0; i <= n; i++) {
+-        att[i] = (VkAttachmentDescription){
+-            .format = (i < n) ? VK_FORMAT_R8G8B8A8_UNORM : s_vk.depth_format,
+-            .samples = VK_SAMPLE_COUNT_1_BIT,
+-            .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+-            .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+-            .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+-            .initialLayout = VK_IMAGE_LAYOUT_GENERAL, .finalLayout = VK_IMAGE_LAYOUT_GENERAL };
+-        if (i < n) cref[i] = (VkAttachmentReference){ i, VK_IMAGE_LAYOUT_GENERAL };
 +    (void)arg;
 +#ifdef __ANDROID__
 +    {   /* every core: nothing else runs during the prepare */
@@ -74748,7 +75359,17 @@ index e2687b7..ff0bc8d 100644
 +        const long nc = sysconf(_SC_NPROCESSORS_CONF);
 +        for (long c = 0; c < nc && c < CPU_SETSIZE; c++) CPU_SET((int)c, &all);
 +        sched_setaffinity(0, sizeof all, &all);
-+    }
+     }
+-    VkAttachmentReference dref = { n, VK_IMAGE_LAYOUT_GENERAL };
+-    VkSubpassDescription sub = { .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
+-                                 .colorAttachmentCount = n, .pColorAttachments = cref,
+-                                 .pDepthStencilAttachment = &dref };
+-    VkRenderPassCreateInfo rci = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
+-                                   .attachmentCount = n + 1, .pAttachments = att,
+-                                   .subpassCount = 1, .pSubpasses = &sub };
+-    if (pvkCreateRenderPass(s_vk.device, &rci, NULL, &s_e2.rp[n]) != VK_SUCCESS)
+-        s_e2.rp[n] = VK_NULL_HANDLE;
+-    return s_e2.rp[n];
 +#endif
 +    const vk_vdesc* recs = s_pw.recs;
 +    const u32 n = s_pw.n;
@@ -74792,8 +75413,11 @@ index e2687b7..ff0bc8d 100644
 +    if (f) fclose(f);
 +    free(buf);
 +    return 0;
-+}
-+
+ }
+ 
+-/* Tables carried from the Metal backend, itself copied from the D3D12 live
+- * draw engine a title has shipped on. */
+-static VkBlendFactor vk_gcm_blend_factor(u32 f)
 +/* ---- the prepare's first step: programlist.bin regenerated ------------------
 + * Every recorded program pair's text made again by the current translator
 + * (rsx_draw_engine_gen_hlsl) and translated (a SPIR-V cache hit when the text
@@ -74803,12 +75427,27 @@ index e2687b7..ff0bc8d 100644
 +typedef struct { u64 oh; u32 ow; u64 nh; u32 nw; } vk_spv_map;
 +
 +static int vk_spv_map_cmp(const void* a, const void* b)
-+{
+ {
+-    switch (f) {
+-    case 0x0000: return VK_BLEND_FACTOR_ZERO;
+-    case 0x0001: return VK_BLEND_FACTOR_ONE;
+-    case 0x0300: return VK_BLEND_FACTOR_SRC_COLOR;
+-    case 0x0301: return VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR;
+-    case 0x0302: return VK_BLEND_FACTOR_SRC_ALPHA;
+-    case 0x0303: return VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+-    case 0x0304: return VK_BLEND_FACTOR_DST_ALPHA;
+-    case 0x0305: return VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA;
+-    case 0x0306: return VK_BLEND_FACTOR_DST_COLOR;
+-    case 0x0307: return VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR;
+-    case 0x0308: return VK_BLEND_FACTOR_SRC_ALPHA_SATURATE;
+-    default:     return VK_BLEND_FACTOR_ONE;
+-    }
 +    const vk_spv_map* x = (const vk_spv_map*)a;
 +    const vk_spv_map* y = (const vk_spv_map*)b;
 +    if (x->oh != y->oh) return x->oh < y->oh ? -1 : 1;
 +    return x->ow < y->ow ? -1 : x->ow > y->ow;
-+}
+ }
+-static VkBlendOp vk_gcm_blend_op(u32 e)
 +
 +static SDL_atomic_t s_regen_done, s_regen_total;
 +static u32 s_rg_stats[4];     /* programs, stages changed, variants remapped, failed: for shaders.stamp */
@@ -74817,7 +75456,13 @@ index e2687b7..ff0bc8d 100644
 +static int rsx_vk_regen_total(void) { return SDL_AtomicGet(&s_regen_total); }
 +
 +static int vk_regen_translate(const char* hlsl, int stage, u32* spv, u64* h, u32* w, char* log)
-+{
+ {
+-    switch (e) {
+-    case 0x8007: return VK_BLEND_OP_MIN;
+-    case 0x8008: return VK_BLEND_OP_MAX;
+-    case 0x800A: return VK_BLEND_OP_SUBTRACT;
+-    case 0x800B: return VK_BLEND_OP_REVERSE_SUBTRACT;
+-    default:     return VK_BLEND_OP_ADD;                  /* FUNC_ADD 0x8006 */
 +    u32 n = 0;
 +    if (rsx_hlsl_to_spirv(hlsl, stage, spv, VK_SPV_WORDS, &n, log, 512) || !n) return -1;
 +    *h = vk_spv_hash(spv, n); *w = n;
@@ -74838,29 +75483,50 @@ index e2687b7..ff0bc8d 100644
 +        remove(path);
 +#endif
 +        ok = rename(tmp, path) == 0;
-+    }
+     }
 +    if (!ok) remove(tmp);
 +    return ok ? 0 : -1;
-+}
+ }
+-static VkCompareOp vk_gcm_compare(u32 f)
 +
 +static int vk_plist_write_all(FILE* o, void* arg)
-+{
+ {
+-    return (f >= 0x0200u && f <= 0x0206u) ? (VkCompareOp)(f - 0x0200u) : VK_COMPARE_OP_ALWAYS;
 +    (void)arg;
 +    const u32 hdr[2] = { (u32)sizeof(vk_vdesc), 1u };
 +    if (fwrite(kPlistMagic, 1, 8, o) != 8 || fwrite(hdr, 4, 2, o) != 2) return -1;
 +    return (s_pw.n == 0 || fwrite(s_pw.recs, sizeof *s_pw.recs, s_pw.n, o) == s_pw.n) ? 0 : -1;
-+}
+ }
+-static VkStencilOp vk_gcm_stencil_op(u32 op)
 +
 +typedef struct { const char* src; const vk_spv_map* m; u32 nm; } vk_prog_rw;
 +
 +static const vk_spv_map* vk_spv_map_find(const vk_spv_map* m, u32 n, u64 h, u32 w)
-+{
+ {
+-    switch (op) {
+-    case 0x0000: return VK_STENCIL_OP_ZERO;
+-    case 0x1E01: return VK_STENCIL_OP_REPLACE;
+-    case 0x1E02: return VK_STENCIL_OP_INCREMENT_AND_CLAMP;
+-    case 0x1E03: return VK_STENCIL_OP_DECREMENT_AND_CLAMP;
+-    case 0x150A: return VK_STENCIL_OP_INVERT;
+-    case 0x8507: return VK_STENCIL_OP_INCREMENT_AND_WRAP;
+-    case 0x8508: return VK_STENCIL_OP_DECREMENT_AND_WRAP;
+-    default:     return VK_STENCIL_OP_KEEP;               /* GL_KEEP 0x1E00 */
+-    }
 +    const vk_spv_map k = { h, w, 0, 0 };
 +    return (const vk_spv_map*)bsearch(&k, m, n, sizeof *m, vk_spv_map_cmp);
-+}
+ }
+-static VkStencilOpState vk_gcm_stencil_face(u32 func, u32 fail, u32 zfail, u32 zpass,
+-                                            u32 cmp_mask, u32 write_mask)
 +
 +static int vk_prog_write_all(FILE* o, void* arg)
-+{
+ {
+-    VkStencilOpState s = { .failOp = vk_gcm_stencil_op(fail), .passOp = vk_gcm_stencil_op(zpass),
+-                           .depthFailOp = vk_gcm_stencil_op(zfail),
+-                           .compareOp = vk_gcm_compare(func),
+-                           .compareMask = cmp_mask & 0xFFu, .writeMask = write_mask & 0xFFu,
+-                           .reference = 0 };                /* dynamic */
+-    return s;
 +    const vk_prog_rw* rw = (const vk_prog_rw*)arg;
 +    FILE* f = fopen(rw->src, "rb");
 +    u8* buf = (u8*)malloc(256u * 1024u);
@@ -74879,11 +75545,17 @@ index e2687b7..ff0bc8d 100644
 +    if (f) fclose(f);
 +    free(buf);
 +    return ok ? 0 : -1;
-+}
-+
+ }
+ 
+-static int vk_eng_translate(const char* hlsl, int stage, VkShaderModule* out)
 +/* Returns how many pipeline variants were remapped (0: the text did not change). */
 +static u32 vk_prep_regen(void)
-+{
+ {
+-    u32 words = 0;
+-    if (rsx_hlsl_to_spirv(hlsl, stage, s_g.spv, VK_SPV_WORDS, &words, s_g.log, sizeof s_g.log) || !words) {
+-        VK_LOG("engine: %s translation failed: %s\n",
+-               stage == RSX_SHADER_STAGE_VERTEX ? "vertex" : "fragment", s_g.log);
+-        return -1;
 +    const char* path = getenv("RSX_PROGRAM_LIST");
 +    if (!path || !*path) return 0;
 +    FILE* f = fopen(path, "rb");
@@ -74928,7 +75600,10 @@ index e2687b7..ff0bc8d 100644
 +                changed++;
 +            }
 +        }
-+    }
+     }
+-    VkShaderModuleCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+-                                    .codeSize = (size_t)words * 4u, .pCode = s_g.spv };
+-    return pvkCreateShaderModule(s_vk.device, &ci, NULL, out) == VK_SUCCESS ? 0 : -1;
 +out:
 +    fclose(f);
 +    free(buf); free(vs); free(ps); free(spv);
@@ -74963,12 +75638,20 @@ index e2687b7..ff0bc8d 100644
 +    s_rg_secs = (ps3_qpc_us() - t0) / 1e6;
 +    free(map);
 +    return remapped;
-+}
-+
+ }
+ 
+-static u32 vk_eng_pipeline_create(void* user, const char* vs_hlsl, const char* ps_hlsl,
+-                                  const rsx_be_render_state* rs, const rsx_vertex_layout_plan* layout,
+-                                  u32 vertex_stride, rsx_be_format rt_fmt, u32 rt_count)
 +/* After rsx_vulkan_backend_init with RACACIT_PREPARE=1 (main.cpp). Writes
 + * <cache folder>/shaders.stamp. Returns 0 when no variant failed. */
 +int rsx_vulkan_prepare_shaders(void)
-+{
+ {
+-    (void)user;
+-    /* Same gate as Metal: no guest programs, no engine pipelines. */
+-    if (!s_g.on || !vs_hlsl || !ps_hlsl || !rs || !layout || !vertex_stride) return 0;
+-    if (rt_fmt != RSX_BE_FMT_R8G8B8A8) {
+-        if (!(s_e2.warned & 1u)) { VK_LOG("engine: colour format %d not supported yet\n", (int)rt_fmt); s_e2.warned |= 1u; }
 +    const unsigned long long t0 = ps3_qpc_us();
 +    SDL_AtomicSet(&s_prep.state, 1);
 +    s_prep.spv_path = getenv("RSX_SHADER_CACHE");
@@ -74987,8 +75670,18 @@ index e2687b7..ff0bc8d 100644
 +    if (!n) {
 +        VK_LOG("shader prepare: nothing listed yet (play a while first)%c", 10);
 +        SDL_AtomicSet(&s_prep.state, 3);
-+        return 0;
-+    }
+         return 0;
+     }
+-    if (!rt_count) rt_count = 1;
+-    if (rt_count > RSX_BE_MAX_COLOR_TARGETS) rt_count = RSX_BE_MAX_COLOR_TARGETS;
+-    u32 slot = VK_ENG_MAX_PIPE;
+-    for (u32 i = 0; i < VK_ENG_MAX_PIPE; i++) if (!s_epipe[i].used) { slot = i; break; }
+-    if (slot == VK_ENG_MAX_PIPE) return 0;
+-    vk_eng_pipe* P = &s_epipe[slot];
+-    memset(P, 0, sizeof *P);
+-    if (vk_eng_translate(vs_hlsl, RSX_SHADER_STAGE_VERTEX, &P->vs)) return 0;
+-    if (vk_eng_translate(ps_hlsl, RSX_SHADER_STAGE_FRAGMENT, &P->fs)) {
+-        pvkDestroyShaderModule(s_vk.device, P->vs, NULL); memset(P, 0, sizeof *P); return 0;
 +    rsx_hlsl_to_spirv_cache_open();                          /* a torn file is rewritten first */
 +    vk_pw_spv* sp = (vk_pw_spv*)malloc((size_t)n * 2u * sizeof *sp);
 +    u32* wc  = (u32*)malloc((size_t)n * 2u * sizeof *wc);
@@ -75324,7 +76017,7 @@ index e2687b7..ff0bc8d 100644
      }
      return P->variant[topo_idx];
  }
-@@ -2654,15 +7435,24 @@ static void vk_eng_bind_pipeline(void* user, u32 pipeline) { (void)user; s_e2.pi
+@@ -2654,15 +7448,24 @@ static void vk_eng_bind_pipeline(void* user, u32 pipeline) { (void)user; s_e2.pi
  
  static void vk_eng2_shutdown(void* user)
  {
@@ -75351,7 +76044,7 @@ index e2687b7..ff0bc8d 100644
  }
  
  /* Constants go straight into the shared UBO: vertex at 0, pixel at ps_off.
-@@ -2673,8 +7463,11 @@ static void vk_eng_bind_vs_constants(void* user, const void* data, u32 bytes)
+@@ -2673,8 +7476,11 @@ static void vk_eng_bind_vs_constants(void* user, const void* data, u32 bytes)
      if (!s_g.on || !data) { s_e2.vs_bytes = 0; return; }
      const u32 cap = (u32)s_g.ps_off;
      if (bytes > cap) { bytes = cap; if (!(s_e2.warned & 2u)) { VK_LOG("engine: VS constants truncated\n"); s_e2.warned |= 2u; } }
@@ -75364,7 +76057,7 @@ index e2687b7..ff0bc8d 100644
  }
  static void vk_eng_bind_ps_constants(void* user, const void* data, u32 bytes)
  {
-@@ -2682,17 +7475,31 @@ static void vk_eng_bind_ps_constants(void* user, const void* data, u32 bytes)
+@@ -2682,17 +7488,31 @@ static void vk_eng_bind_ps_constants(void* user, const void* data, u32 bytes)
      if (!s_g.on || !data) { s_e2.ps_bytes = 0; return; }
      const u32 cap = (u32)(s_g.ubo.size - s_g.ps_off);
      if (bytes > cap) { bytes = cap; if (!(s_e2.warned & 4u)) { VK_LOG("engine: PS constants truncated\n"); s_e2.warned |= 4u; } }
@@ -75399,7 +76092,7 @@ index e2687b7..ff0bc8d 100644
      }
      s_e2.tex_mask = mask;
  }
-@@ -2713,6 +7520,24 @@ static void vk_eng_set_scissor(void* user, u32 x, u32 y, u32 w, u32 h)
+@@ -2713,6 +7533,24 @@ static void vk_eng_set_scissor(void* user, u32 x, u32 y, u32 w, u32 h)
      s_e2.sc[0] = x; s_e2.sc[1] = y; s_e2.sc[2] = w; s_e2.sc[3] = h; s_e2.have_sc = 1;
  }
  static void vk_eng_set_stencil_ref(void* user, u32 ref) { (void)user; s_e2.stencil_ref = ref; }
@@ -75424,7 +76117,7 @@ index e2687b7..ff0bc8d 100644
  
  static VkFramebuffer vk_eng_framebuffer(VkRenderPass rp, const u32* rt, u32 n, VkImageView dview,
                                          u32 dkey, u32 w, u32 h)
-@@ -2720,8 +7545,16 @@ static VkFramebuffer vk_eng_framebuffer(VkRenderPass rp, const u32* rt, u32 n, V
+@@ -2720,8 +7558,16 @@ static VkFramebuffer vk_eng_framebuffer(VkRenderPass rp, const u32* rt, u32 n, V
      u32 key[RSX_BE_MAX_COLOR_TARGETS + 1] = { 0 };
      for (u32 i = 0; i < n; i++) key[i] = rt[i];
      key[RSX_BE_MAX_COLOR_TARGETS] = dkey;
@@ -75442,7 +76135,7 @@ index e2687b7..ff0bc8d 100644
      if (s_e2.fb_count >= VK_ENG_FB_CACHE) vk_eng_drop_framebuffers();
      VkImageView views[RSX_BE_MAX_COLOR_TARGETS + 1];
      for (u32 i = 0; i < n; i++) views[i] = s_eobj[rt[i]].im.view;
-@@ -2730,9 +7563,11 @@ static VkFramebuffer vk_eng_framebuffer(VkRenderPass rp, const u32* rt, u32 n, V
+@@ -2730,9 +7576,11 @@ static VkFramebuffer vk_eng_framebuffer(VkRenderPass rp, const u32* rt, u32 n, V
                                      .renderPass = rp, .attachmentCount = n + 1, .pAttachments = views,
                                      .width = w, .height = h, .layers = 1 };
      VkFramebuffer fb = VK_NULL_HANDLE;
@@ -75457,7 +76150,7 @@ index e2687b7..ff0bc8d 100644
      return fb;
  }
  
-@@ -2744,19 +7579,116 @@ static VkImageView vk_eng_scratch_depth(u32 w, u32 h)
+@@ -2744,19 +7592,116 @@ static VkImageView vk_eng_scratch_depth(u32 w, u32 h)
          return s_e2.scratch_depth.view;
      vk_eng_drop_framebuffers();
      vk_destroy_image(&s_e2.scratch_depth);
@@ -75578,7 +76271,7 @@ index e2687b7..ff0bc8d 100644
  static int vk_eng_ensure_indices(VkDeviceSize bytes)
  {
      if (s_e2.indices.buf && s_e2.indices.size >= bytes) return 0;
-@@ -2777,23 +7709,62 @@ static VkSampler vk_eng_sampler(const rsx_be_sampler_desc* d)
+@@ -2777,23 +7722,62 @@ static VkSampler vk_eng_sampler(const rsx_be_sampler_desc* d)
                    | ((u64)d->mip_present << 3) | ((u64)(d->wrap_s & 0xF) << 4)
                    | ((u64)(d->wrap_t & 0xF) << 8) | ((u64)(d->wrap_r & 0xF) << 12)
                    | ((u64)(lo >> 16) << 16) | ((u64)(hi >> 16) << 32);
@@ -75649,7 +76342,7 @@ index e2687b7..ff0bc8d 100644
      return smp;
  }
  
-@@ -2807,67 +7778,651 @@ static VkImageView vk_eng_sample_view(u32 handle)
+@@ -2807,67 +7791,651 @@ static VkImageView vk_eng_sample_view(u32 handle)
                 ? o->im.view : VK_NULL_HANDLE;
  }
  
@@ -76324,7 +77017,7 @@ index e2687b7..ff0bc8d 100644
      if (vk_ensure_vertex_buffer(vbytes)) return;
      memcpy(s_vk.vertices.ptr, vertices, (size_t)vbytes);
      if (indices && index_count) {
-@@ -2880,30 +8435,18 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
+@@ -2880,30 +8448,18 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
      /* Everything submitted before is complete (each submission is waited
       * on); this orders memory for the surfaces this draw touches. */
      for (u32 i = 0; i < n; i++)
@@ -76362,7 +77055,7 @@ index e2687b7..ff0bc8d 100644
      VkDeviceSize off = 0;
      pvkCmdBindVertexBuffers(s_vk.cmd, 0, 1, &s_vk.vertices.buf, &off);
      if (indices && index_count) {
-@@ -2916,6 +8459,28 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
+@@ -2916,6 +8472,28 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
      vk_submit_and_wait();
  }
  
@@ -76391,7 +77084,7 @@ index e2687b7..ff0bc8d 100644
  static const rsx_draw_backend s_vk_engine_backend = {
      .user                 = NULL,
      .init                 = vk_eng_init,
-@@ -2930,6 +8495,13 @@ static const rsx_draw_backend s_vk_engine_backend = {
+@@ -2930,6 +8508,13 @@ static const rsx_draw_backend s_vk_engine_backend = {
      .depth_target_create  = vk_eng_depth_target_create,
      .depth_target_release = vk_eng_release,
      .depth_snapshot       = vk_eng_depth_snapshot,
@@ -76405,7 +77098,7 @@ index e2687b7..ff0bc8d 100644
      .pipeline_create      = vk_eng_pipeline_create,
      .pipeline_release     = vk_eng_pipeline_release,
      .bind_targets         = vk_eng_bind_targets,
-@@ -2941,6 +8513,9 @@ static const rsx_draw_backend s_vk_engine_backend = {
+@@ -2941,6 +8526,9 @@ static const rsx_draw_backend s_vk_engine_backend = {
      .set_viewport         = vk_eng_set_viewport,
      .set_scissor          = vk_eng_set_scissor,
      .set_stencil_ref      = vk_eng_set_stencil_ref,
@@ -76415,7 +77108,7 @@ index e2687b7..ff0bc8d 100644
      .draw                 = vk_eng_draw,
      .clear_color          = vk_eng_clear_color,
      .clear_depth_stencil  = vk_eng_clear_depth_stencil,
-@@ -2969,23 +8544,80 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+@@ -2969,23 +8557,80 @@ static int vk_init_all(u32 width, u32 height, const char* title)
      s_vk.height = height ? height : 720;
      s_vk.dump_path = getenv("PS3RECOMP_VK_DUMP");
  
@@ -76496,7 +77189,7 @@ index e2687b7..ff0bc8d 100644
          ir = pvkCreateInstance(&ci, NULL, &s_vk.instance);
      }
      if (ir != VK_SUCCESS) { VK_LOG("vkCreateInstance failed (VkResult %d)\n", (int)ir); return -1; }
-@@ -3004,25 +8636,143 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+@@ -3004,25 +8649,143 @@ static int vk_init_all(u32 width, u32 height, const char* title)
          vk_window_drop("no device can present to the window");
          if (vk_pick_device()) return -1;
      }
@@ -76645,7 +77338,7 @@ index e2687b7..ff0bc8d 100644
      if (vk_load_device_functions()) return -1;
      if (s_vk.windowed && vk_load_wsi_device_functions())
          vk_window_drop("the driver has no swapchain functions");
-@@ -3039,11 +8789,16 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+@@ -3039,11 +8802,16 @@ static int vk_init_all(u32 width, u32 height, const char* title)
      VK_CHECK(pvkAllocateCommandBuffers(s_vk.device, &cai, &s_vk.cmd), "vkAllocateCommandBuffers");
      VkFenceCreateInfo fci = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
      VK_CHECK(pvkCreateFence(s_vk.device, &fci, NULL, &s_vk.fence), "vkCreateFence");
@@ -76663,7 +77356,7 @@ index e2687b7..ff0bc8d 100644
      if (vk_create_image(&s_vk.depth, s_vk.depth_format, s_vk.width, s_vk.height,
                          VK_IMAGE_USAGE_TRANSFER_DST_BIT |
                          VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_IMAGE_ASPECT_DEPTH_BIT)) return -1;
-@@ -3052,8 +8807,13 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+@@ -3052,8 +8820,13 @@ static int vk_init_all(u32 width, u32 height, const char* title)
      if (vk_create_render_pass()) return -1;
      if (vk_create_pipeline_objects()) return -1;
      if (vk_guest_init()) {
@@ -76677,7 +77370,7 @@ index e2687b7..ff0bc8d 100644
      }
  
      /* Both targets UNDEFINED -> GENERAL once. Colour starts opaque black so a
-@@ -3078,12 +8838,27 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+@@ -3078,12 +8851,27 @@ static int vk_init_all(u32 width, u32 height, const char* title)
              vk_create_swapchain())
              vk_window_drop("the swapchain could not be created");
      }
@@ -76705,7 +77398,7 @@ index e2687b7..ff0bc8d 100644
      if (vk_init_all(width, height, title)) {
          rsx_vulkan_backend_shutdown();
          return -1;
-@@ -3097,13 +8872,22 @@ int rsx_vulkan_backend_init(u32 width, u32 height, const char* title)
+@@ -3097,13 +8885,22 @@ int rsx_vulkan_backend_init(u32 width, u32 height, const char* title)
       * pipeline from the guest's programs, so without them it has nothing to
       * draw with, and the vtable's fixed-function path stays the default.
       * Either way PS3RECOMP_RSX_ENGINE=dispatch|vtable overrides. */
@@ -76731,7 +77424,7 @@ index e2687b7..ff0bc8d 100644
      VK_LOG("offscreen target %ux%u ready, depth format %d (%s)\n",
             s_vk.width, s_vk.height, (int)s_vk.depth_format, title ? title : "");
      return 0;
-@@ -3111,6 +8895,10 @@ int rsx_vulkan_backend_init(u32 width, u32 height, const char* title)
+@@ -3111,6 +8908,10 @@ int rsx_vulkan_backend_init(u32 width, u32 height, const char* title)
  
  void rsx_vulkan_backend_shutdown(void)
  {
@@ -76742,7 +77435,7 @@ index e2687b7..ff0bc8d 100644
      if (rsx_get_backend() == &s_vulkan_backend) rsx_set_backend(NULL);
      if (s_vk.eng_active) { rsx_draw_engine_shutdown(); s_vk.eng_active = 0; }
      rsx_draw_engine_set_backend(NULL);
-@@ -3124,8 +8912,14 @@ void rsx_vulkan_backend_shutdown(void)
+@@ -3124,8 +8925,14 @@ void rsx_vulkan_backend_shutdown(void)
          }
      }
      if (s_vk.windowed || s_vk.window) vk_window_drop(NULL);
@@ -76757,7 +77450,7 @@ index e2687b7..ff0bc8d 100644
          vk_guest_shutdown();
          for (int i = 0; i < VK_PIPELINE_SLOTS; i++)
              if (s_vk.pipelines[i]) pvkDestroyPipeline(s_vk.device, s_vk.pipelines[i], NULL);
-@@ -3145,6 +8939,7 @@ void rsx_vulkan_backend_shutdown(void)
+@@ -3145,6 +8952,7 @@ void rsx_vulkan_backend_shutdown(void)
          vk_destroy_image(&s_vk.color);
          vk_destroy_buffer(&s_vk.vertices);
          vk_destroy_buffer(&s_vk.readback);
@@ -76765,7 +77458,7 @@ index e2687b7..ff0bc8d 100644
          if (s_vk.fence) pvkDestroyFence(s_vk.device, s_vk.fence, NULL);
          if (s_vk.pool)  pvkDestroyCommandPool(s_vk.device, s_vk.pool, NULL);
          pvkDestroyDevice(s_vk.device, NULL);
-@@ -3157,12 +8952,23 @@ void rsx_vulkan_backend_shutdown(void)
+@@ -3157,12 +8965,23 @@ void rsx_vulkan_backend_shutdown(void)
  
  int rsx_vulkan_backend_pump_messages(void)
  {
@@ -76790,7 +77483,7 @@ index e2687b7..ff0bc8d 100644
      }
      return quit ? -1 : 0;
  }
-@@ -3186,4 +8992,4 @@ u32 rsx_vulkan_backend_guest_draws(void)
+@@ -3186,4 +9005,4 @@ u32 rsx_vulkan_backend_guest_draws(void)
      return s_vk.eng_active ? rsx_draw_engine_guest_draws() : s_g.last_draws;
  }
  
