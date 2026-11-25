@@ -114,7 +114,8 @@ def lift_block(name, raw, base, out_raw, spu_dir, hints=(), entry=None):
                        capture_output=True, text=True)
     open(os.path.join(out_raw, name + ".lift.log"), "w").write(r.stdout + r.stderr)
     if r.returncode:
-        return False
+        raise SystemExit(f"{name}: lifter FAILED (exit {r.returncode}); registry unchanged. "
+                         f"See {os.path.join(out_raw, name + '.lift.log')}")
     c = os.path.join(dst, "spu_recomp.c")
     src = open(c).read()
     for h in ("spu_context.h", "spu_helpers.h"):
@@ -165,9 +166,7 @@ def main_extra(d, sg, version=None):
             if mapped_size != size:
                 raise ValueError('Extra payload size differs for ' + name)
         raw = rd(d, sg, ea, size)
-        if not lift_block(name, raw, base, out_raw, spu_dir, EXTRA_HINTS.get(name, ())):
-            print(f"{name}: lifter FAILED, see out/spu_jobs/{name}.lift.log")
-            continue
+        lift_block(name, raw, base, out_raw, spu_dir, EXTRA_HINTS.get(name, ()))
         if name == "igpm_rt":
             patch_igpm_clear(os.path.join(spu_dir, name, "spu_recomp.c"))
         decls.append(f"extern void {name}_spu_recomp_register(void);")
@@ -306,9 +305,7 @@ def main_sub(d, sg, version=None):
             name = 'update_sub_DB4000_00100'
             entry, code_end = changed_module(raw)
             args = ['--reloc', '--code-end', hex(code_end), '--extra-funcs', hex(entry)]
-        if not lift_block(name, raw, base, out_raw, spu_dir, args, entry=entry):
-            print(f"{name}: lifter FAILED (skipped), see out/spu_jobs/{name}.lift.log")
-            continue
+        lift_block(name, raw, base, out_raw, spu_dir, args, entry=entry)
         decls.append(f"extern void {name}_spu_recomp_register(void);")
         blobs.append(f"static const unsigned char {name}_bytes[{size}] = {{" + ",".join(str(x) for x in raw) + "};")
         regs.append(f"    spu_begin_image({img}); {name}_spu_recomp_register();\n"
@@ -397,8 +394,8 @@ def main():
                            capture_output=True, text=True)
         open(os.path.join(out_raw, name + ".lift.log"), "w").write(r.stdout + r.stderr)
         if r.returncode:
-            print(f"{name}: lifter FAILED (skipped), see out/spu_jobs/{name}.lift.log")
-            continue
+            raise SystemExit(f"{name}: lifter FAILED (exit {r.returncode}); registry unchanged. "
+                             f"See {os.path.join(out_raw, name + '.lift.log')}")
         c = os.path.join(dst, "spu_recomp.c")
         src = open(c).read()
         for h in ("spu_context.h", "spu_helpers.h"):
