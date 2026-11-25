@@ -54,6 +54,7 @@ struct Overlay {
     std::function<void()> on_yes;
     std::function<void(const std::string&)> on_input;   // CAPTURE: the key or mouse input's name
     ULONGLONG deadline = 0;                              // CAPTURE: cancelled then
+    bool pad = false;                                    // CAPTURE: a controller input, not a key (Controller buttons)
     int focus = 0;
     Rect btn[2]{};
 };
@@ -133,6 +134,13 @@ static void capture_input(const std::string& title, const std::string& text, std
     ov = Overlay(); ov.type = Overlay::CAPTURE; ov.title = title; ov.text = text; ov.on_input = std::move(fn);
     ov.deadline = GetTickCount64() + 6000;
     redraw();
+}
+// The same for a controller button or trigger (pad_event): its SDL name, by position
+// ("a" is the bottom face button), as the game reads RACACIT_PAD_<BUTTON> (cellPad.c).
+static void capture_pad(const std::string& title, const std::string& text, std::function<void(const std::string&)> fn)
+{
+    capture_input(title, text, std::move(fn));
+    ov.pad = true;
 }
 static void capture_done(const std::string& name)
 {
@@ -240,6 +248,7 @@ static const std::vector<Opt>& opts()
         // Which exe Play starts (Store::launch): RaCACiT.exe (AVX2, FMA, BMI2) or RaCACiT_compat.exe
         // (SSE4.2, for older processors). Automatic: by what this PC's processor has.
         { "Performance", "RACACIT_GAME_BUILD", "Game build", "", { { "", "Automatic" }, { "standard", "Standard (AVX2 processors)" }, { "compat", "Older processors (no AVX2)" } } },
+        { "Controller", "RACACIT_SWAP_SHOULDERS", "Bumpers and triggers", "0", { { "0", "As on the PS3" }, { "1", "Swapped (triggers are L1 / R1)" } } },
         { "Controller", "RACACIT_DS_SWAP", "Fire button", "1", { { "1", "R2 / RT (R1 and R2 swapped)" }, { "0", "R1 / RB (PS3 layout)" } } },
         { "Controller", "RACACIT_DS_RUMBLE", "Rumble", "100", {} },
         { "Controller", "RACACIT_DS_TRIGGERS", "Adaptive triggers", "1", { { "1", "On" }, { "0", "Off" } } },
@@ -532,6 +541,7 @@ static Item ds_plus_item()
 
 static int s_bind_tab = 0;   // Key bindings: 0 by button, 1 by key
 static void bindings_screen();
+static void pad_bindings_screen();
 static void add_options(const std::vector<std::string>& sections)
 {
     std::string section;
@@ -573,6 +583,8 @@ static void add_options(const std::vector<std::string>& sections)
         it.change = step;
         it.act = [step] { step(+1); };
         scr.items.push_back(it);
+        if (!strcmp(o.key, "RACACIT_SWAP_SHOULDERS"))
+            scr.items.push_back(button("Controller buttons", "Which controller button does what", [] { set_screen(pad_bindings_screen); }));
         if (!strcmp(o.key, "RACACIT_MOUSE_INVERT_Y"))
             scr.items.push_back(button("Key bindings", "Every button on keys and mouse buttons", [] { s_bind_tab = 0; set_screen(bindings_screen); }));
     }
@@ -767,6 +779,102 @@ static void bindings_screen()
     scr.items.push_back(button("Reset all to the defaults", "", [] {
         confirm("Reset the key bindings?", "Every button goes back to its default keys.", "Reset", [] {
             for (const Bind& b : k_binds) S->settings.remove(std::string("RACACIT_BIND_") + b.name);
+            S->settings.save(); refresh();
+        });
+    }));
+    scr.items.push_back(button("Back", "", [] { set_screen(settings_screen); }));
+}
+
+// ---- controller buttons ---------------------------------------------------------------------------
+// The game's buttons on the controller (cellPad.c k_pb, the same names and defaults):
+// RACACIT_PAD_<BUTTON>=<inputs> in settings.txt, SDL's names by position ("a" is the bottom
+// face button on every controller), several separated by commas, "none" for none.
+struct PadBind { const char* name; const char* label; const char* def; };
+static const PadBind k_pad_binds[] = {
+    { "CROSS", "Cross: jump", "a" }, { "CIRCLE", "Circle", "b" }, { "SQUARE", "Square: melee", "x" },
+    { "TRIANGLE", "Triangle: quick select", "y" }, { "L1", "L1", "leftshoulder" }, { "R1", "R1: fire", "rightshoulder" },
+    { "L2", "L2: strafe", "lefttrigger" }, { "R2", "R2", "righttrigger" }, { "L3", "L3 (left stick click)", "leftstick" },
+    { "R3", "R3 (right stick click)", "rightstick" }, { "START", "Start: pause", "start" }, { "SELECT", "Select: map", "back" },
+    { "UP", "D-pad up", "dpup" }, { "DOWN", "D-pad down", "dpdown" }, { "LEFT", "D-pad left", "dpleft" }, { "RIGHT", "D-pad right", "dpright" },
+};
+// The controller on hand: 0 PlayStation (or none), 1 Xbox and the like, 2 Nintendo Switch.
+static int pad_family()
+{
+    if (!pad) return 0;
+    const SDL_GameControllerType t = SDL_GameControllerGetType(pad);
+    if (t == SDL_CONTROLLER_TYPE_PS3 || t == SDL_CONTROLLER_TYPE_PS4 || t == SDL_CONTROLLER_TYPE_PS5) return 0;
+    if (t == SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_PRO || t == SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_LEFT ||
+        t == SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT || t == SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_PAIR) return 2;
+    return 1;
+}
+// An input's name on the controller on hand.
+static std::string pad_input_label(const std::string& in)
+{
+    static const struct { const char* name; const char* ps; const char* xbox; const char* sw; } m[] = {
+        { "a", "Cross", "A", "B" }, { "b", "Circle", "B", "A" }, { "x", "Square", "X", "Y" }, { "y", "Triangle", "Y", "X" },
+        { "back", "Select", "View", "-" }, { "start", "Start", "Menu", "+" }, { "guide", "PS button", "Xbox button", "Home" },
+        { "leftshoulder", "L1", "LB", "L" }, { "rightshoulder", "R1", "RB", "R" },
+        { "lefttrigger", "L2", "LT", "ZL" }, { "righttrigger", "R2", "RT", "ZR" },
+        { "leftstick", "L3", "Left stick click", "Left stick click" }, { "rightstick", "R3", "Right stick click", "Right stick click" },
+        { "dpup", "D-pad up", "D-pad up", "D-pad up" }, { "dpdown", "D-pad down", "D-pad down", "D-pad down" },
+        { "dpleft", "D-pad left", "D-pad left", "D-pad left" }, { "dpright", "D-pad right", "D-pad right", "D-pad right" },
+        { "misc1", "Mute", "Share", "Capture" }, { "touchpad", "Touchpad", "Touchpad", "Touchpad" },
+        { "paddle1", "Paddle 1", "P1", "Paddle 1" }, { "paddle2", "Paddle 2", "P2", "Paddle 2" },
+        { "paddle3", "Paddle 3", "P3", "Paddle 3" }, { "paddle4", "Paddle 4", "P4", "Paddle 4" },
+    };
+    const int f = pad_family();
+    for (auto& e : m) if (lower(in) == e.name) return f == 2 ? e.sw : f == 1 ? e.xbox : e.ps;
+    return in;
+}
+static std::vector<std::string> pad_bind_inputs(const PadBind& b)
+{
+    const std::string v = S->settings.get(std::string("RACACIT_PAD_") + b.name);
+    return split_keys(v.empty() ? b.def : v);   // the game: empty = the default
+}
+static void set_pad_bind(const PadBind& b, const std::vector<std::string>& k)
+{
+    const std::string key = std::string("RACACIT_PAD_") + b.name, v = join_keys(k);
+    if (lower(v) == lower(b.def)) S->settings.remove(key);
+    else S->settings.put(key, v.empty() ? "none" : v);
+    S->settings.save();
+}
+static std::string pad_inputs_label(const std::vector<std::string>& k)
+{
+    std::string s; for (auto& x : k) s += (s.empty() ? "" : ", ") + pad_input_label(x);
+    return s.empty() ? "Nothing" : s;
+}
+static void pad_bindings_screen()
+{
+    scr = Screen(); scr.title = "Controller buttons"; scr.subtitle = pad ? (pad_family() == 2 ? "Nintendo Switch controller" :
+                                                                         pad_family() == 1 ? "Xbox-style controller" : "PlayStation controller")
+                                                                     : "No controller connected";
+    scr.back = [] { set_screen(settings_screen); };
+    scr.info.push_back({ "Remapping", "Pick one of the game's buttons, then press the controller button (or pull the trigger) "
+                                      "that should do it. It replaces what was there, and if that controller button did something else, "
+                                      "it moves here. Escape cancels." });
+    scr.info.push_back({ "When", "Changes apply the next time the game starts. Bumpers and triggers and Fire button "
+                                 "(Settings) still apply on top, and the button prompts in the game name what you set here." });
+    for (const PadBind& b : k_pad_binds) {
+        const PadBind* bp = &b;
+        scr.items.push_back(button(b.label, pad_inputs_label(pad_bind_inputs(b)), [bp] {
+            if (!pad) { message("No controller", "Connect a controller first, then pick the button again."); return; }
+            capture_pad(bp->label, "Press the controller button for " + std::string(bp->label) + " (now: " +
+                        pad_inputs_label(pad_bind_inputs(*bp)) + ").", [bp](const std::string& k) {
+                for (const PadBind& o : k_pad_binds) {   // one game button for each input: take it off the others
+                    if (&o == bp) continue;
+                    auto in = pad_bind_inputs(o);
+                    const auto n = in.size();
+                    in.erase(std::remove_if(in.begin(), in.end(), [&](const std::string& x) { return lower(x) == lower(k); }), in.end());
+                    if (in.size() != n) set_pad_bind(o, in);
+                }
+                set_pad_bind(*bp, { k }); refresh();
+            });
+        }));
+    }
+    scr.items.push_back(header(""));
+    scr.items.push_back(button("Reset all to the defaults", "", [] {
+        confirm("Reset the controller buttons?", "Every button goes back to the PS3 layout.", "Reset", [] {
+            for (const PadBind& b : k_pad_binds) S->settings.remove(std::string("RACACIT_PAD_") + b.name);
             S->settings.save(); refresh();
         });
     }));
@@ -1388,6 +1496,9 @@ static void game_exited(DWORD code)
 static void pad_open()
 {
     if (!sdl_ok) return;
+    // Face buttons by position, as the game reads them (cellPad.c): the bottom one is
+    // "a" on every controller, a Nintendo one too, so Controller buttons saves what the game sees.
+    SDL_SetHint(SDL_HINT_GAMECONTROLLER_USE_BUTTON_LABELS, "0");
     if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) != 0) return;
     for (int i = 0; i < SDL_NumJoysticks() && !pad; i++)
         if (SDL_IsGameController(i)) pad = SDL_GameControllerOpen(i);
@@ -1496,6 +1607,14 @@ static void pad_event(const SDL_Event& e)
     }
     if (e.type == SDL_CONTROLLERDEVICEREMOVED && pad && SDL_GameControllerFromInstanceID(e.cdevice.which) == pad) {
         SDL_GameControllerClose(pad); pad = nullptr; return;
+    }
+    if (ov.type == Overlay::CAPTURE && ov.pad && GetForegroundWindow() == g_hwnd) {   // Controller buttons: this input
+        if (e.type == SDL_CONTROLLERBUTTONDOWN)
+            capture_done(SDL_GameControllerGetStringForButton((SDL_GameControllerButton)e.cbutton.button));
+        else if (e.type == SDL_CONTROLLERAXISMOTION && e.caxis.value > 16000 &&
+                 (e.caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERLEFT || e.caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERRIGHT))
+            capture_done(e.caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERLEFT ? "lefttrigger" : "righttrigger");
+        return;
     }
     if (e.type != SDL_CONTROLLERBUTTONDOWN || GetForegroundWindow() != g_hwnd) return;
     switch (e.cbutton.button) {
@@ -1952,10 +2071,12 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
         }
         return 0;
     case WM_KEYDOWN: case WM_SYSKEYDOWN:
+        if (ov.type == Overlay::CAPTURE && ov.pad) { if (w == VK_ESCAPE) { ov.type = Overlay::NONE; redraw(); } return 0; }   // waiting for a controller
         if (ov.type == Overlay::CAPTURE) { if (!(l & (1 << 30))) capture_done(key_name_from_scan(l)); return 0; }   // not a held key's repeat
         if (m == WM_SYSKEYDOWN) break;
         key((int)w); return 0;
     case WM_LBUTTONDOWN: case WM_RBUTTONDOWN: case WM_MBUTTONDOWN: case WM_XBUTTONDOWN:
+        if (ov.type == Overlay::CAPTURE && ov.pad) { s_swallow_up = true; return m == WM_XBUTTONDOWN ? TRUE : 0; }
         if (ov.type == Overlay::CAPTURE) {   // SDL's numbering: 1 left, 2 middle, 3 right, 4/5 the side buttons
             s_swallow_up = true;
             capture_done(m == WM_LBUTTONDOWN ? "Mouse1" : m == WM_MBUTTONDOWN ? "Mouse2" : m == WM_RBUTTONDOWN ? "Mouse3"

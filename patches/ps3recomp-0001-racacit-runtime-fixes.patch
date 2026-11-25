@@ -2402,7 +2402,7 @@ index 4d916ac7..1dfee100 100644
      if (flags & CELL_FS_O_CREAT) {
          ensure_parent_dirs(host_path);
 diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
-index 5f8a2fa2..627e907e 100644
+index 5f8a2fa2..a68b0295 100644
 --- a/libs/input/cellPad.c
 +++ b/libs/input/cellPad.c
 @@ -13,11 +13,13 @@
@@ -2509,7 +2509,7 @@ index 5f8a2fa2..627e907e 100644
  }
  
  /* Close port p's controller (gone, or shutting down). */
-@@ -582,76 +576,566 @@ static void pad_sdl_close(int p, int gone)
+@@ -582,76 +576,740 @@ static void pad_sdl_close(int p, int gone)
      memset(&s_rumble[p], 0, sizeof s_rumble[p]);
      pad_host_release(&s_host_state[p]);
  }
@@ -3092,6 +3092,164 @@ index 5f8a2fa2..627e907e 100644
 +        state[port] = 0;
 +    }
 +    return now < tap_until[port];
++}
++
++/* Controller remapping: each of the game's buttons from up to four controller
++ * inputs, RACACIT_PAD_<BUTTON>=<inputs> in settings.txt (the launcher's
++ * Controller buttons screen writes them). Inputs are SDL's names by position:
++ * a (bottom face button), b (right), x (left), y (top), back, start, guide,
++ * leftshoulder, rightshoulder, lefttrigger, righttrigger, leftstick,
++ * rightstick, dpup, dpdown, dpleft, dpright, misc1, paddle1-paddle4, touchpad;
++ * several separated by commas, "none" for nothing. Unset: the PS3 layout.
++ * Read once, at the first poll; changes apply the next time the game starts.
++ * The Bumpers and triggers swap and Fire on R2 apply on top, as before. */
++enum { PB_CROSS, PB_CIRCLE, PB_SQUARE, PB_TRIANGLE, PB_L1, PB_R1, PB_L2, PB_R2, PB_L3, PB_R3,
++       PB_START, PB_SELECT, PB_UP, PB_DOWN, PB_LEFT, PB_RIGHT, PB_N };
++static const struct { const char* name; u16 btn; const char* def; } k_pb[PB_N] = {
++    { "CROSS", CELL_PAD_CTRL_CROSS, "a" },          { "CIRCLE", CELL_PAD_CTRL_CIRCLE, "b" },
++    { "SQUARE", CELL_PAD_CTRL_SQUARE, "x" },        { "TRIANGLE", CELL_PAD_CTRL_TRIANGLE, "y" },
++    { "L1", CELL_PAD_CTRL_L1, "leftshoulder" },     { "R1", CELL_PAD_CTRL_R1, "rightshoulder" },
++    { "L2", CELL_PAD_CTRL_L2, "lefttrigger" },      { "R2", CELL_PAD_CTRL_R2, "righttrigger" },
++    { "L3", CELL_PAD_CTRL_L3, "leftstick" },        { "R3", CELL_PAD_CTRL_R3, "rightstick" },
++    { "START", CELL_PAD_CTRL_START, "start" },      { "SELECT", CELL_PAD_CTRL_SELECT, "back" },
++    { "UP", CELL_PAD_CTRL_UP, "dpup" },             { "DOWN", CELL_PAD_CTRL_DOWN, "dpdown" },
++    { "LEFT", CELL_PAD_CTRL_LEFT, "dpleft" },       { "RIGHT", CELL_PAD_CTRL_RIGHT, "dpright" },
++};
++/* An input: an SDL_GameControllerButton, or PIN_LT / PIN_RT for the triggers. */
++#define PIN_LT  SDL_CONTROLLER_BUTTON_MAX
++#define PIN_RT  (SDL_CONTROLLER_BUTTON_MAX + 1)
++#define PIN_N   (SDL_CONTROLLER_BUTTON_MAX + 2)
++#define PB_MAX_INPUTS 4
++static int s_pb[PB_N][PB_MAX_INPUTS];
++static int s_pb_ready;
++static int pb_parse_one(const char* t)
++{
++    if (!SDL_strcasecmp(t, "lefttrigger")) return PIN_LT;
++    if (!SDL_strcasecmp(t, "righttrigger")) return PIN_RT;
++    const SDL_GameControllerButton b = SDL_GameControllerGetButtonFromString(t);
++    return b == SDL_CONTROLLER_BUTTON_INVALID ? -1 : (int)b;
++}
++static void pb_init(void)
++{
++    if (s_pb_ready) return;
++    s_pb_ready = 1;
++    int custom = 0;
++    for (int g = 0; g < PB_N; g++) {
++        char env[48], list[160];
++        snprintf(env, sizeof env, "RACACIT_PAD_%s", k_pb[g].name);
++        const char* v = getenv(env);
++        if (v && *v) custom = 1;
++        snprintf(list, sizeof list, "%s", v && *v ? v : k_pb[g].def);
++        for (int i = 0; i < PB_MAX_INPUTS; i++) s_pb[g][i] = -1;
++        int n = 0;
++        for (char* tok = list; tok && *tok && n < PB_MAX_INPUTS; ) {
++            char* c = strchr(tok, ',');
++            if (c) *c = 0;
++            while (*tok == ' ') tok++;
++            char* end = tok + strlen(tok); while (end > tok && end[-1] == ' ') *--end = 0;
++            const int in = SDL_strcasecmp(tok, "none") ? pb_parse_one(tok) : -1;
++            if (in >= 0) s_pb[g][n++] = in;
++            else if (*tok && SDL_strcasecmp(tok, "none")) fprintf(stderr, "[cellPad] %s: unknown controller input \"%s\"%c", env, tok, 10);
++            tok = c ? c + 1 : NULL;
++        }
++    }
++    if (custom) {
++        fprintf(stderr, "[cellPad] controller buttons remapped:");
++        for (int g = 0; g < PB_N; g++) {
++            fprintf(stderr, " %s=", k_pb[g].name);
++            for (int i = 0; i < PB_MAX_INPUTS && s_pb[g][i] >= 0; i++)
++                fprintf(stderr, "%s%s", i ? "," : "", s_pb[g][i] == PIN_LT ? "lefttrigger" : s_pb[g][i] == PIN_RT ? "righttrigger"
++                                          : SDL_GameControllerGetStringForButton((SDL_GameControllerButton)s_pb[g][i]));
++            if (s_pb[g][0] < 0) fprintf(stderr, "none");
++        }
++        fputc(10, stderr);
++    }
++}
++
++/* The game's buttons from the controller's inputs: `in` pressed per input,
++ * `val` its strength 0..32767 (the triggers' travel; 32767 for a button).
++ * Returns the buttons and the L2 / R2 trigger values. `swap` (Fire on R2) and
++ * `shoulders` (Bumpers and triggers) as pad_swap / pad_shoulder_swap say, the
++ * quick select and hoverboots states from the poll. Pure, so the button
++ * prompts can ask which input does what (racacit_pad_input_for). */
++static u16 pad_map(const unsigned char in[PIN_N], const int val[PIN_N], int swap, int shoulders,
++                   int quickselect, int hoverboots, int* lt_out, int* rt_out)
++{
++    pb_init();
++    u16 btns = 0; int lt = 0, rt = 0;
++    for (int g = 0; g < PB_N; g++)
++        for (int i = 0; i < PB_MAX_INPUTS && s_pb[g][i] >= 0; i++) {
++            const int p = s_pb[g][i];
++            if (p == PIN_LT || p == PIN_RT) {
++                /* A trigger presses past 3000 of travel, as the PS3's L2 / R2 did. */
++                if (val[p] > 3000) btns |= k_pb[g].btn;
++            } else if (in[p]) btns |= k_pb[g].btn;
++            if (g == PB_L2 && (p == PIN_LT || p == PIN_RT ? val[p] : in[p] ? 32767 : 0) > lt) lt = p == PIN_LT || p == PIN_RT ? val[p] : 32767;
++            if (g == PB_R2 && (p == PIN_LT || p == PIN_RT ? val[p] : in[p] ? 32767 : 0) > rt) rt = p == PIN_LT || p == PIN_RT ? val[p] : 32767;
++        }
++    if (shoulders) {   /* LB/RB <-> LT/RT: a bumper reads as a fully pulled trigger */
++        const int bl = (btns & CELL_PAD_CTRL_L1) != 0, br = (btns & CELL_PAD_CTRL_R1) != 0;
++        const int tl = (btns & CELL_PAD_CTRL_L2) != 0, tr = (btns & CELL_PAD_CTRL_R2) != 0;
++        btns &= (u16)~(CELL_PAD_CTRL_L1 | CELL_PAD_CTRL_L2 | CELL_PAD_CTRL_R1 | CELL_PAD_CTRL_R2);
++        if (tl) btns |= CELL_PAD_CTRL_L1;
++        if (tr) btns |= CELL_PAD_CTRL_R1;
++        if (bl) btns |= CELL_PAD_CTRL_L2;
++        if (br) btns |= CELL_PAD_CTRL_R2;
++        lt = bl ? 32767 : 0;
++        rt = br ? 32767 : 0;
++    }
++    /* Fire on R2 (pad_swap): R1 and R2 trade places -- R2 fires (the
++     * game's R1), R1 throws the wrench, boosts, drops from ledges (the
++     * game's R2). The left side stays as on the PS3 since v70: L2 strafes,
++     * L1 looks / scopes / centres the camera (v52-v69 traded L1 and L2
++     * too, which put strafe on L1; owner, v69: "strafe button being l2
++     * ... look at l1"). Two places where L2 does more:
++     *   - quick select open: L2 / R2 page back / forward (the game's L1 /
++     *     R1; "l2 and r2 for quick select");
++     *   - on hoverboots: L2 accelerates too (the game's R2; "hoverboot l2").
++     * game/button_prompts.cpp names the buttons in the text to match. */
++    if (swap) {
++        const int l1 = (btns & CELL_PAD_CTRL_L1) != 0, l2 = (btns & CELL_PAD_CTRL_L2) != 0;
++        const int r1 = (btns & CELL_PAD_CTRL_R1) != 0, r2 = (btns & CELL_PAD_CTRL_R2) != 0;
++        btns &= (u16)~(CELL_PAD_CTRL_L1 | CELL_PAD_CTRL_L2 | CELL_PAD_CTRL_R1 | CELL_PAD_CTRL_R2);
++        int gl1 = l1, gl2 = l2, gr2 = r1;
++        if (quickselect) { gl1 = l1 || l2; gl2 = 0; }
++        else if (hoverboots && l2) { gr2 = 1; gl2 = 0; }
++        if (gl1) btns |= CELL_PAD_CTRL_L1;
++        if (gl2) btns |= CELL_PAD_CTRL_L2;
++        if (r2) btns |= CELL_PAD_CTRL_R1;
++        if (gr2) btns |= CELL_PAD_CTRL_R2;
++        lt = gl2 ? lt : 0;
++        rt = gr2 ? 32767 : 0;
++    }
++    *lt_out = lt; *rt_out = rt;
++    return btns;
++}
++
++/* For the button prompts (game/button_prompts.cpp), as of the last poll of
++ * port 0: its controller's family -- 0 none or a PlayStation pad (the game's
++ * own pictures), 1 Xbox and other XInput-style pads, 2 Nintendo Switch -- and
++ * which input presses the game's button `btn` (a CELL_PAD_CTRL_* bit): an
++ * SDL_GameControllerButton or PIN_LT / PIN_RT (SDL_CONTROLLER_BUTTON_MAX / +1),
++ * -1 for none. The first input in the remap's order that does. */
++volatile int g_racacit_pad_family;
++static volatile int s_pad_swap_now, s_pad_shoulders_now;
++int racacit_pad_input_for(unsigned btn)
++{
++    static const int order[] = { SDL_CONTROLLER_BUTTON_A, SDL_CONTROLLER_BUTTON_B, SDL_CONTROLLER_BUTTON_X, SDL_CONTROLLER_BUTTON_Y,
++        SDL_CONTROLLER_BUTTON_LEFTSHOULDER, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, PIN_LT, PIN_RT,
++        SDL_CONTROLLER_BUTTON_LEFTSTICK, SDL_CONTROLLER_BUTTON_RIGHTSTICK, SDL_CONTROLLER_BUTTON_START,
++        SDL_CONTROLLER_BUTTON_BACK, SDL_CONTROLLER_BUTTON_DPAD_UP, SDL_CONTROLLER_BUTTON_DPAD_DOWN,
++        SDL_CONTROLLER_BUTTON_DPAD_LEFT, SDL_CONTROLLER_BUTTON_DPAD_RIGHT, SDL_CONTROLLER_BUTTON_MISC1,
++        SDL_CONTROLLER_BUTTON_PADDLE1, SDL_CONTROLLER_BUTTON_PADDLE2, SDL_CONTROLLER_BUTTON_PADDLE3,
++        SDL_CONTROLLER_BUTTON_PADDLE4, SDL_CONTROLLER_BUTTON_TOUCHPAD, SDL_CONTROLLER_BUTTON_GUIDE };
++    for (unsigned k = 0; k < sizeof order / sizeof order[0]; k++) {
++        unsigned char in[PIN_N] = {0}; int val[PIN_N] = {0}, lt, rt;
++        in[order[k]] = 1; val[order[k]] = 32767;
++        if (pad_map(in, val, s_pad_swap_now, s_pad_shoulders_now, g_racacit_ctx_quickselect, g_racacit_ctx_hoverboots, &lt, &rt) & btn)
++            return order[k];
++    }
++    return -1;
  }
  
  static void pad_poll_sdl2(void)
@@ -3117,6 +3275,22 @@ index 5f8a2fa2..627e907e 100644
 +        }
 +    g_racacit_pad_layout = racacit_pad_layout();
 +    g_racacit_shoulder_swap = s_sdl_controllers[0] && pad_shoulder_swap();
++    {   /* port 0's controller family for the prompts (racacit_pad_input_for). RACACIT_TEST_PAD_FAMILY=<n>: that family (tests). */
++        static int force = -2;
++        if (force == -2) { const char* e = getenv("RACACIT_TEST_PAD_FAMILY"); force = e && *e ? atoi(e) : -1; }
++        int fam = 0;
++        SDL_GameController* g0 = s_sdl_controllers[0];
++        if (force >= 0) fam = force;
++        else if (g0 && SDL_GameControllerGetAttached(g0)) {
++            const SDL_GameControllerType t = SDL_GameControllerGetType(g0);
++            fam = t == SDL_CONTROLLER_TYPE_PS3 || t == SDL_CONTROLLER_TYPE_PS4 || t == SDL_CONTROLLER_TYPE_PS5 ? 0
++                : t == SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_PRO || t == SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_LEFT ||
++                  t == SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT || t == SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_PAIR ? 2 : 1;
++        }
++        if (fam != g_racacit_pad_family) fprintf(stderr, "[cellPad] controller family for the prompts: %s%c",
++                                                 fam == 2 ? "Nintendo Switch" : fam == 1 ? "Xbox" : "PlayStation (or none)", 10);
++        g_racacit_pad_family = fam;
++    }
  
      for (int i = 0; i < PAD_MAX_HOST_PORTS; i++) {
          SDL_GameController* gc = s_sdl_controllers[i];
@@ -3130,64 +3304,55 @@ index 5f8a2fa2..627e907e 100644
              memset(&s_rumble[i], 0, sizeof s_rumble[i]);
              continue;
          }
-@@ -663,7 +1147,7 @@ static void pad_poll_sdl2(void)
+@@ -662,27 +1320,26 @@ static void pad_poll_sdl2(void)
+         if (s_rumble[i].sent_ms && pad_now_ms() - s_rumble[i].sent_ms >= PAD_RUMBLE_RENEW_MS)
              pad_sdl_rumble_send(i);
  
-         u16 btns = 0;
+-        u16 btns = 0;
 -        if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_BACK))          btns |= CELL_PAD_CTRL_SELECT;
-+        if (pad_select(i, gc))                                                    btns |= CELL_PAD_CTRL_SELECT;
-         if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_LEFTSTICK))     btns |= CELL_PAD_CTRL_L3;
-         if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_RIGHTSTICK))    btns |= CELL_PAD_CTRL_R3;
-         if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_START))         btns |= CELL_PAD_CTRL_START;
-@@ -683,6 +1167,47 @@ static void pad_poll_sdl2(void)
-         int rt = SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_TRIGGERRIGHT);
-         if (lt > 3000) btns |= CELL_PAD_CTRL_L2;
-         if (rt > 3000) btns |= CELL_PAD_CTRL_R2;
-+        if (pad_shoulder_swap()) {   /* LB/RB <-> LT/RT: a bumper reads as a fully pulled trigger */
-+            const int bl = (btns & CELL_PAD_CTRL_L1) != 0, br = (btns & CELL_PAD_CTRL_R1) != 0;
-+            const int tl = lt > 3000, tr = rt > 3000;
-+            btns &= (u16)~(CELL_PAD_CTRL_L1 | CELL_PAD_CTRL_L2 | CELL_PAD_CTRL_R1 | CELL_PAD_CTRL_R2);
-+            if (tl) btns |= CELL_PAD_CTRL_L1;
-+            if (tr) btns |= CELL_PAD_CTRL_R1;
-+            if (bl) btns |= CELL_PAD_CTRL_L2;
-+            if (br) btns |= CELL_PAD_CTRL_R2;
-+            lt = bl ? 32767 : 0;
-+            rt = br ? 32767 : 0;
-+        }
-+        /* Fire on R2 (pad_swap): R1 and R2 trade places -- R2 fires (the
-+         * game's R1), R1 throws the wrench, boosts, drops from ledges (the
-+         * game's R2). The left side stays as on the PS3 since v70: L2 strafes,
-+         * L1 looks / scopes / centres the camera (v52-v69 traded L1 and L2
-+         * too, which put strafe on L1; owner, v69: "strafe button being l2
-+         * ... look at l1"). Two places where L2 does more:
-+         *   - quick select open: L2 / R2 page back / forward (the game's L1 /
-+         *     R1; "l2 and r2 for quick select");
-+         *   - on hoverboots: L2 accelerates too (the game's R2; "hoverboot l2").
-+         * game/button_prompts.cpp names the buttons in the text to match. */
+-        if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_LEFTSTICK))     btns |= CELL_PAD_CTRL_L3;
+-        if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_RIGHTSTICK))    btns |= CELL_PAD_CTRL_R3;
+-        if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_START))         btns |= CELL_PAD_CTRL_START;
+-        if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_DPAD_UP))       btns |= CELL_PAD_CTRL_UP;
+-        if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_DPAD_RIGHT))    btns |= CELL_PAD_CTRL_RIGHT;
+-        if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_DPAD_DOWN))     btns |= CELL_PAD_CTRL_DOWN;
+-        if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_DPAD_LEFT))     btns |= CELL_PAD_CTRL_LEFT;
+-        if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_LEFTSHOULDER))  btns |= CELL_PAD_CTRL_L1;
+-        if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER)) btns |= CELL_PAD_CTRL_R1;
+-        if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_Y))             btns |= CELL_PAD_CTRL_TRIANGLE;
+-        if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_B))             btns |= CELL_PAD_CTRL_CIRCLE;
+-        if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_A))             btns |= CELL_PAD_CTRL_CROSS;
+-        if (SDL_GameControllerGetButton(gc, SDL_CONTROLLER_BUTTON_X))             btns |= CELL_PAD_CTRL_SQUARE;
+-
+-        /* Triggers via axis */
+-        int lt = SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_TRIGGERLEFT);
+-        int rt = SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_TRIGGERRIGHT);
+-        if (lt > 3000) btns |= CELL_PAD_CTRL_L2;
+-        if (rt > 3000) btns |= CELL_PAD_CTRL_R2;
++        /* The controller's inputs, then the game's buttons through the remap
++         * (pad_map). Back is read through pad_select: held, it opens the menu. */
++        unsigned char in[PIN_N] = {0}; int val[PIN_N] = {0};
++        for (int b = 0; b < SDL_CONTROLLER_BUTTON_MAX; b++)
++            if (b != SDL_CONTROLLER_BUTTON_BACK && SDL_GameControllerGetButton(gc, (SDL_GameControllerButton)b)) { in[b] = 1; val[b] = 32767; }
++        if (pad_select(i, gc)) { in[SDL_CONTROLLER_BUTTON_BACK] = 1; val[SDL_CONTROLLER_BUTTON_BACK] = 32767; }
++        val[PIN_LT] = SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_TRIGGERLEFT);
++        val[PIN_RT] = SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_TRIGGERRIGHT);
++        in[PIN_LT] = val[PIN_LT] > 3000; in[PIN_RT] = val[PIN_RT] > 3000;
++        const int swap = pad_swap(gc), shoulders = pad_shoulder_swap();
++        if (i == 0) { s_pad_swap_now = swap; s_pad_shoulders_now = shoulders; }
 +        /* The quick select ring is open while TRIANGLE is held (the game's
 +         * default; a tap does not open it): held 150 ms = open. */
++        int lt, rt;
++        u16 btns = pad_map(in, val, 0, 0, 0, 0, &lt, &rt);
 +        if (i == 0) { static Uint64 tri_ms;
 +            if (!(btns & CELL_PAD_CTRL_TRIANGLE)) { tri_ms = 0; g_racacit_ctx_quickselect = 0; }
 +            else { const Uint64 nw = SDL_GetTicks64(); if (!tri_ms) tri_ms = nw;
 +                   g_racacit_ctx_quickselect = nw - tri_ms >= 150; } }
-+        if (pad_swap(gc)) {
-+            const int l1 = (btns & CELL_PAD_CTRL_L1) != 0, l2 = (btns & CELL_PAD_CTRL_L2) != 0;
-+            const int r1 = (btns & CELL_PAD_CTRL_R1) != 0, r2 = (btns & CELL_PAD_CTRL_R2) != 0;
-+            btns &= (u16)~(CELL_PAD_CTRL_L1 | CELL_PAD_CTRL_L2 | CELL_PAD_CTRL_R1 | CELL_PAD_CTRL_R2);
-+            int gl1 = l1, gl2 = l2, gr2 = r1;
-+            if (g_racacit_ctx_quickselect) { gl1 = l1 || l2; gl2 = 0; }
-+            else if (g_racacit_ctx_hoverboots && l2) { gr2 = 1; gl2 = 0; }
-+            if (gl1) btns |= CELL_PAD_CTRL_L1;
-+            if (gl2) btns |= CELL_PAD_CTRL_L2;
-+            if (r2) btns |= CELL_PAD_CTRL_R1;
-+            if (gr2) btns |= CELL_PAD_CTRL_R2;
-+            lt = gl2 ? lt : 0;
-+            rt = gr2 ? 32767 : 0;
-+        }
++        btns = pad_map(in, val, swap, shoulders, g_racacit_ctx_quickselect, g_racacit_ctx_hoverboots, &lt, &rt);
  
          s_host_state[i].buttons = btns;
  
-@@ -707,11 +1232,342 @@ static void pad_poll_sdl2(void)
+@@ -707,11 +1364,342 @@ static void pad_poll_sdl2(void)
          s_host_state[i].press_square   = (btns & CELL_PAD_CTRL_SQUARE)   ? 255 : 0;
          s_host_state[i].press_l1       = (btns & CELL_PAD_CTRL_L1)       ? 255 : 0;
          s_host_state[i].press_r1       = (btns & CELL_PAD_CTRL_R1)       ? 255 : 0;
@@ -3418,7 +3583,7 @@ index 5f8a2fa2..627e907e 100644
 +            hs->analog_lx = (u8)(128.0f + 127.0f * m * x / len);
 +            hs->analog_ly = (u8)(128.0f + 127.0f * m * y / len);
 +        }
-     }
++    }
 +    /* Quick select pointer: ~150 px of mouse travel (at the default speed)
 +     * reaches the ring's edge; past a third of that the left stick points at it. */
 +    if (qs_open && !held[KB_LS_UP] && !held[KB_LS_DOWN] && !held[KB_LS_LEFT] && !held[KB_LS_RIGHT]) {
@@ -3453,9 +3618,9 @@ index 5f8a2fa2..627e907e 100644
 +            hs->analog_rx = (u8)racit_stick_byte(kx, push[0]);
 +            hs->analog_ry = (u8)racit_stick_byte(ky, push[1]);
 +        }
-+    }
-+}
-+
+     }
+ }
+ 
 +static void pad_poll_sdl_fallbacks(void)
 +{
 +    /* On-screen touch controls drive port 0 while no gamepad is attached. */
@@ -3501,8 +3666,8 @@ index 5f8a2fa2..627e907e 100644
 +    const int k = SDL_GameControllerAddMappingsFromFile("gamecontrollerdb.txt");
 +    if (k > 0) fprintf(stderr, "[cellPad] %d controller mappings from gamecontrollerdb.txt%c", k, 10);
 +    (void)n;
- }
- 
++}
++
  static void pad_init_backend(void)
  {
 +    /* Face buttons by position on every controller: the bottom one is Cross,
@@ -3530,7 +3695,7 @@ index 5f8a2fa2..627e907e 100644
      if (!s_sdl_inited) {
          if (SDL_WasInit(SDL_INIT_GAMECONTROLLER) == 0) {
              /* The game is not always the focused app: on macOS its window
-@@ -729,12 +1585,12 @@ static void pad_init_backend(void)
+@@ -729,12 +1717,12 @@ static void pad_init_backend(void)
              SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER);
          }
          s_sdl_inited = 1;
@@ -3546,7 +3711,7 @@ index 5f8a2fa2..627e907e 100644
  }
  
  static void pad_shutdown_backend(void)
-@@ -776,6 +1632,62 @@ static unsigned long long pad_now_ms(void)
+@@ -776,6 +1764,62 @@ static unsigned long long pad_now_ms(void)
  #endif
  }
  
@@ -3609,7 +3774,7 @@ index 5f8a2fa2..627e907e 100644
  static void pad_poll_backend(void)
  {
      static unsigned long long s_last_ms = 0;
-@@ -793,7 +1705,33 @@ static void pad_poll_backend(void)
+@@ -793,7 +1837,33 @@ static void pad_poll_backend(void)
  #elif PAD_BACKEND_SDL2
      pad_poll_sdl2();
  #endif
@@ -3643,7 +3808,7 @@ index 5f8a2fa2..627e907e 100644
      pad_track_assign();
      pad_unlock();
  }
-@@ -867,6 +1805,103 @@ void cellPad_poll(void)
+@@ -867,6 +1937,103 @@ void cellPad_poll(void)
   * were fixed.) These used to be redeclared here with a 64-bit address
   * parameter, which conflicts with the header now that it is included. */
  
@@ -3747,7 +3912,7 @@ index 5f8a2fa2..627e907e 100644
  s32 cellPadGetData(u32 port_no, CellPadData* data_guest)
  {
      { static int _once = 0;
-@@ -883,6 +1918,7 @@ s32 cellPadGetData(u32 port_no, CellPadData* data_guest)
+@@ -883,6 +2050,7 @@ s32 cellPadGetData(u32 port_no, CellPadData* data_guest)
  
      /* Poll fresh state */
      pad_poll_backend();
@@ -3755,7 +3920,7 @@ index 5f8a2fa2..627e907e 100644
  
      /* YDKJ_INJECT_PAD: the game's wait loop polls the pad (cellPadSetActDirect /
       * GetData) -- if it's parked on a "press button" prompt after loading, no
-@@ -977,7 +2013,7 @@ skip_inject: ;
+@@ -977,7 +2145,7 @@ skip_inject: ;
       * human at the pad. Env-gated test scaffolding, off by default. */
      { static int s_ap = -1; static unsigned s_apn = 0;
        if (s_ap < 0) s_ap = getenv("PAD_AUTOPRESS") ? 1 : 0;
@@ -3764,7 +3929,7 @@ index 5f8a2fa2..627e907e 100644
            unsigned ph = s_apn++ % 240;
            if (ph < 12)
                data->button[CELL_PAD_BTN_OFFSET_DIGITAL2] |= 0x40;   /* CROSS */
-@@ -1013,7 +2049,7 @@ skip_inject: ;
+@@ -1013,7 +2181,7 @@ skip_inject: ;
                       *p ? " -- TRUNCATED at 256, the rest are ignored" : "");
            }
        }
@@ -3773,7 +3938,7 @@ index 5f8a2fa2..627e907e 100644
            double now = pad_clock(t0);
            /* Latch, do not window. A fixed time window is missed whenever the
             * title stops polling the pad for longer than the window (it does
-@@ -1050,21 +2086,57 @@ skip_inject: ;
+@@ -1050,21 +2218,57 @@ skip_inject: ;
       */
      { static int s_pf = -1; static char pf_path[512];
        static unsigned held_mask = 0; static int held_n = 0;
@@ -3822,7 +3987,7 @@ index 5f8a2fa2..627e907e 100644
 +                      for (char* t = strtok(buf, ";"); t && q_n < 8; t = strtok(NULL, ";")) {
 +                          strncpy(q_steps[q_n], t, sizeof q_steps[0] - 1); q_steps[q_n][sizeof q_steps[0] - 1] = 0; q_n++; }
 +                      if (q_n) { strncpy(buf, q_steps[0], sizeof buf - 1); buf[sizeof buf - 1] = 0; q_i = 1; }
-+                  }
+                   }
 +              }
 +              if (have) {
 +                  {
@@ -3835,13 +4000,13 @@ index 5f8a2fa2..627e907e 100644
 +                          if (held_stick) { held_ax[0] = (unsigned char)lx; held_ax[1] = (unsigned char)ly;
 +                                            held_ax[2] = (unsigned char)rx; held_ax[3] = (unsigned char)ry; }
 +                          printf("[cellPad] PAD_FILE press 0x%04X%s\n", m, held_stick ? " +stick" : ""); fflush(stdout); }
-                   }
++                  }
 +              }
 +              if (f) {
                    fclose(f);
                    if (held_n > 0) { FILE* w = fopen(pf_path, "wb"); if (w) fclose(w); }
                }
-@@ -1072,9 +2144,30 @@ skip_inject: ;
+@@ -1072,9 +2276,30 @@ skip_inject: ;
            if (held_n > 0) {
                if (data->len > 0) held_n--;
                data->button[CELL_PAD_BTN_OFFSET_DIGITAL1] |= (u16)(held_mask & 0xFF);
@@ -3873,7 +4038,7 @@ index 5f8a2fa2..627e907e 100644
      /* Analog sticks */
      /* PAD_STICK="lx,ly,rx,ry" (0-255, 128 = centred): hold the analog sticks at
       * fixed positions. Rubber Ducky drives its camera from the sticks and never
-@@ -1093,7 +2186,7 @@ skip_inject: ;
+@@ -1093,7 +2318,7 @@ skip_inject: ;
                   sscanf(e, "%d,%d,%d,%d,%lf,%lf", &a,&b,&c,&d,&s_from,&s_until);
                   s_v[0]=(unsigned char)a; s_v[1]=(unsigned char)b;
                   s_v[2]=(unsigned char)c; s_v[3]=(unsigned char)d; } }
@@ -3882,7 +4047,7 @@ index 5f8a2fa2..627e907e 100644
                    hs->analog_rx = s_v[2]; hs->analog_ry = s_v[3];
                    hs->connected = 1; }
        /* PAD_SWEEP=<seconds per step>: walk the sticks through a fixed set of
-@@ -1104,7 +2197,7 @@ skip_inject: ;
+@@ -1104,7 +2329,7 @@ skip_inject: ;
        { static int sw = -1; static clock_t t0 = 0;
          if (sw < 0) { const char* e = getenv("PAD_SWEEP");
                        sw = e ? atoi(e) : 0; if (sw < 0) sw = 0; }
@@ -3891,7 +4056,7 @@ index 5f8a2fa2..627e907e 100644
              static const unsigned char steps[9][4] = {
                  {128,128,128,128},
                  {128,  0,128,128}, {128,255,128,128},
-@@ -1172,10 +2265,40 @@ skip_inject: ;
+@@ -1172,10 +2397,40 @@ skip_inject: ;
          data->button[CELL_PAD_BTN_OFFSET_SENSOR_Y] = 399; /* gravity */
          data->button[CELL_PAD_BTN_OFFSET_SENSOR_Z] = 512;
          data->button[CELL_PAD_BTN_OFFSET_SENSOR_G] = 512;
@@ -3932,7 +4097,7 @@ index 5f8a2fa2..627e907e 100644
      /* A non-zero len means "here is a CHANGE packet" -- the constant is literally
       * named CELL_PAD_LEN_CHANGE_DEFAULT. Hardware reports len = 0 once the port
       * has nothing new, and titles DRAIN on that: The Simpsons Arcade Game's
-@@ -1496,9 +2619,64 @@ s32 cellPadSetActDirect(u32 port_no, CellPadActParam* param)
+@@ -1496,9 +2751,64 @@ s32 cellPadSetActDirect(u32 port_no, CellPadActParam* param)
  #endif
  
  #if PAD_BACKEND_SDL2

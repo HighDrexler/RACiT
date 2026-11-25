@@ -75,6 +75,7 @@ static void mac_event(const SDL_Event& e)
         if (d) wndproc(g_hwnd, WM_MOUSEWHEEL, MAKEWPARAM(0, (short)d), 0);
         return; }
     case SDL_CONTROLLERDEVICEADDED: case SDL_CONTROLLERDEVICEREMOVED: case SDL_CONTROLLERBUTTONDOWN:
+    case SDL_CONTROLLERAXISMOTION:   // the triggers, while Controller buttons waits for an input
         pad_event(e);
         return;
     }
