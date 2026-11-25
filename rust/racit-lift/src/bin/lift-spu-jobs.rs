@@ -1,5 +1,5 @@
 //! Lift raw SPU job binaries embedded in the EBOOT as content-matched overlays. It replaced
-//! scripts/lift_spu_jobs.py and writes the same files; the modules are lifted in parallel
+//! scripts/lift_spu_jobs.py and writes the same files (checked on 1.00 and 1.20); the modules are lifted in parallel
 //! (each through tools/ps3recomp's wrap_spu_elf.py and spu_lifter.py, which stay Python).
 //!
 //!     lift-spu-jobs [EBOOT.ELF] [--only 0xB9B580,0xB8A980,...] [--root RACIT] [--jobs N]
@@ -377,8 +377,7 @@ fn main_jobs(
     for ((&(i, a, size), b), ok) in plan.iter().zip(&blocks).zip(ok) {
         let name = &b.name;
         if !ok {
-            println!("{name}: lifter FAILED (skipped), see out/spu_jobs/{name}.lift.log");
-            continue;
+            return Err(format!("{name}: lifter FAILED; registry unchanged. See out/spu_jobs/{name}.lift.log").into());
         }
         let img = IMAGE_ID_BASE + i;
         decls.push(format!("extern void {name}_spu_recomp_register(void);"));
@@ -448,8 +447,7 @@ fn main_extra(
         EXTRA_BLOCKS.iter().zip(&blocks).zip(ok).zip(eas)
     {
         if !ok {
-            println!("{name}: lifter FAILED, see out/spu_jobs/{name}.lift.log");
-            continue;
+            return Err(format!("{name}: lifter FAILED; registry unchanged. See out/spu_jobs/{name}.lift.log").into());
         }
         if b.name == "igpm_rt" {
             patch_igpm_clear(&c.spu_dir.join(name).join("spu_recomp.c"))?;
@@ -675,8 +673,7 @@ fn main_sub(
                     return Err("Changed update module image order differs".into());
                 }
                 if !ok[block] {
-                    println!("{name}: lifter FAILED (skipped), see out/spu_jobs/{name}.lift.log");
-                    continue;
+                    return Err(format!("{name}: lifter FAILED; registry unchanged. See out/spu_jobs/{name}.lift.log").into());
                 }
                 let base = b.base;
                 decls.push(format!("extern void {name}_spu_recomp_register(void);"));
