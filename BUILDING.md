@@ -155,6 +155,12 @@ release that runs on older macOS. The launcher's binary
 (`RaCACiT Launcher.app/Contents/MacOS/RaCACiT Launcher`) with `--snapshot <dir>`, and
 optionally `--root <folder>`, draws every screen to PNGs with no window.
 
+## Linux windowed Vulkan startup
+
+For a Linux build configured with Vulkan, launch with `PS3RECOMP_VK_WINDOW=1` to request a window. A failed windowed launch exits with the renderer error in the terminal. Share the `[RSX vulkan]` lines and the output of `vulkaninfo --summary` from the same session. Driver enumeration can succeed even when the game cannot open a window in the current session.
+
+If the GPU lacks a usable Vulkan driver, Mesa Lavapipe provides a CPU Vulkan device. To try it, install the matching Mesa Vulkan driver for your distribution and point `VK_DRIVER_FILES` at its Lavapipe manifest for that invocation. The game still needs a working Vulkan loader and a graphical session for a window. CPU rendering may be too slow for gameplay.
+
 ## Where things are
 
 | Path | What it is |

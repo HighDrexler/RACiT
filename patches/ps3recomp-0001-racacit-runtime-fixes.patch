@@ -21110,7 +21110,7 @@ index ecc53fc..e8d4ad6 100644
      const u8* ucode, u32 max_bytes, u32 vtex_mask, u32 input_mask,
      char* out, u32 out_size);
 diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
-index e2687b7..47b9cd6 100644
+index e2687b7..5f26607 100644
 --- a/libs/video/rsx_vulkan_backend.c
 +++ b/libs/video/rsx_vulkan_backend.c
 @@ -38,10 +38,13 @@
@@ -25045,15 +25045,16 @@ index e2687b7..47b9cd6 100644
      default:     return VK_BLEND_FACTOR_ONE;
      }
  }
-@@ -2484,168 +5203,1327 @@ static VkStencilOp vk_gcm_stencil_op(u32 op)
-     default:     return VK_STENCIL_OP_KEEP;               /* GL_KEEP 0x1E00 */
-     }
- }
--static VkStencilOpState vk_gcm_stencil_face(u32 func, u32 fail, u32 zfail, u32 zpass,
--                                            u32 cmp_mask, u32 write_mask)
-+static VkStencilOpState vk_gcm_stencil_face(u32 func, u32 fail, u32 zfail, u32 zpass,
-+                                            u32 cmp_mask, u32 write_mask)
-+{
+@@ -2487,165 +5206,1324 @@ static VkStencilOp vk_gcm_stencil_op(u32 op)
+ static VkStencilOpState vk_gcm_stencil_face(u32 func, u32 fail, u32 zfail, u32 zpass,
+                                             u32 cmp_mask, u32 write_mask)
+ {
+-    VkStencilOpState s = { .failOp = vk_gcm_stencil_op(fail), .passOp = vk_gcm_stencil_op(zpass),
+-                           .depthFailOp = vk_gcm_stencil_op(zfail),
+-                           .compareOp = vk_gcm_compare(func),
+-                           .compareMask = cmp_mask & 0xFFu, .writeMask = write_mask & 0xFFu,
+-                           .reference = 0 };                /* dynamic */
+-    return s;
 +    VkStencilOpState s = { .failOp = vk_gcm_stencil_op(fail), .passOp = vk_gcm_stencil_op(zpass),
 +                           .depthFailOp = vk_gcm_stencil_op(zfail),
 +                           .compareOp = vk_gcm_compare(func),
@@ -26110,28 +26111,17 @@ index e2687b7..47b9cd6 100644
 +    fclose(f);
 +}
 +static int SDLCALL vk_prep_progress_thread(void* arg)
- {
--    VkStencilOpState s = { .failOp = vk_gcm_stencil_op(fail), .passOp = vk_gcm_stencil_op(zpass),
--                           .depthFailOp = vk_gcm_stencil_op(zfail),
--                           .compareOp = vk_gcm_compare(func),
--                           .compareMask = cmp_mask & 0xFFu, .writeMask = write_mask & 0xFFu,
--                           .reference = 0 };                /* dynamic */
--    return s;
++{
 +    (void)arg;
 +    while (!SDL_AtomicGet(&s_prep_pstop)) { vk_prep_progress_write(); SDL_Delay(250); }
 +    return 0;
- }
- 
--static int vk_eng_translate(const char* hlsl, int stage, VkShaderModule* out)
++}
++
 +/* After rsx_vulkan_backend_init with RACACIT_PREPARE=1 (main.cpp). Writes
 + * <cache folder>/shaders.stamp. Returns 0 when no variant failed. */
 +static int vk_prepare_shaders_run(void);
 +int rsx_vulkan_prepare_shaders(void)
- {
--    u32 words = 0;
--    if (rsx_hlsl_to_spirv(hlsl, stage, s_g.spv, VK_SPV_WORDS, &words, s_g.log, sizeof s_g.log) || !words) {
--        VK_LOG("engine: %s translation failed: %s\n",
--               stage == RSX_SHADER_STAGE_VERTEX ? "vertex" : "fragment", s_g.log);
++{
 +    SDL_AtomicSet(&s_prep_pstop, 0);
 +    SDL_Thread* pth = SDL_CreateThread(vk_prep_progress_thread, "shader-prepare-progress", NULL);
 +    const int r = vk_prepare_shaders_run();
@@ -26139,10 +26129,15 @@ index e2687b7..47b9cd6 100644
 +    if (pth) SDL_WaitThread(pth, NULL);
 +    vk_prep_progress_write();                                /* the final state */
 +    return r;
-+}
-+
+ }
+ 
+-static int vk_eng_translate(const char* hlsl, int stage, VkShaderModule* out)
 +static int vk_prepare_shaders_run(void)
-+{
+ {
+-    u32 words = 0;
+-    if (rsx_hlsl_to_spirv(hlsl, stage, s_g.spv, VK_SPV_WORDS, &words, s_g.log, sizeof s_g.log) || !words) {
+-        VK_LOG("engine: %s translation failed: %s\n",
+-               stage == RSX_SHADER_STAGE_VERTEX ? "vertex" : "fragment", s_g.log);
 +    const unsigned long long t0 = ps3_qpc_us();
 +    SDL_AtomicSet(&s_prep.state, 1);
 +    s_prep.spv_path = getenv("RSX_SHADER_CACHE");
@@ -27558,7 +27553,22 @@ index e2687b7..47b9cd6 100644
      if (vk_create_image(&s_vk.depth, s_vk.depth_format, s_vk.width, s_vk.height,
                          VK_IMAGE_USAGE_TRANSFER_DST_BIT |
                          VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_IMAGE_ASPECT_DEPTH_BIT)) return -1;
-@@ -3097,13 +7674,14 @@ int rsx_vulkan_backend_init(u32 width, u32 height, const char* title)
+@@ -3088,6 +7665,14 @@ int rsx_vulkan_backend_init(u32 width, u32 height, const char* title)
+         rsx_vulkan_backend_shutdown();
+         return -1;
+     }
++#if defined(__linux__) && !defined(__ANDROID__)
++    if (vk_env_on("PS3RECOMP_VK_WINDOW") && (!s_vk.windowed || !s_vk.swapchain)) {
++        VK_LOG("a Vulkan window was requested, but no swapchain is available\n");
++        rsx_vulkan_backend_shutdown();
++        return -1;
++    }
++#endif
++
+     /* One path at a time: the FIFO walker feeds both the rsx_state vtable
+      * and the register-file engine, so registering both would record every
+      * draw twice (the rule the Metal backend's init follows).
+@@ -3097,13 +7682,14 @@ int rsx_vulkan_backend_init(u32 width, u32 height, const char* title)
       * pipeline from the guest's programs, so without them it has nothing to
       * draw with, and the vtable's fixed-function path stays the default.
       * Either way PS3RECOMP_RSX_ENGINE=dispatch|vtable overrides. */
@@ -27575,7 +27585,7 @@ index e2687b7..47b9cd6 100644
      VK_LOG("offscreen target %ux%u ready, depth format %d (%s)\n",
             s_vk.width, s_vk.height, (int)s_vk.depth_format, title ? title : "");
      return 0;
-@@ -3125,7 +7703,9 @@ void rsx_vulkan_backend_shutdown(void)
+@@ -3125,7 +7711,9 @@ void rsx_vulkan_backend_shutdown(void)
      }
      if (s_vk.windowed || s_vk.window) vk_window_drop(NULL);
      if (s_vk.device) {
@@ -27585,7 +27595,7 @@ index e2687b7..47b9cd6 100644
          vk_guest_shutdown();
          for (int i = 0; i < VK_PIPELINE_SLOTS; i++)
              if (s_vk.pipelines[i]) pvkDestroyPipeline(s_vk.device, s_vk.pipelines[i], NULL);
-@@ -3145,6 +7725,7 @@ void rsx_vulkan_backend_shutdown(void)
+@@ -3145,6 +7733,7 @@ void rsx_vulkan_backend_shutdown(void)
          vk_destroy_image(&s_vk.color);
          vk_destroy_buffer(&s_vk.vertices);
          vk_destroy_buffer(&s_vk.readback);
@@ -27593,7 +27603,7 @@ index e2687b7..47b9cd6 100644
          if (s_vk.fence) pvkDestroyFence(s_vk.device, s_vk.fence, NULL);
          if (s_vk.pool)  pvkDestroyCommandPool(s_vk.device, s_vk.pool, NULL);
          pvkDestroyDevice(s_vk.device, NULL);
-@@ -3160,9 +7741,10 @@ int rsx_vulkan_backend_pump_messages(void)
+@@ -3160,9 +7749,10 @@ int rsx_vulkan_backend_pump_messages(void)
      if (!s_vk.windowed) return 0;
      int quit = 0;
      SDL_Event e;
@@ -27605,7 +27615,7 @@ index e2687b7..47b9cd6 100644
      }
      return quit ? -1 : 0;
  }
-@@ -3186,4 +7768,4 @@ u32 rsx_vulkan_backend_guest_draws(void)
+@@ -3186,4 +7776,4 @@ u32 rsx_vulkan_backend_guest_draws(void)
      return s_vk.eng_active ? rsx_draw_engine_guest_draws() : s_g.last_draws;
  }
  
