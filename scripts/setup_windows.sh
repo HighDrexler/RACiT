@@ -27,8 +27,15 @@ tools/venv/Scripts/python.exe -m pip install -q --disable-pip-version-check \
 echo "== Sources"
 runtime_pin=de4f090328ea08bef6b2f15caec0b85e343a7ece
 pin ps3recomp      sp00nznet/ps3recomp         "$runtime_pin"
+# A checkout from an earlier pin (1.0.x used 5244db92) moves with --reset, which throws away its changes.
+if [ "$(git -C tools/ps3recomp rev-parse HEAD)" != "$runtime_pin" ] && [ "${1:-}" = --reset ]; then
+    echo "Moving tools/ps3recomp to $runtime_pin (--reset): its changes are thrown away."
+    git -C tools/ps3recomp -c core.autocrlf=false -c core.eol=lf fetch -q --depth 1 origin "$runtime_pin"
+    git -C tools/ps3recomp -c core.autocrlf=false -c core.eol=lf checkout -q -f --detach FETCH_HEAD
+fi
 if [ "$(git -C tools/ps3recomp rev-parse HEAD)" != "$runtime_pin" ]; then
-    echo "Runtime revision differs. Use the pinned runtime in a separate checkout." >&2
+    echo "tools/ps3recomp is at $(git -C tools/ps3recomp rev-parse --short HEAD), this tree needs $runtime_pin." >&2
+    echo "Run this setup again with --reset to move it (throws away changes there), or use a separate checkout." >&2
     exit 1
 fi
 pin Vulkan-Headers KhronosGroup/Vulkan-Headers c46850864f4661461b0f6cb9922c058ffea4915e
