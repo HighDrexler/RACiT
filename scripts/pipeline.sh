@@ -122,7 +122,7 @@ $PY "$ROOT/scripts/lift_libsre.py" "$LIBSRE"
 
 # Raw SPURS policy modules and igPm job binaries (content-matched overlays),
 # and the post-lift fixups (setjmp/longjmp, hoisted GCM read, Lua hooks).
-$PY "$ROOT/scripts/lift_policy_modules.py" "$ELF"
+"${LIFT_SPU_JOBS[@]}" "$ELF" --policy
 "${LIFT_SPU_JOBS[@]}" "$ELF"
 "${LIFT_SPU_JOBS[@]}" "$ELF" --extra
 # The job modules of scripts/spu_submodules.txt (game/spu/spu_sub.c). Without

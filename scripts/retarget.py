@@ -26,7 +26,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ADDRESS_FILES = ['game/stubs.cpp', 'game/main.cpp', 'game/hot_ppu.h', 'game/discord_rpc.cpp',
                  'game/mod_hookable.h', 'rust/racit-lift/src/bin/patch-lift.rs',
                  'scripts/name_pass.py', 'rust/racit-lift/src/bin/lift-spu-jobs.rs',
-                 'scripts/lift_policy_modules.py', 'scripts/find_submodules.py',
+                 'scripts/find_submodules.py',
                  'game/hot_spu_modules.cmake', 'scripts/spu_submodules.txt']
 # What the build needs from the repository; generated folders are left out.
 COPY_DIRS = ['game', 'scripts', 'windows', 'versions', 'rust']
@@ -124,7 +124,7 @@ class Retarget:
         short = r'(?<![0-9A-Za-z_])(0x)([0-9A-F]{5,6})(u?)\b'
         if name == 'scripts/name_pass.py':
             n = re.sub(short, self.literal, n)
-        elif name in ('rust/racit-lift/src/bin/lift-spu-jobs.rs', 'scripts/lift_policy_modules.py', 'scripts/find_submodules.py'):
+        elif name in ('rust/racit-lift/src/bin/lift-spu-jobs.rs', 'scripts/find_submodules.py'):
             low = self.v['ranges'][0][0]
             n = re.sub(short, lambda m: self.literal(m) if int(m.group(2), 16) >= low else m.group(0), n)
         elif name in ('game/stubs.cpp', 'game/main.cpp', 'game/discord_rpc.cpp', 'rust/racit-lift/src/bin/patch-lift.rs'):
