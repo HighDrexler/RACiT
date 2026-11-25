@@ -57,9 +57,10 @@
 /* VirtualQuery, CreateThread, Sleep: <windows.h> on Windows; off it the
  * runtime's shim gives the same names over /proc/self/maps and pthreads. */
 #include "win32_compat.h"
+#include "controller_icons.h"   /* the Xbox, Switch and PlayStation pictures (scripts/controller-icons) */
 
 extern "C" uint8_t* vm_base;
-extern "C" volatile int g_racacit_pad_family;     /* cellPad.c: port 0 is 0 PlayStation (or none), 1 Xbox-style, 2 Nintendo Switch */
+extern "C" volatile int g_racacit_pad_family;     /* cellPad.c: port 0 is 0 PlayStation (or none), 1 Xbox-style, 2 Nintendo Switch, 3 PlayStation remapped */
 extern "C" int racacit_pad_input_for(unsigned btn); /* cellPad.c: the controller input that presses the game's button `btn` now */
 extern "C" volatile int g_racacit_shoulder_swap; /* cellPad.c: port 0 has bumpers and triggers swapped (Settings > Controls) */
 extern "C" volatile int g_racacit_pad_layout;   /* cellPad.c racacit_pad_layout at the last poll: 0 PS3 layout, 1 PS pad swapped, 2 other pad swapped */
@@ -786,7 +787,7 @@ void prompt_check(bool keyboard)
         if (keyboard ? memcmp(tex, k.keys, kBadgeBytes) != 0 : !controller_art) { wrong++; note("badge", 0, k.ea); }
     }
     fprintf(stderr, "[prompt-check] %s: %d glyph tables (%d unscanned), %d glyphs, %d HUD pictures; %d showing the %s%s%c",
-            s_prompt_mode == 2 ? (s_prompt_family == 2 ? "Switch controller" : "Xbox controller") : keyboard ? "keyboard" : "controller", tables, unknown, glyphs, pictures, wrong,
+            s_prompt_mode == 2 ? (s_prompt_family == 3 ? "remapped PlayStation controller" : s_prompt_family == 2 ? "Switch controller" : "Xbox controller") : keyboard ? "keyboard" : "controller", tables, unknown, glyphs, pictures, wrong,
             s_prompt_mode == 2 ? "wrong pictures" : keyboard ? "controller's" : "keys", detail, 10);
 }
 
@@ -826,9 +827,9 @@ DWORD WINAPI prompts_thread(LPVOID)
         static int force = -2;   /* RACACIT_PROMPT_LAYOUT=<0|1|2>: a layout for tests */
         if (force == -2) { const char* e = getenv("RACACIT_PROMPT_LAYOUT"); force = e && *e ? atoi(e) : -1; }
         const bool kb = prompts_keyboard(!ms);
-        /* Xbox-style and Switch pads get the glyphs drawn with their own names (mode 2,
-         * desktop_prompts.h controller_label); a PlayStation pad keeps the game's pictures,
-         * with the shoulder swaps below. */
+        /* Xbox-style, Switch and remapped PlayStation pads get the glyphs drawn as their own
+         * pictures (mode 2, desktop_prompts.h controller_label); a PlayStation pad keeps the
+         * game's pictures, with the shoulder swaps below. */
         const int family = kb ? 0 : g_racacit_pad_family;
         s_prompt_mode = kb ? 1 : family ? 2 : 0; s_prompt_family = family;
         const bool keyboard = s_prompt_mode != 0;   /* drawn: the pictures replaced, as for keys */
