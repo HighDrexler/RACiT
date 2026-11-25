@@ -21,20 +21,41 @@ mkdir -p "$OBJ"
 . "$HERE/macos_dylibs.sh"
 
 FLAGS=(-arch arm64 -mmacosx-version-min=$MACOS_MIN -O2 -Wall -I"$LIBS/include" -DNDEBUG -I"$LAUNCHER/src" -I"$HERE/launcher")
+jobs="${CMAKE_BUILD_PARALLEL_LEVEL:-2}"
+if [[ "$jobs" == *[!0-9]* ]] || (( 10#$jobs < 1 )); then
+    echo "CMAKE_BUILD_PARALLEL_LEVEL must be a positive integer" >&2
+    exit 2
+fi
+compile_pids=()
+objects=()
+
+wait_for_compilers() {
+    local pid failed=0
+    # A compiler may have already exited by the time we wait for its batch.
+    for pid in "${compile_pids[@]}"; do
+        wait "$pid" || failed=1
+    done
+    compile_pids=()
+    return "$failed"
+}
+
 cd "$LAUNCHER/src"
-for f in app.cpp iso.cpp store.cpp util.cpp; do
-    clang++ -std=c++17 "${FLAGS[@]}" -c "$f" -o "$OBJ/${f%.*}.o" &
+for f in app.cpp iso.cpp store.cpp util.cpp "$HERE/launcher/"{gfx_mac,util_mac}.mm; do
+    name="${f##*/}"
+    object="$OBJ/${name%.*}.o"
+    flags=("${FLAGS[@]}")
+    if [[ "$f" == *.mm ]]; then flags+=(-fobjc-arc); fi
+    clang++ -std=c++17 "${flags[@]}" -c "$f" -o "$object" &
+    compile_pids+=("$!")
+    objects+=("$object")
+    if (( ${#compile_pids[@]} >= 10#$jobs )); then wait_for_compilers; fi
 done
-for f in gfx_mac.mm util_mac.mm; do
-    clang++ -std=c++17 -fobjc-arc "${FLAGS[@]}" -c "$HERE/launcher/$f" -o "$OBJ/${f%.*}.o" &
-done
-wait_all() { local ok=0; for j in $(jobs -p); do wait "$j" || ok=1; done; return $ok; }
-wait_all
+wait_for_compilers
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks"
 BIN="$APP/Contents/MacOS/RaCACiT Launcher"
-clang++ -arch arm64 -mmacosx-version-min=$MACOS_MIN "$OBJ"/*.o -o "$BIN" \
+clang++ -arch arm64 -mmacosx-version-min=$MACOS_MIN "${objects[@]}" -o "$BIN" \
     -L"$LIBS/lib" -lSDL2 -lcurl \
     -framework AppKit -framework CoreText -framework CoreGraphics -framework ImageIO -framework CoreFoundation \
     -Wl,-dead_strip
