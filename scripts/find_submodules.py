@@ -3,14 +3,14 @@
 
 igPm loads a job at LS 0x100, and a job may load further job modules above
 itself at a base of its own choosing (39 of them live in the EBOOT's data
-segment, 0xDB4180..0xDDD380, outside lift_spu_jobs.py's main scan). Those ran
+segment, 0xDB4180..0xDDD380, outside lift-spu-jobs' main scan). Those ran
 in the SPU interpreter: one second per frame in the Great Clock.
 
 Reads the local-store snapshots the runtime writes with SPU_DUMP_JOBS=<dir>
 (one per parent job the first time it reaches unlifted code), finds every job
 module from the EBOOT at an address other than 0x100, and merges the
 (module EA, LS base, parent GUID) rows into scripts/spu_submodules.txt, which
-`lift_spu_jobs.py --sub` lifts as content-matched overlays at those bases.
+`lift-spu-jobs --sub` (rust/racit-lift) lifts as content-matched overlays at those bases.
 Run the game again afterwards: a parent that loads several modules only dumps
 at its first miss, so repeat until SPU_INTERP_REPORT=1 is quiet.
 
@@ -111,7 +111,7 @@ def main():
         f.write("# Job modules a parent job loads above itself:\n"
                 "#   <module EBOOT EA> <LS base> <parent job GUID (LS 0x100)>   (hex)\n"
                 "# Generated and merged by scripts/find_submodules.py from SPU_DUMP_JOBS snapshots;\n"
-                "# lifted by scripts/lift_spu_jobs.py --sub as content-matched overlays at these bases.\n")
+                "# lifted by lift-spu-jobs --sub as content-matched overlays at these bases.\n")
         for ea, base, parent in sorted(rows):
             f.write("%06X %05X %s\n" % (ea, base, parent))
     print("%d row(s) in %s (%d new)" % (len(rows), os.path.relpath(TABLE, ROOT), len(rows) - before))

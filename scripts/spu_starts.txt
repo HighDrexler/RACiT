@@ -1,5 +1,5 @@
 # Addresses the SPU interpreter was entered at: <job GUID at LS 0x100> <LS addr>.
-# From SPU_INTERP_STARTS=<file>, merged by scripts/lift_spu_jobs.py --merge-starts <file>.
+# From SPU_INTERP_STARTS=<file>, merged by lift-spu-jobs --merge-starts <file>.
 00000000000000000000000000000000 00A68
 00000000000000000000000000000000 04608
 00000000000000000000000000000000 05318

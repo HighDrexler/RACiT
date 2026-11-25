@@ -73,7 +73,10 @@ fn parse_args() -> Result<Options, String> {
     let (mut recomp, mut profile, mut root) = (None, None, None);
     let (mut elf, mut stamp, mut patch) = (String::new(), String::new(), false);
     while let Some(a) = args.next() {
-        let mut value = |name: &str| args.next().ok_or_else(|| format!("check-lift-hooks: {name} needs a value"));
+        let mut value = |name: &str| {
+            args.next()
+                .ok_or_else(|| format!("check-lift-hooks: {name} needs a value"))
+        };
         match a.as_str() {
             "--profile" => profile = Some(value("--profile")?),
             "--elf" => elf = value("--elf")?,
@@ -81,7 +84,9 @@ fn parse_args() -> Result<Options, String> {
             "--root" => root = Some(PathBuf::from(value("--root")?)),
             "--patch" => patch = true,
             "-h" | "--help" => return Err(usage()),
-            _ if a.starts_with("--") => return Err(format!("check-lift-hooks: unknown option {a}\n{}", usage())),
+            _ if a.starts_with("--") => {
+                return Err(format!("check-lift-hooks: unknown option {a}\n{}", usage()));
+            }
             _ if recomp.is_none() => recomp = Some(PathBuf::from(a)),
             _ => return Err(usage()),
         }
@@ -103,9 +108,15 @@ struct HookList {
 }
 
 fn expected_hooks(root: &Path, profile: &str) -> Result<HookList, String> {
-    let path = root.join("versions").join(format!("{profile}-hook-symbols.txt"));
-    let text = fs::read_to_string(&path)
-        .map_err(|_| format!("check_lift_hooks: no expected-hook list for {profile} ({})", path.display()))?;
+    let path = root
+        .join("versions")
+        .join(format!("{profile}-hook-symbols.txt"));
+    let text = fs::read_to_string(&path).map_err(|_| {
+        format!(
+            "check_lift_hooks: no expected-hook list for {profile} ({})",
+            path.display()
+        )
+    })?;
     let (mut hooks, mut functions) = (Vec::new(), Vec::new());
     for line in text.lines() {
         let line = line.split('#').next().unwrap_or("").trim();
@@ -114,27 +125,39 @@ fn expected_hooks(root: &Path, profile: &str) -> Result<HookList, String> {
         } else if !line.is_empty() {
             let mut parts = line.split_whitespace();
             let (Some(name), Some(count), None) = (parts.next(), parts.next(), parts.next()) else {
-                return Err(format!("check_lift_hooks: bad line in {}: {line}", path.display()));
+                return Err(format!(
+                    "check_lift_hooks: bad line in {}: {line}",
+                    path.display()
+                ));
             };
-            let count = count.parse().map_err(|_| format!("check_lift_hooks: bad count in {}: {line}", path.display()))?;
+            let count = count.parse().map_err(|_| {
+                format!("check_lift_hooks: bad count in {}: {line}", path.display())
+            })?;
             match hooks.iter_mut().find(|(n, _)| n == name) {
                 Some(entry) => entry.1 = count,
                 None => hooks.push((name.to_string(), count)),
             }
         }
     }
-    Ok(HookList { path, hooks, functions })
+    Ok(HookList {
+        path,
+        hooks,
+        functions,
+    })
 }
 
 fn check_identity(sources: &[PathBuf], profile: &str, functions: &[String]) -> Result<(), String> {
     // Patching another version's lift with this profile's hooks would corrupt it.
-    let mut wanted: HashSet<Vec<u8>> =
-        functions.iter().map(|f| format!("void func_{f}(ppu_context* ctx) {{").into_bytes()).collect();
+    let mut wanted: HashSet<Vec<u8>> = functions
+        .iter()
+        .map(|f| format!("void func_{f}(ppu_context* ctx) {{").into_bytes())
+        .collect();
     for path in sources {
         if wanted.is_empty() {
             return Ok(());
         }
-        let data = fs::read(path).map_err(|e| format!("check_lift_hooks: {}: {e}", path.display()))?;
+        let data =
+            fs::read(path).map_err(|e| format!("check_lift_hooks: {}: {e}", path.display()))?;
         for line in data.split(|&b| b == b'\n') {
             if line.starts_with(b"void func_") {
                 wanted.remove(line);
@@ -171,10 +194,17 @@ fn code_only(text: &[u8]) -> Vec<u8> {
         let c = text[i];
         if c == b'/' && i + 1 < n && text[i + 1] == b'*' {
             let j = find(&text[i + 2..], b"*/").map_or(n, |k| i + 2 + k + 2);
-            out.extend(text[i..j].iter().map(|&b| if b == b'\n' { b'\n' } else { b' ' }));
+            out.extend(
+                text[i..j]
+                    .iter()
+                    .map(|&b| if b == b'\n' { b'\n' } else { b' ' }),
+            );
             i = j;
         } else if c == b'/' && i + 1 < n && text[i + 1] == b'/' {
-            let j = text[i..].iter().position(|&b| b == b'\n').map_or(n, |k| i + k);
+            let j = text[i..]
+                .iter()
+                .position(|&b| b == b'\n')
+                .map_or(n, |k| i + k);
             out.resize(out.len() + (j - i), b' ');
             i = j;
         } else if c == b'"' || c == b'\'' {
@@ -210,7 +240,10 @@ fn is_word(b: u8) -> bool {
 
 fn trim(s: &[u8]) -> &[u8] {
     let start = s.iter().position(|&b| !is_space(b)).unwrap_or(s.len());
-    let end = s.iter().rposition(|&b| !is_space(b)).map_or(start, |e| e + 1);
+    let end = s
+        .iter()
+        .rposition(|&b| !is_space(b))
+        .map_or(start, |e| e + 1);
     &s[start..end]
 }
 
@@ -221,7 +254,9 @@ fn is_lifted_function(line: &[u8]) -> bool {
     line.len() == HEAD.len() + 8 + TAIL.len()
         && line.starts_with(HEAD)
         && line.ends_with(TAIL)
-        && line[HEAD.len()..HEAD.len() + 8].iter().all(|b| b.is_ascii_digit() || (b'A'..=b'F').contains(b))
+        && line[HEAD.len()..HEAD.len() + 8]
+            .iter()
+            .all(|b| b.is_ascii_digit() || (b'A'..=b'F').contains(b))
 }
 
 /// Calls each line inside a lifted function body (its "{" line to the "}" that closes it at
@@ -259,7 +294,7 @@ fn for_each_body_line(code: &[u8], mut f: impl FnMut(&[u8])) {
                 }
                 _ => {}
             }
-            live = stack.last().map_or(true, |t| t[0]);
+            live = stack.last().is_none_or(|t| t[0]);
             continue;
         }
         if !live {
@@ -288,8 +323,13 @@ fn prior_word(before: &[u8]) -> Option<&[u8]> {
     if !(last.is_ascii_alphanumeric() || last == b'_') {
         return None;
     }
-    let start = before[..end].iter().rposition(|&b| !(b.is_ascii_alphanumeric() || b == b'_')).map_or(0, |s| s + 1);
-    let first = before[start..end].iter().position(|&b| b.is_ascii_alphabetic() || b == b'_')?;
+    let start = before[..end]
+        .iter()
+        .rposition(|&b| !(b.is_ascii_alphanumeric() || b == b'_'))
+        .map_or(0, |s| s + 1);
+    let first = before[start..end]
+        .iter()
+        .position(|&b| b.is_ascii_alphabetic() || b == b'_')?;
     Some(&before[start + first..end])
 }
 
@@ -307,7 +347,9 @@ fn count_calls(data: &[u8], hooks: &HashMap<&[u8], usize>, counts: &mut [u64]) {
             while i < line.len() && is_word(line[i]) {
                 i += 1;
             }
-            let Some(&slot) = hooks.get(&line[start..i]) else { continue };
+            let Some(&slot) = hooks.get(&line[start..i]) else {
+                continue;
+            };
             let mut k = i;
             while k < line.len() && is_space(line[k]) {
                 k += 1;
@@ -315,10 +357,10 @@ fn count_calls(data: &[u8], hooks: &HashMap<&[u8], usize>, counts: &mut [u64]) {
             if k >= line.len() || line[k] != b'(' {
                 continue;
             }
-            if let Some(word) = prior_word(&line[..start]) {
-                if !CALL_KEYWORDS.contains(&word) {
-                    continue; // "int name(" / "void* name(": a declaration or a definition
-                }
+            if let Some(word) = prior_word(&line[..start])
+                && !CALL_KEYWORDS.contains(&word)
+            {
+                continue; // "int name(" / "void* name(": a declaration or a definition
             }
             counts[slot] += 1;
         }
@@ -326,9 +368,15 @@ fn count_calls(data: &[u8], hooks: &HashMap<&[u8], usize>, counts: &mut [u64]) {
 }
 
 fn count_all(sources: &[PathBuf], names: &[(String, u64)]) -> Result<Vec<u64>, String> {
-    let hooks: HashMap<&[u8], usize> = names.iter().enumerate().map(|(i, (n, _))| (n.as_bytes(), i)).collect();
+    let hooks: HashMap<&[u8], usize> = names
+        .iter()
+        .enumerate()
+        .map(|(i, (n, _))| (n.as_bytes(), i))
+        .collect();
     let next = AtomicUsize::new(0);
-    let workers = thread::available_parallelism().map_or(4, |n| n.get()).min(sources.len().max(1));
+    let workers = thread::available_parallelism()
+        .map_or(4, |n| n.get())
+        .min(sources.len().max(1));
     thread::scope(|s| {
         let handles: Vec<_> = (0..workers)
             .map(|_| {
@@ -336,8 +384,11 @@ fn count_all(sources: &[PathBuf], names: &[(String, u64)]) -> Result<Vec<u64>, S
                     let mut counts = vec![0u64; names.len()];
                     loop {
                         let i = next.fetch_add(1, Ordering::Relaxed);
-                        let Some(path) = sources.get(i) else { return Ok(counts) };
-                        let data = fs::read(path).map_err(|e| format!("check_lift_hooks: {}: {e}", path.display()))?;
+                        let Some(path) = sources.get(i) else {
+                            return Ok(counts);
+                        };
+                        let data = fs::read(path)
+                            .map_err(|e| format!("check_lift_hooks: {}: {e}", path.display()))?;
                         count_calls(&data, &hooks, &mut counts);
                     }
                 })
@@ -376,23 +427,31 @@ fn lifted_sources(recomp: &Path) -> Vec<PathBuf> {
 fn run(o: &Options) -> Result<(), String> {
     let sources = lifted_sources(&o.recomp);
     if sources.is_empty() {
-        return Err(format!("check_lift_hooks: no lifted sources in {}", o.recomp.display()));
+        return Err(format!(
+            "check_lift_hooks: no lifted sources in {}",
+            o.recomp.display()
+        ));
     }
     let list = expected_hooks(&o.root, &o.profile)?;
 
     let mut inputs: Vec<PathBuf> = PATCHER_INPUTS.iter().map(|p| o.root.join(p)).collect();
     inputs.push(list.path.clone());
-    inputs.push(o.root.join("versions").join(format!("{}-hooks.json", o.profile)));
+    inputs.push(
+        o.root
+            .join("versions")
+            .join(format!("{}-hooks.json", o.profile)),
+    );
     // A regenerated lift (sources newer than the stamp) is patched again too.
     let newest = inputs.iter().chain(&sources).filter_map(|p| mtime(p)).max();
     // Every run, patching or not: another version's lift must not pass as this one.
     check_identity(&sources, &o.profile, &list.functions)?;
     let stale = o.patch
-        && (o.stamp.is_empty() || match (mtime(Path::new(&o.stamp)), newest) {
-            (None, _) => true,
-            (Some(s), Some(n)) => s < n,
-            (Some(_), None) => false,
-        });
+        && (o.stamp.is_empty()
+            || match (mtime(Path::new(&o.stamp)), newest) {
+                (None, _) => true,
+                (Some(s), Some(n)) => s < n,
+                (Some(_), None) => false,
+            });
     if stale {
         // patch-lift is built beside this tool.
         let patcher = env::current_exe()
@@ -409,8 +468,13 @@ fn run(o: &Options) -> Result<(), String> {
                 o.profile
             ));
         }
-        println!("check_lift_hooks: re-running patch-lift on {}", o.recomp.display());
-        let status = cmd.status().map_err(|e| format!("check_lift_hooks: {}: {e}", patcher.display()))?;
+        println!(
+            "check_lift_hooks: re-running patch-lift on {}",
+            o.recomp.display()
+        );
+        let status = cmd
+            .status()
+            .map_err(|e| format!("check_lift_hooks: {}: {e}", patcher.display()))?;
         if !status.success() {
             return Err(format!("check_lift_hooks: patch-lift failed ({status})"));
         }
@@ -470,7 +534,15 @@ mod tests {
 
     #[test]
     fn calls_in_bodies_only() {
-        assert_eq!(count(&format!("racit_x(1);\n{F}  racit_x(ctx);\n  return racit_x (ctx);\n}}\nracit_x();\n"), "racit_x"), 2);
+        assert_eq!(
+            count(
+                &format!(
+                    "racit_x(1);\n{F}  racit_x(ctx);\n  return racit_x (ctx);\n}}\nracit_x();\n"
+                ),
+                "racit_x"
+            ),
+            2
+        );
     }
 
     #[test]
@@ -481,7 +553,8 @@ mod tests {
 
     #[test]
     fn if_zero_is_skipped() {
-        let body = "#if 0\n  racit_x(ctx);\n#elif 1\n  racit_x(ctx);\n#else\n  racit_x(ctx);\n#endif\n";
+        let body =
+            "#if 0\n  racit_x(ctx);\n#elif 1\n  racit_x(ctx);\n#else\n  racit_x(ctx);\n#endif\n";
         assert_eq!(count(&format!("{F}{body}}}\n"), "racit_x"), 1);
     }
 

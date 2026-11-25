@@ -22,25 +22,34 @@ use regex::bytes::{Captures, Regex};
 use std::path::Path;
 use std::sync::LazyLock;
 
-static DEST: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\bd\s*=\s*\(\s*(?:const\s+)?[a-z0-9_]+\s*\*\s*\)\s*&ctx->vr\[(\d+)\]").unwrap());
+static DEST: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\bd\s*=\s*\(\s*(?:const\s+)?[a-z0-9_]+\s*\*\s*\)\s*&ctx->vr\[(\d+)\]").unwrap()
+});
 
 fn src_re(n: &str) -> Regex {
-    Regex::new(&format!(r"\b([abc])\s*=\s*\(\s*(?:const\s+)?([a-z0-9_]+)\s*\*\s*\)\s*&ctx->vr\[{n}\]")).unwrap()
+    Regex::new(&format!(
+        r"\b([abc])\s*=\s*\(\s*(?:const\s+)?([a-z0-9_]+)\s*\*\s*\)\s*&ctx->vr\[{n}\]"
+    ))
+    .unwrap()
 }
 
 fn fix_line(line: &[u8]) -> (Vec<u8>, usize) {
     if crate::contains(line, b"_vsnap") || !crate::contains(line, b"&ctx->vr[") {
         return (line.to_vec(), 0);
     }
-    let Some(m) = DEST.captures(line) else { return (line.to_vec(), 0) };
+    let Some(m) = DEST.captures(line) else {
+        return (line.to_vec(), 0);
+    };
     let n = String::from_utf8_lossy(&m[1]).into_owned();
     let src = src_re(&n);
     if !src.is_match(line) {
         return (line.to_vec(), 0);
     }
     // The statement is the innermost { ... } that holds the destination pointer.
-    let Some(start) = line[..m.get(0).unwrap().start()].iter().rposition(|&b| b == b'{') else {
+    let Some(start) = line[..m.get(0).unwrap().start()]
+        .iter()
+        .rposition(|&b| b == b'{')
+    else {
         return (line.to_vec(), 0);
     };
     let body = &line[start + 1..];
@@ -48,7 +57,9 @@ fn fix_line(line: &[u8]) -> (Vec<u8>, usize) {
         [&c[1], b"=(", &c[2], b"*)&_vsnap"].concat()
     });
     let mut out = line[..start + 1].to_vec();
-    out.extend_from_slice(format!(" alignas(16) uint8_t _vsnap[16]; memcpy(_vsnap, &ctx->vr[{n}], 16);").as_bytes());
+    out.extend_from_slice(
+        format!(" alignas(16) uint8_t _vsnap[16]; memcpy(_vsnap, &ctx->vr[{n}], 16);").as_bytes(),
+    );
     out.extend_from_slice(&new_body);
     (out, 1)
 }
@@ -181,7 +192,11 @@ pub fn run(recomp: &Path, check: bool) -> Result<()> {
         if !pre {
             continue;
         }
-        let nl: &[u8] = if crate::contains(&text, b"\r\n") { b"\r\n" } else { b"\n" };
+        let nl: &[u8] = if crate::contains(&text, b"\r\n") {
+            b"\r\n"
+        } else {
+            b"\n"
+        };
         let mut lines: Vec<Vec<u8>> = split(&text, nl);
         let mut count = 0;
         for line in lines.iter_mut() {
@@ -203,7 +218,10 @@ pub fn run(recomp: &Path, check: bool) -> Result<()> {
             }
         }
     }
-    println!("{total} statement(s) {}rewritten", if check { "would be " } else { "" });
+    println!(
+        "{total} statement(s) {}rewritten",
+        if check { "would be " } else { "" }
+    );
     Ok(())
 }
 

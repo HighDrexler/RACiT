@@ -3,6 +3,7 @@
 //! the game profiles (versions/profiles.json).
 
 pub mod profile;
+pub mod spu;
 pub mod update120;
 pub mod vmx;
 
@@ -52,7 +53,9 @@ pub fn write(path: &Path, data: &[u8]) -> Result<()> {
 
 /// The file name, for messages.
 pub fn base(path: &Path) -> String {
-    path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 // ---- byte strings, as Python's str methods ----------------------------------------------
@@ -146,6 +149,48 @@ pub fn splitlines_keepends(s: &[u8]) -> Vec<&[u8]> {
     out
 }
 
+/// f over items on up to `workers` threads (0: one per core), results in item order.
+pub fn parallel_map<T: Sync, R: Send>(
+    items: &[T],
+    workers: usize,
+    f: impl Fn(&T) -> R + Sync,
+) -> Vec<R> {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let next = AtomicUsize::new(0);
+    let out: Mutex<Vec<Option<R>>> = Mutex::new((0..items.len()).map(|_| None).collect());
+    let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let workers = if workers == 0 { cores } else { workers }.min(items.len().max(1));
+    std::thread::scope(|s| {
+        for _ in 0..workers {
+            s.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(item) = items.get(i) else { break };
+                    let r = f(item);
+                    out.lock().unwrap()[i] = Some(r);
+                }
+            });
+        }
+    });
+    out.into_inner()
+        .unwrap()
+        .into_iter()
+        .map(|r| r.unwrap())
+        .collect()
+}
+
+/// Write `contents` unless the file holds them already (through a .tmp beside it, as the
+/// Python scripts' write_registry did).
+pub fn write_if_changed(path: &Path, contents: &[u8]) -> Result<()> {
+    if fs::read(path).is_ok_and(|old| old == contents) {
+        return Ok(());
+    }
+    let tmp = path.with_extension("tmp");
+    write(&tmp, contents)?;
+    fs::rename(&tmp, path).map_err(|e| format!("{}: {e}", path.display()))
+}
+
 pub fn sha256_hex(data: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let d = Sha256::digest(data);
@@ -161,8 +206,14 @@ mod tests {
         assert_eq!(count(b"aaaa", b"aa"), 2);
         assert_eq!(replace_first(b"abab", b"b", b"X"), b"aXab");
         assert_eq!(replace_all(b"abab", b"b", b""), b"aa");
-        assert_eq!(splitlines_keepends(b"a\nb\r\nc\rd"), vec![&b"a\n"[..], b"b\r\n", b"c\r", b"d"]);
+        assert_eq!(
+            splitlines_keepends(b"a\nb\r\nc\rd"),
+            vec![&b"a\n"[..], b"b\r\n", b"c\r", b"d"]
+        );
         assert_eq!(splitlines_keepends(b"a\n"), vec![&b"a\n"[..]]);
-        assert_eq!(insert_after_include(b"x\n#include \"a\"\ny\n", b"Z\n").unwrap(), b"x\n#include \"a\"\nZ\ny\n");
+        assert_eq!(
+            insert_after_include(b"x\n#include \"a\"\ny\n", b"Z\n").unwrap(),
+            b"x\n#include \"a\"\nZ\ny\n"
+        );
     }
 }

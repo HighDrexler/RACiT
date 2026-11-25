@@ -16,6 +16,10 @@ path = "src/bin/check-lift-hooks.rs"
 name = "patch-lift"
 path = "src/bin/patch-lift.rs"
 
+[[bin]]
+name = "lift-spu-jobs"
+path = "src/bin/lift-spu-jobs.rs"
+
 [profile.release]
 opt-level = 3
 codegen-units = 1
