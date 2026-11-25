@@ -59,6 +59,7 @@ extern "C" void ppu_threads_dump_stacks(ppu_context* main_ctx);
 /* SDLActivity loads libmain.so and calls SDL_main: SDL.h renames main(). */
 #include <SDL.h>
 #include <android/log.h>
+#include <fcntl.h>
 #ifdef __ANDROID__
 extern "C" { extern volatile long g_racacit_walker_tid; }   /* the FIFO walker thread, for racacit_lend_top_begin */
 #endif
@@ -584,6 +585,10 @@ static void racacit_memlog(unsigned long long now_us)
 #endif
 
 extern "C" int cellGcm_fifo_pending(void);
+#ifdef __ANDROID__
+static void android_drain_startup_log();
+#endif
+
 static DWORD WINAPI frame_clock(LPVOID)
 {
     const char* title = getenv("PS3_TITLE");
@@ -611,10 +616,11 @@ static DWORD WINAPI frame_clock(LPVOID)
             rsx_ok ? "OK -- window open" : "FAILED");
 #ifdef __ANDROID__
     if (!rsx_ok) {
+        android_drain_startup_log();
         SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "RACiT graphics unavailable",
             "The Vulkan renderer could not start on this device.\n\n"
-            "Its GPU or driver may lack a required feature, or graphics memory may be unavailable. "
-            "The game will close. Enable Logging in the launcher and share log.txt for the specific error.", nullptr);
+            "Open Diagnostics > Last game log in the launcher to see the Vulkan error. "
+            "If the lines are missing, turn on Logging and try again, then share log.txt.", nullptr);
         exit(EXIT_FAILURE);
     }
 #endif
@@ -1011,6 +1017,8 @@ extern "C" void racacit_register_extra_overlays(void); /* game/spu/spu_extra.c *
  * -----------------------------------------------------------------------*/
 static char s_android_eboot[1024];
 static FILE* s_android_log;   /* log.txt while the launcher's Logging is on, else null (logcat) */
+static pthread_t s_android_log_thread;
+static bool s_android_log_started;
 
 /* A line from the log pump itself: written past the pipe it drains, which a
  * write to stderr could fill and block on. */
@@ -1132,7 +1140,7 @@ static void android_name_thread(const char* line)
     }
 }
 
-static void android_log_pump_start(int fd, FILE* file)
+static bool android_log_pump_start(int fd, FILE* file)
 {
     /* stdout/stderr -> logcat (tag "racacit"), or into log.txt when one was
      * asked for. Line-buffered through a pipe drained by one thread, a block
@@ -1140,12 +1148,14 @@ static void android_log_pump_start(int fd, FILE* file)
      * blocks once the pipe is full). Both ways the lines that announce host
      * threads name them: with log.txt written directly, as before 0.14, no
      * thread was named and the performance hint session never started. */
-    static int s_fd; s_fd = fd;
     s_android_log = file;
-    pthread_t t;
-    pthread_create(&t, NULL, [](void*) -> void* {
+    const int err = pthread_create(&s_android_log_thread, NULL, [](void* arg) -> void* {
+        const int read_fd = static_cast<int>(reinterpret_cast<intptr_t>(arg));
         char line[1024]; size_t n = 0; char chunk[4096]; ssize_t got;
-        while ((got = read(s_fd, chunk, sizeof chunk)) > 0) {
+        for (;;) {
+            got = read(read_fd, chunk, sizeof chunk);
+            if (got < 0 && errno == EINTR) continue;
+            if (got <= 0) break;
             for (ssize_t i = 0; i < got; i++) {
                 const char c = chunk[i];
                 if (c != '\n' && n < sizeof line - 1) { line[n++] = c; continue; }
@@ -1160,8 +1170,35 @@ static void android_log_pump_start(int fd, FILE* file)
                 if (c != '\n') line[n++] = c;
             }
         }
-        return NULL; }, NULL);
-    pthread_detach(t);
+        if (n) {
+            line[n] = 0;
+            android_log_direct(line);
+        }
+        close(read_fd);
+        return NULL;
+    }, reinterpret_cast<void*>(static_cast<intptr_t>(fd)));
+    s_android_log_started = err == 0;
+    if (!s_android_log_started) s_android_log = nullptr;
+    return s_android_log_started;
+}
+
+static void android_drain_startup_log()
+{
+    fflush(stdout);
+    fflush(stderr);
+    if (!s_android_log_started) return;
+
+    /* Stop both writers before joining. Other game threads can still write
+     * during startup, so keep their descriptors valid until the process exits. */
+    const int sink = open("/dev/null", O_WRONLY | O_CLOEXEC);
+    if (sink < 0) return;
+    const bool stdout_closed = dup2(sink, STDOUT_FILENO) >= 0;
+    const bool stderr_closed = dup2(sink, STDERR_FILENO) >= 0;
+    close(sink);
+    if (!stdout_closed || !stderr_closed) return;
+    pthread_join(s_android_log_thread, nullptr);
+    s_android_log_started = false;
+    if (s_android_log) fflush(s_android_log);
 }
 
 #ifdef RACIT_PGO_GEN
@@ -1694,10 +1731,17 @@ static void android_setup(int* argc, char*** argv)
     {
         int p[2];
         if (pipe(p) == 0) {
-            dup2(p[1], 1); dup2(p[1], 2);
-            setvbuf(stdout, NULL, _IOLBF, 0); setvbuf(stderr, NULL, _IOLBF, 0);
-            android_log_pump_start(p[0], log_file);
-        } else if (log_file) {   /* no pipe: straight into the file, unnamed threads */
+            if (android_log_pump_start(p[0], log_file)) {
+                dup2(p[1], STDOUT_FILENO);
+                dup2(p[1], STDERR_FILENO);
+                setvbuf(stdout, NULL, _IOLBF, 0);
+                setvbuf(stderr, NULL, _IOLBF, 0);
+            } else {
+                close(p[0]);
+            }
+            close(p[1]);
+        }
+        if (!s_android_log_started && log_file) { /* no pump: write directly */
             fclose(log_file);
             freopen(path, "w", stdout);
             freopen(path, "a", stderr);
@@ -2205,7 +2249,7 @@ int main(int argc, char** argv)
         const char* t = getenv("PS3_TITLE");
         if (rsx_backend_init(WINDOW_WIDTH, WINDOW_HEIGHT, t ? t : "RACiT") != 0) {
             fprintf(stderr, "[prepare] Vulkan init failed%c", 10);
-            fflush(stdout); fflush(stderr);
+            android_drain_startup_log();
             _exit(2);
         }
         const int r = rsx_vulkan_prepare_shaders();
