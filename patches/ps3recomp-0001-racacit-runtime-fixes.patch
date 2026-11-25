@@ -33155,7 +33155,7 @@ index fd2c2078..9c89ac12 100644
  }
  
 diff --git a/runtime/spu/spu_channels.c b/runtime/spu/spu_channels.c
-index 84b7ac96..24b18bee 100644
+index 84b7ac96..0c2dfcbc 100644
 --- a/runtime/spu/spu_channels.c
 +++ b/runtime/spu/spu_channels.c
 @@ -23,7 +23,7 @@
@@ -33549,16 +33549,28 @@ index 84b7ac96..24b18bee 100644
          spu_lockline_unlock();
          spu_taskset_line_committed(ea & ~127u);
          if (g_spu_line_commit_hook) g_spu_line_commit_hook(ea & ~127u);
-@@ -1148,7 +1419,7 @@ static void spu_resv_lost_poll(spu_context* ctx)
+@@ -1148,7 +1419,19 @@ static void spu_resv_lost_poll(spu_context* ctx)
  {
      if (!(ctx->event_mask & 0x400u) || !ctx->resv_valid) return;
      if (!vm_base || ctx->resv_ea == 0) return;
 -    if (memcmp(vm_base + ctx->resv_ea, ctx->resv_line, 128) != 0) {
-+    if (spu_mem_ne(vm_base + ctx->resv_ea, ctx->resv_line, 128) != 0) {
++    const uint8_t* line = vm_base + ctx->resv_ea;
++#if defined(__APPLE__) && defined(__aarch64__) && defined(__ARM_NEON) && !defined(SPU_SCALAR_HELPERS)
++    /* Most polls see an unchanged line. Reduce once after comparing all bytes. */
++    uint8x16_t differences = vdupq_n_u8(0);
++    for (size_t i = 0; i < MFC_ATOMIC_LINE; i += 16) {
++        differences = vorrq_u8(differences, veorq_u8(vld1q_u8(line + i),
++                                                     vld1q_u8(ctx->resv_line + i)));
++    }
++    const int changed = vmaxvq_u8(differences) != 0;
++#else
++    const int changed = spu_mem_ne(line, ctx->resv_line, MFC_ATOMIC_LINE);
++#endif
++    if (changed) {
          ctx->resv_valid = 0;
          SPU_EVENT_SET(ctx, 0x400u);
      }
-@@ -1168,9 +1439,34 @@ static int spu_ch_ready(spu_context* ctx, uint32_t channel)
+@@ -1168,9 +1451,34 @@ static int spu_ch_ready(spu_context* ctx, uint32_t channel)
  
  /* Signal the per-SPU wait CV so a blocked spu_rdch re-checks its predicate.
   * MUST be called by every producer AFTER it makes a read predicate true. */
@@ -33593,7 +33605,7 @@ index 84b7ac96..24b18bee 100644
      /* Pass through the waiter's lock first. spu_ch_wait tests its predicate and
       * goes to sleep under ch_wait_lock, but a producer makes the predicate true
       * outside it. A wake issued between the waiter's test and its sleep found
-@@ -1226,11 +1522,13 @@ static void spu_ch_wait(spu_context* ctx, uint32_t channel, const char* op)
+@@ -1226,11 +1534,13 @@ static void spu_ch_wait(spu_context* ctx, uint32_t channel, const char* op)
                  yz_lockstep_block_end(ctx);
                  spu_honour_stop_request(ctx);
              }
@@ -33607,7 +33619,7 @@ index 84b7ac96..24b18bee 100644
              unsigned long long waited = GetTickCount64() - start;
              if (waited >= next_hb) {
                  fprintf(stderr, "[ch-wait] spu=%X pc=0x%05X ch=%u waited=%llums evstat=0x%X evmask=0x%X resv[valid=%d ea=0x%08X]\n",
-@@ -1247,6 +1545,144 @@ static void spu_ch_wait(spu_context* ctx, uint32_t channel, const char* op)
+@@ -1247,6 +1557,144 @@ static void spu_ch_wait(spu_context* ctx, uint32_t channel, const char* op)
      ctx->status = SPU_STATUS_RUNNING;
  }
  
@@ -33752,7 +33764,7 @@ index 84b7ac96..24b18bee 100644
  /* ===========================================================================
   * Channel read (returns value in the preferred word slot)
   * ===========================================================================*/
-@@ -1266,8 +1702,10 @@ u128 spu_rdch(spu_context* ctx, uint32_t channel)
+@@ -1266,8 +1714,10 @@ u128 spu_rdch(spu_context* ctx, uint32_t channel)
       * park forever. RdInMbox/RdSigNotify park on their PPU producers. */
      if (channel == SPU_RdInMbox || channel == SPU_RdSigNotify1 || channel == SPU_RdSigNotify2)
          spu_ch_wait(ctx, channel, "rdch");
@@ -33765,7 +33777,7 @@ index 84b7ac96..24b18bee 100644
  
      uint32_t v = 0;
  
-@@ -1380,7 +1818,7 @@ uint32_t spu_rchcnt(spu_context* ctx, uint32_t channel)
+@@ -1380,7 +1830,7 @@ uint32_t spu_rchcnt(spu_context* ctx, uint32_t channel)
            lastlsa[sp] = ctx->mfc_lsa & SPU_LS_MASK;
            lastr90[sp] = ctx->gpr[90]._u32[0];
            lastrd[sp] = (ctx->resv_valid && vm_base && ctx->resv_ea)
@@ -33774,7 +33786,7 @@ index 84b7ac96..24b18bee 100644
                       : -1;
            { static int s_ld2 = -2; static uint32_t s_lo2;
              if (s_ld2 == -2) { const char* e5 = getenv("SPU_LSDUMP");
-@@ -1536,7 +1974,13 @@ uint32_t spu_rchcnt(spu_context* ctx, uint32_t channel)
+@@ -1536,7 +1986,13 @@ uint32_t spu_rchcnt(spu_context* ctx, uint32_t channel)
       * handler gates on this (rchcnt $ch25; brz IhcExit) -- returning the old
       * default of 1 made it enter on spurious interrupts with an empty stat,
       * running IhcLoop on a zero mask (clz(0) -> bogus tagId/ack). */
@@ -33789,7 +33801,7 @@ index 84b7ac96..24b18bee 100644
      default:                 return 1;  /* default: channel ready */
      }
  }
-@@ -1550,8 +1994,28 @@ typedef struct {
+@@ -1550,8 +2006,28 @@ typedef struct {
      uint32_t addr;
      spu_fn   fn;
      int      image_id;   /* which recompiled image this function belongs to */
@@ -33818,7 +33830,7 @@ index 84b7ac96..24b18bee 100644
  /* One entry per lifted SPU function across EVERY registered image, and a game
   * that lifts its whole SPU workload set has a lot of them: Yakuza: Dead Souls
   * registers ~170k (cri_audio alone is ~35k, gs_task ~9k, the job binaries ~11k).
-@@ -1563,6 +2027,19 @@ typedef struct {
+@@ -1563,6 +2039,19 @@ typedef struct {
  #define SPU_FN_REGISTRY_MAX 262144
  static spu_reg_entry s_registry[SPU_FN_REGISTRY_MAX];
  static uint32_t s_registry_count = 0;
@@ -33838,7 +33850,7 @@ index 84b7ac96..24b18bee 100644
  
  /* Accessor for the sampling profiler in ppu_loader.cpp. Its address->function
   * map is built from the PPU table alone, which leaves the SPU-lifted bodies as
-@@ -1573,6 +2050,14 @@ static uint32_t s_registry_count = 0;
+@@ -1573,6 +2062,14 @@ static uint32_t s_registry_count = 0;
   * real entries and the extents mean something. */
  uint32_t spu_registry_size(void) { return s_registry_count; }
  
@@ -33853,7 +33865,7 @@ index 84b7ac96..24b18bee 100644
  int spu_registry_entry(uint32_t i, void** host, uint32_t* ls_addr)
  {
      if (i >= s_registry_count) return 0;
-@@ -1687,6 +2172,7 @@ spu_fn spu_lookup(uint32_t addr, int image_id)   /* exported: clang-built fast-p
+@@ -1687,6 +2184,7 @@ spu_fn spu_lookup(uint32_t addr, int image_id)   /* exported: clang-built fast-p
       * any, for back-compat with single-image contexts. */
      for (uint32_t n = s_hash_head[spu_fn_hash(addr)]; n; n = s_hash_next[n - 1]) {
          const spu_reg_entry* e = &s_registry[n - 1];
@@ -33861,7 +33873,7 @@ index 84b7ac96..24b18bee 100644
          if (e->addr == addr &&
              (image_id == 0 || e->image_id == 0 || e->image_id == image_id)) {
              /* One compare on the return path; the report itself is rare. */
-@@ -1713,7 +2199,7 @@ static spu_fn spu_lookup_memoized(uint32_t addr, int image_id)
+@@ -1713,7 +2211,7 @@ static spu_fn spu_lookup_memoized(uint32_t addr, int image_id)
  {
      spu_lookup_memo* m = &t_lookup_memo[((addr >> 2) ^ ((uint32_t)image_id * 0x9E3779B1u)) &
                                          (SPU_LOOKUP_MEMO_SIZE - 1)];
@@ -33870,7 +33882,7 @@ index 84b7ac96..24b18bee 100644
      if (m->gen != gen || m->addr != addr || m->image != image_id) {
          m->fn = spu_lookup(addr, image_id);
          m->addr = addr; m->image = image_id; m->gen = gen;
-@@ -1721,6 +2207,341 @@ static spu_fn spu_lookup_memoized(uint32_t addr, int image_id)
+@@ -1721,6 +2219,341 @@ static spu_fn spu_lookup_memoized(uint32_t addr, int image_id)
      return m->fn;
  }
  
@@ -34212,7 +34224,7 @@ index 84b7ac96..24b18bee 100644
  /* Which image registered a function at this LS address, or -1 if none did.
   *
   * Deliberately NOT spu_lookup(addr, 0): that call means "dispatch here in a
-@@ -1765,8 +2586,19 @@ static spu_lifted_fn spu_lifted_lookup_full(const spu_context* ctx, uint32_t lsa
+@@ -1765,8 +2598,19 @@ static spu_lifted_fn spu_lifted_lookup_full(const spu_context* ctx, uint32_t lsa
              if (ctx->resident_code[slot].verify_state &&
                  !spu_overlay_resident_verified((spu_context*)ctx, slot)) return NULL;
              const uint32_t canon = ctx->resident_code[slot].canon;
@@ -34234,7 +34246,7 @@ index 84b7ac96..24b18bee 100644
              /* Relocatable code (spu_overlay_register_region_reloc): its lift sits at
               * canon + offset. The caller runs the function next, so set its delta now. */
              spu_fn f = spu_lookup_memoized(lsa - ctx->resident_code[slot].lsa + canon,
-@@ -1780,7 +2612,13 @@ static spu_lifted_fn spu_lifted_lookup_full(const spu_context* ctx, uint32_t lsa
+@@ -1780,7 +2624,13 @@ static spu_lifted_fn spu_lifted_lookup_full(const spu_context* ctx, uint32_t lsa
      spu_fn fn = NULL;
      if (ctx->resident_task) fn = spu_lookup_memoized(lsa, ctx->resident_task);
      if (!fn && ctx->resident_ovl) fn = spu_lookup_memoized(lsa, ctx->resident_ovl);
@@ -34249,7 +34261,7 @@ index 84b7ac96..24b18bee 100644
      return (spu_lifted_fn)fn;
  }
  
-@@ -1850,7 +2688,7 @@ spu_lifted_fn spu_lifted_lookup(const spu_context* ctx, uint32_t lsa)
+@@ -1850,7 +2700,7 @@ spu_lifted_fn spu_lifted_lookup(const spu_context* ctx, uint32_t lsa)
      }
      /* Read before the resolver walks the registry: an entry is never keyed by
       * a count newer than the registry it saw. */
@@ -34258,7 +34270,7 @@ index 84b7ac96..24b18bee 100644
      spu_dcache_ent* e = &t_dcache[((lsa >> 2) ^ (id * 0x9E3779B1u)) & (SPU_DCACHE_ENTRIES - 1)];
      if (e->fn && e->id == id && e->lsa == lsa && e->rgen == rgen &&
          e->residency == c->dcache_residency && e->image == c->image_id &&
-@@ -1877,7 +2715,7 @@ spu_lifted_fn spu_lifted_lookup(const spu_context* ctx, uint32_t lsa)
+@@ -1877,7 +2727,7 @@ spu_lifted_fn spu_lifted_lookup(const spu_context* ctx, uint32_t lsa)
      }
      int reloc = 0;
      const spu_lifted_fn fn = spu_lifted_lookup_full(ctx, lsa, &reloc);
@@ -34267,7 +34279,7 @@ index 84b7ac96..24b18bee 100644
          /* The resolver may have verified a pending slot; the entry records the
           * residency it resolved against, read after it. */
          e->fn = fn; e->id = id; e->lsa = lsa; e->rgen = rgen;
-@@ -2208,6 +3046,15 @@ void spu_overlay_note_get(spu_context* ctx, uint32_t ea, const uint8_t* ls, uint
+@@ -2208,6 +3058,15 @@ void spu_overlay_note_get(spu_context* ctx, uint32_t ea, const uint8_t* ls, uint
  {
      uint32_t lsa = (uint32_t)(ls - ctx->ls);
      spu_ovl_dump(ctx, ea, lsa, ls, size);
@@ -34283,7 +34295,7 @@ index 84b7ac96..24b18bee 100644
      for (unsigned slot = 0; slot < 4; ++slot) {
          if (!ctx->resident_code[slot].image_id) continue;
          uint32_t base = ctx->resident_code[slot].lsa;
-@@ -2640,6 +3487,19 @@ static int spu_smc_microstep(spu_context* ctx)
+@@ -2640,6 +3499,19 @@ static int spu_smc_microstep(spu_context* ctx)
           * corroboration gets for a decode bug. */
          if (op11 == 0x1AC || op7 == 0x08 || op7 == 0x09) { pc += 4; continue; } /* hbr/hbra/hbrr */
  
@@ -34303,7 +34315,7 @@ index 84b7ac96..24b18bee 100644
          /* Hand off to the real interpreter rather than giving up.
           *
           * This microstepper knows a dozen opcodes -- enough for the
-@@ -2684,14 +3544,74 @@ static int spu_smc_microstep(spu_context* ctx)
+@@ -2684,14 +3556,74 @@ static int spu_smc_microstep(spu_context* ctx)
      return 0;
  }
  
@@ -34378,7 +34390,7 @@ index 84b7ac96..24b18bee 100644
      /* Interrupt-return register restore (see spu_drain.c spu_irq_regs_save):
       * the WWS handler's save/restore shim lives at unlifted top-of-LS, so we
       * enforce the preserve-all-registers hardware contract here -- the first
-@@ -2903,11 +3823,13 @@ void spu_indirect_branch(spu_context* ctx)
+@@ -2903,11 +3835,13 @@ void spu_indirect_branch(spu_context* ctx)
              uint32_t w = ((uint32_t)ctx->ls[p0] << 24) | ((uint32_t)ctx->ls[p0+1] << 16) |
                           ((uint32_t)ctx->ls[p0+2] << 8) | ctx->ls[p0+3];
              if ((w >> 21) == 0u) {                 /* stop / stopd */
@@ -34392,7 +34404,7 @@ index 84b7ac96..24b18bee 100644
                  spu_halt(ctx);
                  return;
              }
-@@ -3240,13 +4162,14 @@ void spu_indirect_branch(spu_context* ctx)
+@@ -3240,13 +4174,14 @@ void spu_indirect_branch(spu_context* ctx)
       * image (the FMOD mixer's overlay calls) exhaust it and silently hide
       * every other image's misses -- LBP's loading jobs skipped their command
       * handlers for a whole session without a single log line. */
@@ -34408,7 +34420,7 @@ index 84b7ac96..24b18bee 100644
      /* One-shot: the FMOD null-handler DSP node carries a PPU descriptor EA at
       * node+0x14 (observed 0x93C3C0). Dump it to identify which plugin/unit
       * type never got its SPU code streamed (env SPU_DSPDESC=<hex ea>). */
-@@ -3406,4 +4329,44 @@ void spu_trace_rt(spu_context* ctx, uint32_t rt)
+@@ -3406,4 +4341,44 @@ void spu_trace_rt(spu_context* ctx, uint32_t rt)
  
  #ifdef __cplusplus
  }
