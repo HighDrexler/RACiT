@@ -34,11 +34,15 @@ case "$JOBS" in
 esac
 
 [ -f "$ELF" ] || { echo "No ELF at $ELF — put your decrypted EBOOT.ELF in input/"; exit 1; }
+# The lift tools (rust/racit-lift): patch-lift checks the executable and patches the lift.
+LIFT_TOOLS="${RACIT_LIFT_TARGET:-$ROOT/rust/racit-lift/target}"
+cargo build --release --quiet --manifest-path "$ROOT/rust/racit-lift/Cargo.toml" --target-dir "$LIFT_TOOLS"
+PATCH_LIFT=("$LIFT_TOOLS/release/patch-lift" --root "$ROOT")
 # Profiles identify both the disc region and the executable update.
-$PY "$ROOT/scripts/patch_lift.py" --check-profile "$ELF" "${RACACIT_GAME_PROFILE:-auto}"
+"${PATCH_LIFT[@]}" --check-profile "$ELF" "${RACACIT_GAME_PROFILE:-auto}"
 LIBSRE="${LIBSRE:-$ROOT/input/libsre.prx}"
 [ -f "$LIBSRE" ] || { echo "No libsre.prx at $LIBSRE — decrypt dev_flash/sys/external/libsre.sprx with RPCS3"; exit 1; }
-PROFILE="$($PY "$ROOT/scripts/patch_lift.py" --identify-profile "$ELF" "${RACACIT_GAME_PROFILE:-auto}")"
+PROFILE="$("${PATCH_LIFT[@]}" --identify-profile "$ELF" "${RACACIT_GAME_PROFILE:-auto}")"
 if [[ "$PROFILE" == *-1.00 ]]; then
   # A disc (the USA one, or the European copy scripts/retarget.py makes): the layout
   # windows/CMakeLists.txt and the releases build from.
@@ -101,7 +105,7 @@ if [ -f "$OUT/names.json" ]; then
 fi
 PS3RECOMP_CHUNK_LINES=${PS3RECOMP_CHUNK_LINES:-100000} $PY "$PS3R/tools/ppu_lifter.py" "${LIFT_ARGS[@]}"
 
-$PY "$ROOT/scripts/patch_lift.py" "$PPU_STAGE" --elf "$ELF" --profile "$PROFILE"
+"${PATCH_LIFT[@]}" "$PPU_STAGE" --elf "$ELF" --profile "$PROFILE"
 
 echo "== 4/5 SPU images"
 $PY "$PS3R/tools/extract_spu_images.py" "$ELF" --output "$OUT/spu_images" \
@@ -123,7 +127,7 @@ $PY "$ROOT/scripts/lift_spu_jobs.py" "$ELF" --extra
 # every module added to the list since ran in the SPU interpreter (v91: 109 of
 # 144, the AsyncMoby animation and FXVis effect modules among them).
 $PY "$ROOT/scripts/lift_spu_jobs.py" "$ELF" --sub
-$PY "$ROOT/scripts/patch_lift.py" "$PPU_STAGE" --elf "$ELF" --profile "$PROFILE"
+"${PATCH_LIFT[@]}" "$PPU_STAGE" --elf "$ELF" --profile "$PROFILE"
 
 # Publish the patched sources without touching files CMake can reuse.
 publish_lift() {

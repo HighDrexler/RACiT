@@ -1,15 +1,15 @@
-"""patch_lift.py re-patches a lift that v1.0.0 already patched, without a second mouse_angles.
+"""patch-lift re-patches a lift that v1.0.0 already patched, without a second mouse_angles.
 
 v1.0.0's step 22 (and its update 1.20 recipe) put racit_camera_take into the follow
 camera, func_000459D4. The mouse recipe for every camera declares mouse_angles there
 too, so on such a lift it must take the old patch out first, or the lift doesn't compile.
 This builds a tiny lift with the ten camera functions (only the lines the recipe looks
-for), the follow camera carrying the v1.0.0 patch, and runs scripts/patch_lift.py on it
-twice. No game files.
+for), the follow camera carrying the v1.0.0 patch, and runs patch-lift (rust/racit-lift)
+on it twice. No game files.
 
     python -m unittest discover -s tests
 """
-import ast
+import json
 import re
 import subprocess
 import sys
@@ -17,43 +17,25 @@ import tempfile
 import unittest
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-PATCH_LIFT = ROOT / 'scripts' / 'patch_lift.py'
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from racit_lift_tool import patch_lift
+
+_RECIPE = None
 
 
 def recipe():
-    """MOUSE_CAMERAS, _DISC_CAMERAS and OLD_FOLLOW_MOUSE, read without running patch_lift.py."""
-    tree = ast.parse(PATCH_LIFT.read_text(encoding='utf-8'))
-    wanted = {'MOUSE_CAMERAS', 'OLD_FOLLOW_MOUSE', 'OLD_MOUSE_DECL', '_DISC_CAMERAS'}
-    names = {}
-    for node in tree.body:
-        if isinstance(node, ast.Assign) and len(node.targets) == 1 and getattr(node.targets[0], 'id', '') in wanted:
-            names[node.targets[0].id] = ast.literal_eval(node.value)
-    return names
+    """MOUSE_CAMERAS, _DISC_CAMERAS, OLD_FOLLOW_MOUSE and OLD_MOUSE_DECL, from patch-lift."""
+    global _RECIPE
+    if _RECIPE is None:
+        out = subprocess.run(patch_lift('--mouse-recipe'), check=True, capture_output=True, text=True).stdout
+        _RECIPE = json.loads(out)
+    return _RECIPE
 
 
-# patch_lift.py's definitions (everything before it reads its arguments), for the update
-# 1.20 path: that profile is only chosen for its own executable, which a test doesn't
-# have, so the test calls the camera pass with the profile itself.
-PREFIX_END = "if len(sys.argv) > 1 and sys.argv[1] == '--check-profile':"
-U120_DRIVER = r'''
-import sys
-path, recomp = sys.argv[1], sys.argv[2]
-source = open(path, encoding='utf-8').read()
-namespace = {'__file__': path, '__name__': 'patch_lift'}
-sys.path.insert(0, __import__('os').path.dirname(path))
-exec(compile(source[:source.index(sys.argv[3])], path, 'exec'), namespace)
-if sys.argv[4] == 'table':
-    print(repr(namespace['MOUSE_CAMERA_FUNCS']['BCUS98124-1.20']))
-else:
-    namespace['apply_mouse_cameras'](recomp, 'BCUS98124-1.20')
-'''
-
-
+# The update 1.20 path: that profile is only chosen for its own executable, which a test
+# doesn't have, so the test runs the camera pass with the profile itself.
 def update120_cameras():
-    out = subprocess.run([sys.executable, '-I', '-c', U120_DRIVER, str(PATCH_LIFT), '', PREFIX_END, 'table'],
-                         check=True, capture_output=True, text=True).stdout
-    return ast.literal_eval(out.strip())
+    return recipe()['UPDATE120_CAMERAS']
 
 
 def camera_function(func, edits):
@@ -97,13 +79,12 @@ class MouseRepatch(unittest.TestCase):
         return path
 
     def patch_update120(self, directory):
-        result = subprocess.run([sys.executable, '-I', '-c', U120_DRIVER, str(PATCH_LIFT), directory, PREFIX_END, 'patch'],
-                                capture_output=True, text=True)
+        result = subprocess.run(patch_lift('--mouse-cameras', directory, 'BCUS98124-1.20'), capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return result.stdout
 
     def patch(self, directory):
-        result = subprocess.run([sys.executable, '-I', str(PATCH_LIFT), directory], capture_output=True, text=True)
+        result = subprocess.run(patch_lift(directory), capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return result.stdout
 
@@ -281,7 +262,7 @@ class MouseRepatch(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             follow = old_patched_follow(names).replace('mouse_angles[0];   /* racacit: added', 'mouse_angles[0] * 2;   /* racacit: added')
             self.lift(directory, follow)
-            result = subprocess.run([sys.executable, '-I', str(PATCH_LIFT), directory], capture_output=True, text=True)
+            result = subprocess.run(patch_lift(directory), capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn('regenerate the lift', result.stdout + result.stderr)
 

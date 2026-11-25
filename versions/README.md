@@ -13,7 +13,7 @@ Loader data, PPU output, SPU output, firmware-derived code and the desktop build
 The update 1.20 PPU consumer verifies the input and output hashes of its source edits. An existing update lift can use the ordinary patcher entry point.
 
 ```sh
-python3 -I scripts/patch_lift.py /path/to/update/recomp \
+cargo run -q --release --manifest-path rust/racit-lift/Cargo.toml --bin patch-lift -- /path/to/update/recomp \
   --elf /path/to/update/EBOOT.ELF --profile BCUS98124-1.20
 ```
 

@@ -1,6 +1,6 @@
 # Hook calls the patched BCUS98124-1.20 lift must contain: symbol and minimum count of
 # call sites. rust/racit-lift (check-lift-hooks) checks it at build time (game/CMakeLists.txt).
-# Add a line with every new hook in scripts/patch_lift.py or versions/*-hooks.json.
+# Add a line with every new hook in patch-lift (rust/racit-lift) or versions/*-hooks.json.
 # @function lines name functions only this executable's lift has: a lift without
 # them is another version's, and is left alone.
 @function 0066AD24

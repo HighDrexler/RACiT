@@ -4,7 +4,7 @@
 Runs a built game offscreen (no window, no audio), loads a save into gameplay and, for each
 camera mode it can reach from there, checks that:
   - a scripted mouse move reaches that camera's hook (RACACIT_MOUSE_TRACE "[mouse] <camera>
-    turn" lines, scripts/patch_lift.py MOUSE_CAMERAS),
+    turn" lines, patch-lift (rust/racit-lift) MOUSE_CAMERAS),
   - the picture turns: the frame shifts sideways by much more than it does standing still, and
     the same way the right stick turns it (the stick still works alongside the mouse),
 and that a mouse move in the pause menu turns nothing, then or after the game resumes.

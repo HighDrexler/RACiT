@@ -68,7 +68,7 @@ folder as `RaCACiT.exe`; the launcher starts the program of the disc it finds.
 **Changing the game code:** keep writing `BCUS98124` addresses. `scripts/retarget.py` converts
 them when it copies the sources. With the USA `input/EBOOT.ELF` present it also checks every
 converted code address against both executables and stops on a mismatch; without it, it warns
-about any address the map does not have. In the copy, `patch_lift.py` stops the build if a hook
+about any address the map does not have. In the copy, `patch-lift` stops the build if a hook
 does not land: add a new hook's name to `REQUIRED_HOOKS` in `retarget.py`. Code mods hook US
 addresses, so the European build does not load them.
 
@@ -195,7 +195,7 @@ Generation fingerprints the decrypted `EBOOT.ELF` before creating output or appl
 
 ```bash
 # Identify and validate the input without generating code.
-python3 -I scripts/patch_lift.py --check-profile input/EBOOT.ELF
+cargo run -q --release --manifest-path rust/racit-lift/Cargo.toml --bin patch-lift -- --check-profile input/EBOOT.ELF
 # Optionally require an exact version during the normal pipeline.
 RACACIT_GAME_PROFILE=BCUS98124-1.00 PY="$PWD/tools/venv/Scripts/python -I" SKIP_DESKTOP=1 bash scripts/pipeline.sh
 ```

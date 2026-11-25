@@ -17,15 +17,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-CRATE = ROOT / 'rust' / 'racit-lift'
-TARGET = Path(os.environ.get('CARGO_TARGET_DIR') or CRATE / 'target')
-CHECK = TARGET / 'release' / ('check-lift-hooks.exe' if os.name == 'nt' else 'check-lift-hooks')
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from racit_lift_tool import ROOT, tool
 
-
-def setUpModule():
-    subprocess.run(['cargo', 'build', '--release', '--quiet', '--manifest-path', str(CRATE / 'Cargo.toml'),
-                    '--target-dir', str(TARGET)], check=True)
+PATCHER = ROOT / 'rust' / 'racit-lift' / 'src' / 'bin' / 'patch-lift.rs'
 PROFILES = ('BCUS98124-1.00', 'BCUS98124-1.20', 'BCES00511-1.00')
 HOOK = re.compile(r'\b((?:racacit|racit)_[a-z0-9_]+)\(')
 
@@ -43,12 +38,11 @@ def hook_list(profile):
 
 
 def inserted_by_patch_lift():
-    # Hook calls patch_lift.py writes into lifted functions: string literals that call a
+    # Hook calls patch-lift writes into lifted functions: string literals that call a
     # racacit_/racit_ function with the guest context or guest registers.
-    source = (ROOT / 'scripts' / 'patch_lift.py').read_text(encoding='utf-8')
+    source = PATCHER.read_text(encoding='utf-8')
     names = set()
-    for literal in re.findall(r"'((?:\\.|[^'\\\n])*)'|\"((?:\\.|[^\"\\\n])*)\"", source):
-        text = literal[0] or literal[1]
+    for text in re.findall(r'"((?:\\.|[^"\\\n])*)"', source):
         if 'extern' in text or 'void racacit' in text or 'void racit' in text or 'int racacit' in text:
             continue
         for name in HOOK.findall(text):
@@ -58,14 +52,13 @@ def inserted_by_patch_lift():
 
 
 def usa_only_hooks():
-    """Hooks patch_lift.py puts in only when BUILD_TITLE == 'BCUS98124'."""
-    source = (ROOT / 'scripts' / 'patch_lift.py').read_text(encoding='utf-8')
-    names = set()
-    blocks = re.split(r'\n    sp = |\n    for fname in ', source)
-    for block in blocks:
-        if "if BUILD_TITLE == 'BCUS98124'" in block.split('\n', 1)[0]:
-            names.update(n for n in HOOK.findall(block) if 'ctx' in block)
-    return names - {'racacit_jb_push', 'racacit_longjmp'}
+    """Hooks patch-lift puts in only on the USA disc (c.uses_usa(): steps 24 to 29)."""
+    source = PATCHER.read_text(encoding='utf-8')
+    start = source.index("    // 24. Update 1.20's hero part masks")
+    steps = source[start:source.index('    if (c.has("racacit_jb_push(")', start)]
+    frame60 = source[source.index('fn frame60('):]
+    frame60 = frame60[:frame60.index('\n}\n')]
+    return {n for block in (steps, frame60) for n in HOOK.findall(block)}
 
 
 def inserted_by_update120_recipe():
@@ -100,7 +93,7 @@ class HookLists(unittest.TestCase):
         self.assertTrue(set(eu) <= set(us), sorted(set(eu) - set(us)))
         for name, count in eu.items():
             self.assertEqual(count, us[name], name)
-        # What it leaves out is what patch_lift.py only puts into the USA disc.
+        # What it leaves out is what patch-lift only puts into the USA disc.
         self.assertEqual(sorted(set(us) - set(eu)), sorted(usa_only_hooks()))
 
     def test_menu_and_camera_hooks_are_checked_on_every_version(self):
@@ -117,7 +110,7 @@ class CheckLiftHooks(unittest.TestCase):
 
     def lift(self, directory, hooks, functions, leave_out=(), chunks=1, extra=''):
         """A lift with every hook called as often as listed, spread over `chunks` files.
-        Each file declares and defines the hooks the way patch_lift.py's preambles do."""
+        Each file declares and defines the hooks the way patch-lift's preambles do."""
         calls = [name for name, count in hooks.items() if name not in leave_out for _ in range(count)]
         files = [[] for _ in range(chunks)]
         for i, name in enumerate(calls):
@@ -137,7 +130,7 @@ class CheckLiftHooks(unittest.TestCase):
             body.append('}')
             for name in names:
                 if name.startswith('@'):
-                    # Named in a comment (which the check doesn't count), so patch_lift.py
+                    # Named in a comment (which the check doesn't count), so patch-lift
                     # takes these as patched already and leaves them be.
                     body.extend(['void func_%s(ppu_context* ctx) {' % name[1:],
                                  '        /* patched: %s */' % ' '.join(n for n in hooks if n not in leave_out), '}'])
@@ -146,8 +139,8 @@ class CheckLiftHooks(unittest.TestCase):
             (Path(directory) / ('ppu_recomp_%03d.cpp' % index)).write_text('\n'.join(body) + '\n', encoding='utf-8')
 
     def run_check(self, directory, profile, *flags):
-        return subprocess.run([str(CHECK), directory, '--profile', profile, '--root', str(ROOT),
-                               '--python', sys.executable] + list(flags),
+        return subprocess.run([tool('check-lift-hooks'), directory, '--profile', profile, '--root', str(ROOT),
+                               ] + list(flags),
                               capture_output=True, text=True)
 
     def test_complete_lift_passes(self):
@@ -239,10 +232,10 @@ class CheckLiftHooks(unittest.TestCase):
             self.assertFalse((Path(directory) / 'ok').exists())
 
     def test_patch_mode_repatches_a_stale_lift(self):
-        # A lift patched before racacit_lua_throw_hook existed: --patch runs patch_lift.py,
+        # A lift patched before racacit_lua_throw_hook existed: --patch runs patch-lift,
         # which puts it in, and the check passes; a second run with the stamp leaves it be.
         hooks, functions = hook_list('BCUS98124-1.00')
-        # patch_lift.py also stops unless it finds every mouse camera (tests/test_mouse_repatch.py).
+        # patch-lift also stops unless it finds every mouse camera (tests/test_mouse_repatch.py).
         from test_mouse_repatch import camera_function, recipe
         names = recipe()
         cameras = ''.join(camera_function(func, names['MOUSE_CAMERAS'][name])
@@ -253,7 +246,7 @@ class CheckLiftHooks(unittest.TestCase):
             stamp = Path(directory) / 'patched.ok'
             result = self.run_check(directory, 'BCUS98124-1.00', '--patch', '--stamp', str(stamp))
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertIn('re-running patch_lift.py', result.stdout)
+            self.assertIn('re-running patch-lift', result.stdout)
             self.assertIn('racacit_lua_throw_hook(ctx);', (Path(directory) / 'ppu_recomp_000.cpp').read_text())
             self.assertTrue(stamp.exists())
             again = self.run_check(directory, 'BCUS98124-1.00', '--patch', '--stamp', str(stamp))

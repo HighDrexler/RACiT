@@ -1,7 +1,7 @@
 /* Desktop mouse runtime for RACiT. C ABI, C++11.
  *
  * The mouse turns every camera the right stick turns, directly. Each camera's update
- * carries a hook (scripts/patch_lift.py, MOUSE_CAMERAS) that takes the mouse motion since
+ * carries a hook (patch-lift (rust/racit-lift), MOUSE_CAMERAS) that takes the mouse motion since
  * the last camera update, in radians, and adds it once to that camera's own yaw and pitch
  * step. The right stick keeps working alongside it: the hooks add to the stick's turn.
  *

@@ -1,7 +1,7 @@
 //! Bring a lift's hooks up to date, and check that every expected hook is there.
 //!
 //!     check-lift-hooks RECOMP --profile PROFILE [--elf EBOOT.ELF] [--patch] [--stamp FILE]
-//!                     [--root RACIT] [--python PYTHON]
+//!                     [--root RACIT]
 //!
 //! It replaced scripts/check_lift_hooks.py, with the same rules and messages.
 //! Every hook listed in versions/<profile>-hook-symbols.txt must be called in the
@@ -9,8 +9,8 @@
 //! comments, declarations and definitions don't count, so a commented-out hook is
 //! missing. The sources are read in parallel, one file per thread at a time.
 //!
-//! --patch (configure time): when patch_lift.py, one of its inputs or the lift itself
-//! is newer than the stamp (or there is no stamp), re-run patch_lift.py on the lift
+//! --patch (configure time): when patch-lift, one of its inputs or the lift itself
+//! is newer than the stamp (or there is no stamp), re-run patch-lift on the lift
 //! first. Without --patch it only checks, and never writes a source. The stamp is
 //! written only when the check passes.
 
@@ -21,12 +21,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::SystemTime;
 use std::{env, fs, thread};
 
-/// What patch_lift.py reads: a change to any of them re-patches the lift.
+/// What patch-lift is built from: a change to any of them re-patches the lift.
 const PATCHER_INPUTS: &[&str] = &[
-    "scripts/patch_lift.py",
-    "scripts/update120_hooks.py",
-    "scripts/fix_vmx_alias.py",
-    "scripts/game_version.py",
+    "rust/racit-lift/src/bin/patch-lift.rs",
+    "rust/racit-lift/src/update120.rs",
+    "rust/racit-lift/src/vmx.rs",
+    "rust/racit-lift/src/profile.rs",
+    "rust/racit-lift/src/lib.rs",
     "versions/profiles.json",
 ];
 
@@ -41,7 +42,6 @@ struct Options {
     stamp: String,
     patch: bool,
     root: PathBuf,
-    python: String,
 }
 
 fn fail(msg: String) -> ExitCode {
@@ -51,7 +51,7 @@ fn fail(msg: String) -> ExitCode {
 
 fn usage() -> String {
     "usage: check-lift-hooks RECOMP --profile PROFILE [--elf EBOOT.ELF] [--patch] [--stamp FILE] \
-     [--root RACIT] [--python PYTHON]"
+     [--root RACIT]"
         .to_string()
 }
 
@@ -71,7 +71,7 @@ fn default_root() -> PathBuf {
 fn parse_args() -> Result<Options, String> {
     let mut args = env::args().skip(1);
     let (mut recomp, mut profile, mut root) = (None, None, None);
-    let (mut elf, mut stamp, mut patch, mut python) = (String::new(), String::new(), false, "python3".to_string());
+    let (mut elf, mut stamp, mut patch) = (String::new(), String::new(), false);
     while let Some(a) = args.next() {
         let mut value = |name: &str| args.next().ok_or_else(|| format!("check-lift-hooks: {name} needs a value"));
         match a.as_str() {
@@ -79,7 +79,6 @@ fn parse_args() -> Result<Options, String> {
             "--elf" => elf = value("--elf")?,
             "--stamp" => stamp = value("--stamp")?,
             "--root" => root = Some(PathBuf::from(value("--root")?)),
-            "--python" => python = value("--python")?,
             "--patch" => patch = true,
             "-h" | "--help" => return Err(usage()),
             _ if a.starts_with("--") => return Err(format!("check-lift-hooks: unknown option {a}\n{}", usage())),
@@ -94,7 +93,6 @@ fn parse_args() -> Result<Options, String> {
         stamp,
         patch,
         root: root.unwrap_or_else(default_root),
-        python,
     })
 }
 
@@ -396,8 +394,12 @@ fn run(o: &Options) -> Result<(), String> {
             (Some(_), None) => false,
         });
     if stale {
-        let mut cmd = Command::new(&o.python);
-        cmd.args(["-I", "-X", "utf8"]).arg(o.root.join("scripts/patch_lift.py")).arg(&o.recomp);
+        // patch-lift is built beside this tool.
+        let patcher = env::current_exe()
+            .map_err(|e| format!("check_lift_hooks: {e}"))?
+            .with_file_name(format!("patch-lift{}", env::consts::EXE_SUFFIX));
+        let mut cmd = Command::new(&patcher);
+        cmd.arg("--root").arg(&o.root).arg(&o.recomp);
         if !o.elf.is_empty() {
             cmd.args(["--elf", &o.elf, "--profile", &o.profile]);
         } else if o.profile != "BCUS98124-1.00" {
@@ -407,10 +409,10 @@ fn run(o: &Options) -> Result<(), String> {
                 o.profile
             ));
         }
-        println!("check_lift_hooks: re-running patch_lift.py on {}", o.recomp.display());
-        let status = cmd.status().map_err(|e| format!("check_lift_hooks: {}: {e}", o.python))?;
+        println!("check_lift_hooks: re-running patch-lift on {}", o.recomp.display());
+        let status = cmd.status().map_err(|e| format!("check_lift_hooks: {}: {e}", patcher.display()))?;
         if !status.success() {
-            return Err(format!("check_lift_hooks: patch_lift.py failed ({status})"));
+            return Err(format!("check_lift_hooks: patch-lift failed ({status})"));
         }
     }
 
@@ -426,7 +428,7 @@ fn run(o: &Options) -> Result<(), String> {
         let rel = list.path.strip_prefix(&o.root).unwrap_or(&list.path);
         return Err(format!(
             "check_lift_hooks: the {} lift in {} lacks hooks that {} expects:\n  {}\n\
-             Re-run scripts/patch_lift.py on it (or regenerate it) and rebuild; \
+             Re-run patch-lift (rust/racit-lift) on it (or regenerate it) and rebuild; \
              a build without them must not be staged.",
             o.profile,
             o.recomp.display(),
