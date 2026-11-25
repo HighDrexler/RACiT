@@ -32,3 +32,5 @@ analysis/decomp_*
 team/
 /build/
 /user-data/
+# Rust tool builds outside CMake (tests, cargo by hand)
+rust/*/target/

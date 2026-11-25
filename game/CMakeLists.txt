@@ -248,7 +248,8 @@ target_sources(${PROJECT_NAME} PRIVATE
 )
 # Every hook on the lift. The lift is generated once and patched by
 # scripts/patch_lift.py, so a lift patched before a hook was added would build
-# without it. Before the game compiles, scripts/check_lift_hooks.py re-runs the
+# without it. Before the game compiles, check-lift-hooks (rust/racit-lift, Rust: it
+# reads the 2.6 GB lift in a few seconds where the Python script took minutes) re-runs the
 # patcher when it, a hook table under versions/ or the lift is newer than the
 # last check, and stops the build if any hook in
 # versions/<profile>-hook-symbols.txt is missing. The profile comes from the
@@ -272,17 +273,32 @@ if(RACACIT_CHECK_HOOKS)
     endif()
     message(STATUS "Lift hooks:      ${_racit_profile} (versions/${_racit_profile}-hook-symbols.txt)")
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    find_program(CARGO_EXECUTABLE cargo HINTS "$ENV{CARGO_HOME}/bin" "$ENV{HOME}/.cargo/bin" "$ENV{USERPROFILE}/.cargo/bin")
+    if(NOT CARGO_EXECUTABLE)
+        message(FATAL_ERROR "The lift hook check needs Rust's cargo (https://rustup.rs), or configure with -DRACACIT_CHECK_HOOKS=OFF")
+    endif()
     set(_racit_root "${CMAKE_CURRENT_SOURCE_DIR}/..")
     file(GLOB _racit_hook_inputs
         "${_racit_root}/scripts/patch_lift.py" "${_racit_root}/scripts/update120_hooks.py"
         "${_racit_root}/scripts/fix_vmx_alias.py" "${_racit_root}/scripts/game_version.py"
-        "${_racit_root}/scripts/check_lift_hooks.py" "${_racit_root}/versions/*")
+        "${_racit_root}/rust/racit-lift/Cargo.toml" "${_racit_root}/rust/racit-lift/src/*.rs"
+        "${_racit_root}/versions/*")
     # Re-patch here, at configure time, before the build has looked at the lifted sources:
     # a source rewritten during the build would not be recompiled. A change to the patcher
-    # or a hook list configures (and so re-patches) again.
+    # or a hook list configures (and so re-patches) again. The tool is built for the host
+    # (an Android or cross build too) into this build tree.
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_racit_hook_inputs})
+    set(_racit_tools "${CMAKE_CURRENT_BINARY_DIR}/racit-lift")
     execute_process(
-        COMMAND "${Python3_EXECUTABLE}" -I -X utf8 "${_racit_root}/scripts/check_lift_hooks.py" "${RECOMP_DIR}"
+        COMMAND "${CARGO_EXECUTABLE}" build --release --quiet
+                --manifest-path "${_racit_root}/rust/racit-lift/Cargo.toml" --target-dir "${_racit_tools}"
+        RESULT_VARIABLE _racit_cargo_result)
+    if(NOT _racit_cargo_result EQUAL 0)
+        message(FATAL_ERROR "Building rust/racit-lift failed (see above)")
+    endif()
+    set(_racit_check "${_racit_tools}/release/check-lift-hooks${CMAKE_HOST_EXECUTABLE_SUFFIX}")
+    execute_process(
+        COMMAND "${_racit_check}" "${RECOMP_DIR}" --root "${_racit_root}" --python "${Python3_EXECUTABLE}"
                 --profile "${_racit_profile}" --elf "${_racit_elf}" --patch
                 --stamp "${CMAKE_CURRENT_BINARY_DIR}/lift-patched.ok"
         RESULT_VARIABLE _racit_patch_result)
@@ -293,9 +309,9 @@ if(RACACIT_CHECK_HOOKS)
     # since this configure, and not patched, stops the build.
     set(_racit_stamp "${CMAKE_CURRENT_BINARY_DIR}/lift-hooks.ok")
     add_custom_command(OUTPUT "${_racit_stamp}"
-        COMMAND "${Python3_EXECUTABLE}" -I -X utf8 "${_racit_root}/scripts/check_lift_hooks.py" "${RECOMP_DIR}"
+        COMMAND "${_racit_check}" "${RECOMP_DIR}" --root "${_racit_root}"
                 --profile "${_racit_profile}" --stamp "${_racit_stamp}"
-        DEPENDS ${_racit_hook_inputs} ${RECOMP_SOURCES}
+        DEPENDS ${_racit_hook_inputs} ${RECOMP_SOURCES} "${_racit_check}"
         COMMENT "Checking the lift's hooks (${_racit_profile})"
         VERBATIM)
     add_custom_target(racit_lift_hooks ALL DEPENDS "${_racit_stamp}")

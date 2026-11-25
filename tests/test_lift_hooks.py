@@ -2,7 +2,7 @@
 
 Twice a player build shipped without hooks (no mouse follow camera, no menu
 keycaps) because its lift was patched before they were added.
-scripts/check_lift_hooks.py, run by game/CMakeLists.txt, re-patches a stale lift
+rust/racit-lift (check-lift-hooks), run by game/CMakeLists.txt, re-patches a stale lift
 and stops the build if a hook in versions/<profile>-hook-symbols.txt is missing.
 This needs no game files.
 
@@ -18,7 +18,14 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-CHECK = ROOT / 'scripts' / 'check_lift_hooks.py'
+CRATE = ROOT / 'rust' / 'racit-lift'
+TARGET = Path(os.environ.get('CARGO_TARGET_DIR') or CRATE / 'target')
+CHECK = TARGET / 'release' / ('check-lift-hooks.exe' if os.name == 'nt' else 'check-lift-hooks')
+
+
+def setUpModule():
+    subprocess.run(['cargo', 'build', '--release', '--quiet', '--manifest-path', str(CRATE / 'Cargo.toml'),
+                    '--target-dir', str(TARGET)], check=True)
 PROFILES = ('BCUS98124-1.00', 'BCUS98124-1.20', 'BCES00511-1.00')
 HOOK = re.compile(r'\b((?:racacit|racit)_[a-z0-9_]+)\(')
 
@@ -139,7 +146,8 @@ class CheckLiftHooks(unittest.TestCase):
             (Path(directory) / ('ppu_recomp_%03d.cpp' % index)).write_text('\n'.join(body) + '\n', encoding='utf-8')
 
     def run_check(self, directory, profile, *flags):
-        return subprocess.run([sys.executable, '-I', str(CHECK), directory, '--profile', profile] + list(flags),
+        return subprocess.run([str(CHECK), directory, '--profile', profile, '--root', str(ROOT),
+                               '--python', sys.executable] + list(flags),
                               capture_output=True, text=True)
 
     def test_complete_lift_passes(self):

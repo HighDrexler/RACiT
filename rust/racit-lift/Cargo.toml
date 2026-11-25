@@ -1,0 +1,15 @@
+[package]
+name = "racit-lift"
+version = "0.1.0"
+edition = "2024"
+description = "Build-time checks on the lifted RACiT sources"
+publish = false
+
+[[bin]]
+name = "check-lift-hooks"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+codegen-units = 1
+lto = "thin"

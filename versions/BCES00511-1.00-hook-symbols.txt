@@ -1,5 +1,5 @@
 # Hook calls the patched BCES00511 (European disc 1.00) lift must contain: symbol and
-# minimum count of call sites. scripts/check_lift_hooks.py checks it at build time
+# minimum count of call sites. rust/racit-lift (check-lift-hooks) checks it at build time
 # (game/CMakeLists.txt, configured by scripts/build_version.sh BCES00511).
 # Made from versions/BCUS98124-1.00-hook-symbols.txt: the @function lines converted with
 # versions/BCES00511/addr_map.tsv, and without the hooks patch_lift.py puts in the USA

@@ -20,7 +20,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPTS = ['patch_lift.py', 'update120_hooks.py', 'update120_unlock_hooks.py', 'check_lift_hooks.py', 'retarget.py', 'fix_vmx_alias.py']
+SCRIPTS = ['patch_lift.py', 'update120_hooks.py', 'update120_unlock_hooks.py', 'retarget.py', 'fix_vmx_alias.py']
 
 # Run a script with cp1252 as the default text encoding, as on Windows.
 SHIM = r'''

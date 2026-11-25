@@ -7,7 +7,7 @@ generates its C code from your own legally dumped copy of the game.
 
 ## You need
 
-- Windows, Git Bash, git, and Python 3.12
+- Windows, Git Bash, git, Python 3.12 and Rust (https://rustup.rs) for the build tools under `rust/`
 - About 32 GB of RAM for the default build (`-j6` below; lower it on less)
 - From your own console and disc (`BCUS98124`), in `input/`:
   - `input/EBOOT.ELF`: the decrypted game executable
@@ -81,7 +81,7 @@ processors without AVX2, or when Settings > Performance > Game build says so). P
 
 ## macOS Apple Silicon build
 
-Use Xcode Command Line Tools, Python 3.12 or later, CMake with Make or Ninja, SDL2, zlib,
+Use Xcode Command Line Tools, Python 3.12 or later, Rust (rustup or Homebrew), CMake with Make or Ninja, SDL2, zlib,
 Vulkan headers, the Vulkan loader, MoltenVK, glslang and SPIRV-Cross. The Vulkan
 SDK and package-manager installations can supply these libraries. Pass their
 installation prefixes through `CMAKE_PREFIX_PATH` when CMake needs help finding
