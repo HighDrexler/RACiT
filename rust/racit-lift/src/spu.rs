@@ -1,6 +1,6 @@
 //! SPU inputs of an executable: its loaded segments, and for update 1.20 where each
 //! disc SPU payload sits (versions/BCUS98124-1.20-spu.tsv). The same rules and messages
-//! as scripts/game_version.py's update_inputs, mapped_address and changed_module.
+//! as the former scripts/game_version.py's update_inputs, mapped_address and changed_module.
 
 use crate::Result;
 use std::collections::BTreeMap;

@@ -2351,7 +2351,7 @@ extern "C" void racacit_snd_play_hook(ppu_context* ctx, int tag)
     __sync_lock_release(&mu);
 }
 
-// Disc-only 1.20 fixes begin. (scripts/prepare_game_host.py drops them from the update 1.20 build: 1.20 has them natively.)
+// Disc-only 1.20 fixes begin. (prepare-game-host in rust/racit-lift drops them from the update 1.20 build: 1.20 has them natively.)
 /* ---------------------------------------------------------------------------
  * Update 1.20's hero part masks in the disc build
  *

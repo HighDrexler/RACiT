@@ -191,6 +191,30 @@ pub fn write_if_changed(path: &Path, contents: &[u8]) -> Result<()> {
     fs::rename(&tmp, path).map_err(|e| format!("{}: {e}", path.display()))
 }
 
+/// versions/NAME as csv.DictReader(delimiter='\t') reads it: one map per row, keyed by the
+/// header line's columns.
+pub fn tsv_rows(root: &Path, name: &str) -> Result<Vec<std::collections::HashMap<String, String>>> {
+    let path = root.join("versions").join(name);
+    let text = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut lines = text.lines();
+    let header: Vec<String> = lines
+        .next()
+        .unwrap_or("")
+        .split('\t')
+        .map(str::to_string)
+        .collect();
+    Ok(lines
+        .filter(|l| !l.is_empty())
+        .map(|l| {
+            let mut cells = l.split('\t');
+            header
+                .iter()
+                .map(|h| (h.clone(), cells.next().unwrap_or("").to_string()))
+                .collect()
+        })
+        .collect())
+}
+
 pub fn sha256_hex(data: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let d = Sha256::digest(data);

@@ -1,5 +1,5 @@
 //! The game profiles of versions/profiles.json, and which one an executable is (by SHA-256).
-//! The same rules and messages as scripts/game_version.py's identify_profile.
+//! The same rules and messages as the former scripts/game_version.py's identify_profile.
 
 use crate::Result;
 use serde_json::Value;

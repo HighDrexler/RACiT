@@ -20,6 +20,10 @@ path = "src/bin/patch-lift.rs"
 name = "lift-spu-jobs"
 path = "src/bin/lift-spu-jobs.rs"
 
+[[bin]]
+name = "prepare-game-host"
+path = "src/bin/prepare-game-host.rs"
+
 [profile.release]
 opt-level = 3
 codegen-units = 1

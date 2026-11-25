@@ -253,7 +253,7 @@ target_sources(${PROJECT_NAME} PRIVATE
 # patcher when it, a hook table under versions/ or the lift is newer than the
 # last check, and stops the build if any hook in
 # versions/<profile>-hook-symbols.txt is missing. The profile comes from the
-# version-selected host sources (scripts/prepare_game_host.py writes it into
+# version-selected host sources (rust/racit-lift prepare-game-host writes it into
 # game_version.h); RACACIT_ELF is the executable re-patching needs for an update.
 set(RACACIT_GAME_PROFILE "" CACHE STRING "Game profile of RECOMP_DIR (empty: from HOST_DIR/game_version.h, else BCUS98124-1.00)")
 set(RACACIT_ELF "" CACHE FILEPATH "Decrypted EBOOT.ELF of RECOMP_DIR's lift (needed to re-patch an update lift)")

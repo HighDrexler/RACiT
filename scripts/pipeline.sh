@@ -69,7 +69,7 @@ export RACACIT_ELF="$ELF"
 mkdir -p "$OUT" "$RECOMP" "$SPU" "$PRX" "$HOST"
 # The disc builds game/main.cpp and game/stubs.cpp as they are; other versions get copies
 # with their own function and data addresses.
-[ "$HOST" = "$ROOT/game" ] || $PY "$ROOT/scripts/prepare_game_host.py" "$ELF" "$HOST" --profile "$PROFILE"
+[ "$HOST" = "$ROOT/game" ] || "$LIFT_TOOLS/release/prepare-game-host" --root "$ROOT" "$ELF" "$HOST" --profile "$PROFILE"
 
 echo "== 1/5 Loader"
 $PY "$PS3R/tools/ppu_loader.py" "$ELF" --output "$OUT"
