@@ -25,6 +25,7 @@
  *
  * An Xbox-style pad (layout 2) gets the same swap; the fonts have no Xbox
  * glyphs (A/B/X/Y, RB/RT), so it reads R2 where it presses RT.
+ * "Bumpers and triggers: swapped" (cellPad.c g_racacit_shoulder_swap) trades both pairs on top.
  * RACACIT_PROMPT_SWAP=0 turns it off; RACACIT_PROMPT_LAYOUT=<n> forces a layout (tests).
  *
  * v69: the prompt that floats over what the Kinetic Tether can grab (an
@@ -58,6 +59,7 @@
 #include "win32_compat.h"
 
 extern "C" uint8_t* vm_base;
+extern "C" volatile int g_racacit_shoulder_swap; /* cellPad.c: port 0 has bumpers and triggers swapped (Settings > Controls) */
 extern "C" volatile int g_racacit_pad_layout;   /* cellPad.c racacit_pad_layout at the last poll: 0 PS3 layout, 1 PS pad swapped, 2 other pad swapped */
 extern "C" uint32_t cellGcmResolveLocated(int local, uint32_t offset);   /* cellGcmSys.c: RSX offset -> guest address */
 extern "C" volatile int g_racacit_ctx_quickselect;   /* cellPad.c: the quick select ring is open (TRIANGLE held) */
@@ -823,7 +825,11 @@ DWORD WINAPI prompts_thread(LPVOID)
          * the quick select ring is open, where L2 / R2 page (cellPad.c). */
         static int force_qs = -1;   /* RACACIT_PROMPT_QS=1: the quick select state on (tests: scripted input bypasses cellPad's check) */
         if (force_qs < 0) { const char* e = getenv("RACACIT_PROMPT_QS"); force_qs = e && *e == '1'; }
-        const int want_r = layout != 0, want_l = layout != 0 && (g_racacit_ctx_quickselect || force_qs);
+        /* Bumpers and triggers swapped trades both pairs again: what the game calls R1 is then
+         * pressed on R2, so with Fire on R2 as well the text is back to the PS3 names. */
+        const int shoulders = !keyboard && g_racacit_shoulder_swap;
+        const int want_r = (layout != 0) != shoulders,
+                  want_l = (layout != 0 && (g_racacit_ctx_quickselect || force_qs)) != shoulders;
         if (!keyboard) desktop_prompts(false);
         int changed = 0;
         for (int i = 0; i < s_nfont; i++) {
