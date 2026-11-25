@@ -36991,7 +36991,7 @@ index b997931b..3d048c2f 100644
           * it is gone (ESRCH). */
          table_unlock();
 diff --git a/runtime/syscalls/sys_timer.c b/runtime/syscalls/sys_timer.c
-index 3a022815..137918b4 100644
+index 3a022815..b24e6f05 100644
 --- a/runtime/syscalls/sys_timer.c
 +++ b/runtime/syscalls/sys_timer.c
 @@ -11,6 +11,9 @@
@@ -37169,7 +37169,33 @@ index 3a022815..137918b4 100644
      return (ns / 1000000000ull) * PS3_TIMEBASE_FREQ +
             (ns % 1000000000ull) * PS3_TIMEBASE_FREQ / 1000000000ull;
  #endif
-@@ -101,6 +236,14 @@ uint64_t host_monotonic_ns(void)
+@@ -86,14 +221,21 @@ uint64_t ppu_timebase_now(void)
+ uint64_t host_monotonic_ns(void)
+ {
+ #ifdef __APPLE__
+-    static uint32_t numer, denom;
+-    if (!denom) {                       /* benign race: same values either way */
++    /* Publish the two halves together for concurrent first-time clock readers. */
++    static uint64_t cached_ratio;
++    uint64_t ratio = __atomic_load_n(&cached_ratio, __ATOMIC_RELAXED);
++    if (!ratio) {
+         mach_timebase_info_data_t tb;
+         mach_timebase_info(&tb);
+-        numer = tb.numer; denom = tb.denom;
++        ratio = ((uint64_t)tb.numer << 32) | tb.denom;
++        __atomic_store_n(&cached_ratio, ratio, __ATOMIC_RELAXED);
+     }
+     const uint64_t t = mach_absolute_time();
+-    /* Split so t * numer cannot overflow (numer is 125 on Apple silicon). */
++    /* Apple Silicon's 24 MHz clock. Clang can divide by a known constant
++     * without a hardware divide. Use the split conversion on overflow. */
++    if (ratio == ((UINT64_C(125) << 32) | 3) && t <= UINT64_MAX / 125)
++        return t * 125 / 3;
++    const uint32_t numer = (uint32_t)(ratio >> 32), denom = (uint32_t)ratio;
+     return (t / denom) * numer + (t % denom) * numer / denom;
+ #else
+     struct timespec ts;
+@@ -101,6 +243,14 @@ uint64_t host_monotonic_ns(void)
      return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
  #endif
  }
@@ -37184,7 +37210,7 @@ index 3a022815..137918b4 100644
  #endif
  
  static void write_be32(uint32_t addr, uint32_t val)
-@@ -129,6 +272,151 @@ static void write_be64(uint32_t addr, uint64_t val)
+@@ -129,6 +279,151 @@ static void write_be64(uint32_t addr, uint64_t val)
      *p = val;
  }
  
@@ -37336,7 +37362,7 @@ index 3a022815..137918b4 100644
  /* ---------------------------------------------------------------------------
   * sys_timer_usleep
   *
-@@ -138,10 +426,43 @@ int64_t sys_timer_usleep(ppu_context* ctx)
+@@ -138,10 +433,43 @@ int64_t sys_timer_usleep(ppu_context* ctx)
  {
      uint64_t usec = LV2_ARG_U64(ctx, 0);
      ppu_thread_note_block(ctx->thread_id);   /* PS3_PRIO_START */
@@ -37380,7 +37406,7 @@ index 3a022815..137918b4 100644
      /* PS3_POLLTOP=<seconds>: name the usleep poll sites.
       *
       * A title that is "hung" is usually not blocked on anything -- every thread
-@@ -243,6 +564,17 @@ int64_t sys_timer_usleep(ppu_context* ctx)
+@@ -243,6 +571,17 @@ int64_t sys_timer_usleep(ppu_context* ctx)
          extern void ppu_log_host_chain(const char*);
          ppu_log_host_chain("usleep1ms"); } }
  
@@ -37398,7 +37424,7 @@ index 3a022815..137918b4 100644
  #ifdef _WIN32
      /* Use high-resolution sleep via waitable timer for better precision */
      if (usec >= 1000) {
-@@ -264,10 +596,19 @@ int64_t sys_timer_usleep(ppu_context* ctx)
+@@ -264,10 +603,19 @@ int64_t sys_timer_usleep(ppu_context* ctx)
           * and busy-spins at full speed (so the wait is effectively a no-op).
           * Busy-wait to a precise QPC deadline, yielding inside the spin
           * (SwitchToThread) so a sibling host thread the guest may be waiting on
