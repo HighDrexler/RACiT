@@ -17467,10 +17467,10 @@ index b6bf0704..7dc3db15 100644
   * PSO identity should use rsx_fp_structural_hash in buffered mode. */
 diff --git a/libs/video/rsx_host_ui.c b/libs/video/rsx_host_ui.c
 new file mode 100644
-index 00000000..66b32888
+index 00000000..05bef3aa
 --- /dev/null
 +++ b/libs/video/rsx_host_ui.c
-@@ -0,0 +1,2517 @@
+@@ -0,0 +1,2592 @@
 +/*
 + * ps3recomp - host settings menu and on-screen display. See rsx_host_ui.h.
 + */
@@ -17511,7 +17511,12 @@ index 00000000..66b32888
 +static float s_max_aniso = 16.0f;
 +static float s_rs_active = 1.0f;
 +static int   s_texq_active = -1;      /* texture quality the engine started with */
-+static int   s_page;                  /* 0 General, 1 Graphics, 2 Controls */
++/* The game options as the game started with them (it reads them once): a
++ * row whose value differs says "after restart". s_game_start.gen = 1 once set. */
++static rsx_host_options s_game_start;
++static const char* const k_lang_codes[] = { "", "fr", "es", "de", "it", "nl" };
++static const char* const k_lang_names[] = { "English", "French", "Spanish", "German", "Italian", "Dutch" };
++static int   s_page;                  /* 0 General, 1 Graphics, 2 Controls, 3 Game, TR_PAGE Trophies */
 +/* Read live by the SPU lanes (spu_channels.c) and the present pacing
 + * (rsx_be_proxy.c); set from the options here. */
 +extern volatile int g_racacit_spu_spin_us;
@@ -17524,7 +17529,7 @@ index 00000000..66b32888
 +static unsigned long long s_dirty_ms;   /* unsaved changes since (0 = none) */
 +
 +/* Rows of the last layout, in target pixels, for the mouse. */
-+static struct { int x0, x1, y0[32], y1[32], n; float sx, sy; int tx0[4], tx1[4], ty0, ty1; } s_hit;
++static struct { int x0, x1, y0[32], y1[32], n; float sx, sy; int tx0[8], tx1[8], ty0, ty1; } s_hit;   /* tx: one per page (N_PAGES) */
 +
 +/* Trophies (rsx_host_ui_trophy_*): the set, the Trophies page's list and
 + * the notices waiting to be shown. Under the lock. */
@@ -17539,7 +17544,7 @@ index 00000000..66b32888
 +    volatile int pop_n;
 +    unsigned long long pop_t0;       /* the first one's start; 0 = not shown yet */
 +} s_tr;
-+#define TR_PAGE 3
++#define TR_PAGE 4
 +
 +/* The display's refresh rate (display_check): the last one logged, and the
 + * notice about a rate 60 fps cannot divide. s_hint_hz is settings.txt's
@@ -17636,8 +17641,20 @@ index 00000000..66b32888
 +    o.mouse_invert  = env_int("RACACIT_MOUSE_INVERT_Y", 0) ? 1 : 0;
 +    o.fov           = clampi(env_int("RACACIT_FOV", 100), 75, 150);
 +    o.cam_dist      = clampi(env_int("RACACIT_CAM_DIST", 100), 50, 200);
++    { const char* v = getenv("RACACIT_LANGUAGE");
++      for (int i = 1; i < (int)(sizeof k_lang_codes / sizeof k_lang_codes[0]); i++) if (v && !strcmp(v, k_lang_codes[i])) o.language = i; }
++    o.fps_cap       = env_int("RACACIT_FPS_CAP", 0);
++    if (o.fps_cap < 0) o.fps_cap = 0;
++    o.start_skips_movies = env_int("RACACIT_START_SKIPS_MOVIES", 1) ? 1 : 0;
++    o.all_cutscenes = env_int("RACACIT_ALL_CUTSCENES_SKIPPABLE", 1) ? 1 : 0;
++    o.free_landing  = env_int("RACACIT_SPACE_FREE_LANDING", 1) ? 1 : 0;
++    o.tod_discount  = env_int("RACACIT_TOD_DISCOUNT", 1) ? 1 : 0;
++    o.power_pack    = env_int("RACACIT_POWER_PACK", 1) ? 1 : 0;
++    o.cheats        = env_is("RACACIT_CHEATS", "1");
++    o.save_ui       = env_int("RACACIT_SAVE_UI", 1) ? 1 : 0;
 +    s_hint_hz       = env_int("RACACIT_REFRESH_HINT_HZ", 0);
 +    if (s_texq_active < 0) s_texq_active = o.tex_quality;
++    if (!s_game_start.gen) { s_game_start = o; s_game_start.gen = 1; }
 +    g_racacit_spu_spin_us = o.cpu_mode ? 200 : 30;
 +    g_racacit_present_pace = o.present_pace;
 +    o.gen = 1;
@@ -17724,6 +17741,15 @@ index 00000000..66b32888
 +    snprintf(kv[k++], 96, "RACACIT_MOUSE_INVERT_Y=%d", o->mouse_invert);
 +    snprintf(kv[k++], 96, "RACACIT_FOV=%d", o->fov);
 +    snprintf(kv[k++], 96, "RACACIT_CAM_DIST=%d", o->cam_dist);
++    snprintf(kv[k++], 96, "RACACIT_LANGUAGE=%s", k_lang_codes[o->language]);
++    if (o->fps_cap) snprintf(kv[k++], 96, "RACACIT_FPS_CAP=%d", o->fps_cap); else snprintf(kv[k++], 96, "RACACIT_FPS_CAP=");
++    snprintf(kv[k++], 96, "RACACIT_START_SKIPS_MOVIES=%d", o->start_skips_movies);
++    snprintf(kv[k++], 96, "RACACIT_ALL_CUTSCENES_SKIPPABLE=%d", o->all_cutscenes);
++    snprintf(kv[k++], 96, "RACACIT_SPACE_FREE_LANDING=%d", o->free_landing);
++    snprintf(kv[k++], 96, "RACACIT_TOD_DISCOUNT=%d", o->tod_discount);
++    snprintf(kv[k++], 96, "RACACIT_POWER_PACK=%d", o->power_pack);
++    snprintf(kv[k++], 96, "RACACIT_CHEATS=%d", o->cheats);
++    snprintf(kv[k++], 96, "RACACIT_SAVE_UI=%d", o->save_ui);
 +    if (s_hint_hz) snprintf(kv[k++], 96, "RACACIT_REFRESH_HINT_HZ=%d", s_hint_hz);
 +    *n = k;
 +}
@@ -17748,7 +17774,7 @@ index 00000000..66b32888
 +    if (!path || !*path) return;
 +    rsx_host_options o;
 +    LOCK(); o = s_opt; UNLOCK();
-+    char kv[40][96]; int nkv = 0;
++    char kv[64][96]; int nkv = 0;
 +    settings_lines(&o, kv, &nkv);
 +
 +    char* text = NULL; size_t len = 0;
@@ -17923,7 +17949,8 @@ index 00000000..66b32888
 +       R_PRESET, R_TEXQ, R_PACE, R_CPU, R_KBM, R_MSENS, R_MINV, R_DSTRIGSTR, R_TROPHIES,
 +       R_FOV, R_CAMDIST, R_SKIPINTRO, R_SKIPSTART, R_SHOULDER,
 +       R_CH_BOLTAMT, R_CH_ADDBOLTS, R_CH_WPN, R_CH_WPNUP, R_CH_WPNMAX, R_CH_WPNRESET, R_CH_GOD,
-+       R_CH_DEST, R_CH_GO };
++       R_CH_DEST, R_CH_GO,
++       R_LANG, R_FPSCAP, R_STARTSKIP, R_ALLCUTS, R_FREELAND, R_TODDISC, R_POWERPACK, R_CHEATS, R_SAVEUI };
 +typedef struct { int kind, id; const char* label; } ui_row;
 +/* Three pages: General; Graphics -- every option that changes how the game
 + * is drawn, for fitting it to a slower PC (each scales detail only: the
@@ -17988,6 +18015,26 @@ index 00000000..66b32888
 +    { K_ACT, R_RESUME,  "Resume" },
 +    { K_ACT, R_QUIT,    "Quit game" },
 +};
++/* The launcher's Game options and its Frame rate, so the menu and the launcher
++ * have the same settings. The game reads most of them once at start: the
++ * value says "after restart" until then (value_text). */
++static const ui_row k_rows_game[] = {
++    { K_HEAD, 0, "Game" },
++    { K_OPT, R_LANG,      "Language" },
++    { K_OPT, R_FPSCAP,    "Frame rate" },
++    { K_HEAD, 0, "Movies and story" },
++    { K_OPT, R_STARTSKIP, "START skips movies" },
++    { K_OPT, R_ALLCUTS,   "Every cutscene skippable" },
++    { K_OPT, R_FREELAND,  "Land anywhere in space" },
++    { K_HEAD, 0, "Bonuses and saves" },
++    { K_OPT, R_TODDISC,   "Tools of Destruction discount" },
++    { K_OPT, R_POWERPACK, "Power pack (pre-order bonus)" },
++    { K_OPT, R_CHEATS,    "Cheat menu" },
++    { K_OPT, R_SAVEUI,    "Save list screen" },
++    { K_GAP, 0, "" },
++    { K_ACT, R_RESUME,  "Resume" },
++    { K_ACT, R_QUIT,    "Quit game" },
++};
 +/* The Trophies page draws its own list (tr_build); its one row only keeps the
 + * row-based code (selection, adjust) on something harmless. */
 +static const ui_row k_rows_trophies[] = {
@@ -18018,13 +18065,13 @@ index 00000000..66b32888
 +static const int k_ch_bolts[] = { 1000, 10000, 100000, 1000000 };
 +static int s_ch_bolt = 1, s_ch_wsel, s_ch_dest;
 +static char s_ch_msg[96]; static int s_ch_msg_row; static unsigned long long s_ch_msg_ms;
-+#define N_PAGES 4
-+static const char* k_page_names[N_PAGES] = { "General", "Graphics", "Controls", "Trophies" };
++#define N_PAGES 5
++static const char* k_page_names[N_PAGES] = { "General", "Graphics", "Controls", "Game", "Trophies" };
 +static int cheats_mode(void)
 +{
 +    static int on = -1;
 +    if (on < 0) { const char* e = getenv("RACACIT_CHEATS"); on = e && *e == '1'; }
-+    if (on && s_cheat) { k_page_names[3] = "Cheats"; return 1; }
++    if (on && s_cheat) { k_page_names[TR_PAGE] = "Cheats"; return 1; }
 +    return 0;
 +}
 +void rsx_host_ui_set_cheats(const rsx_cheat_api* api) { s_cheat = api; }
@@ -18037,18 +18084,18 @@ index 00000000..66b32888
 +     * rows they have no use for: window mode and size, Discord, the DualSense
 +     * speaker and haptics (USB audio, Windows only) and the mouse (no cursor
 +     * capture). */
-+    static ui_row f[3][N_OF(k_rows_controls) + N_OF(k_rows_general) + N_OF(k_rows_graphics)];
-+    static int fn[3] = { -1, -1, -1 };
++    static ui_row f[4][N_OF(k_rows_controls) + N_OF(k_rows_general) + N_OF(k_rows_graphics) + N_OF(k_rows_game)];
++    static int fn[4] = { -1, -1, -1, -1 };
 +    if (p == TR_PAGE) {
 +        if (cheats_mode()) { *n = N_OF(k_rows_cheats); return k_rows_cheats; }
 +        *n = N_OF(k_rows_trophies); return k_rows_trophies;
 +    }
-+    if (p < 0 || p > 2) p = 0;
++    if (p < 0 || p > 3) p = 0;
 +    if (fn[p] < 0) {
 +        rsx_host_ui_load_options();
 +        LOCK(); const int plus = s_opt.ds_plus; UNLOCK();
-+        const ui_row* src = p == 1 ? k_rows_graphics : p == 2 ? k_rows_controls : k_rows_general;
-+        const int ns = p == 1 ? N_OF(k_rows_graphics) : p == 2 ? N_OF(k_rows_controls) : N_OF(k_rows_general);
++        const ui_row* src = p == 1 ? k_rows_graphics : p == 2 ? k_rows_controls : p == 3 ? k_rows_game : k_rows_general;
++        const int ns = p == 1 ? N_OF(k_rows_graphics) : p == 2 ? N_OF(k_rows_controls) : p == 3 ? N_OF(k_rows_game) : N_OF(k_rows_general);
 +        int k = 0;
 +        for (int i = 0; i < ns; i++) {
 +            const int id = src[i].kind == K_OPT ? src[i].id : 0;
@@ -18224,9 +18271,28 @@ index 00000000..66b32888
 +    case R_SKIPCLANK: snprintf(b, n, "%s", o->skip_clank ? "Skip" : "Play"); break;
 +    case R_SKIPINTRO: snprintf(b, n, "%s", o->skip_intro ? "Skip" : "Show"); break;
 +    case R_SKIPSTART: snprintf(b, n, "%s", !o->skip_press_start ? "Show" : o->skip_intro ? "Skip" : "Skip (with logos skipped)"); break;
++    case R_LANG:    snprintf(b, n, "%s", k_lang_names[o->language]); break;
++    case R_FPSCAP:  if (o->fps_cap > 60) snprintf(b, n, "%d fps (set in settings.txt)", o->fps_cap);
++                    else snprintf(b, n, "%s", o->fps_cap > 0 && o->fps_cap < 60 ? "Steady 30 fps (for slower PCs)" : "60 fps"); break;
++    case R_STARTSKIP: snprintf(b, n, "%s", o->start_skips_movies ? "Yes" : "No"); break;
++    case R_ALLCUTS: snprintf(b, n, "%s", o->all_cutscenes ? "Yes" : "No (as the game)"); break;
++    case R_FREELAND: snprintf(b, n, "%s", o->free_landing ? "Yes" : "No (as the game)"); break;
++    case R_TODDISC: snprintf(b, n, "%s", o->tod_discount ? "On" : "Off"); break;
++    case R_POWERPACK: snprintf(b, n, "%s", o->power_pack ? "On" : "Off"); break;
++    case R_CHEATS:  snprintf(b, n, "%s", o->cheats ? "On (no skill points or trophies)" : "Off"); break;
++    case R_SAVEUI:  snprintf(b, n, "%s", o->save_ui ? "On" : "Off"); break;
 +    case R_QUIT:    if (s_quit_armed) snprintf(b, n, "Press again to quit"); break;
 +    default: break;
 +    }
++    /* The game reads these once at start (save_ui is read at each save screen). */
++    const rsx_host_options* s = &s_game_start;
++    const int later = (id == R_LANG && o->language != s->language) || (id == R_FPSCAP && o->fps_cap != s->fps_cap)
++                   || (id == R_STARTSKIP && o->start_skips_movies != s->start_skips_movies)
++                   || (id == R_ALLCUTS && o->all_cutscenes != s->all_cutscenes)
++                   || (id == R_FREELAND && o->free_landing != s->free_landing)
++                   || (id == R_TODDISC && o->tod_discount != s->tod_discount)
++                   || (id == R_POWERPACK && o->power_pack != s->power_pack) || (id == R_CHEATS && o->cheats != s->cheats);
++    if (later) { const size_t l = strlen(b); snprintf(b + l, n - l, "  - after restart"); }
 +}
 +
 +static int cycle(int v, int n, int dir) { return ((v + dir) % n + n) % n; }
@@ -18298,6 +18364,15 @@ index 00000000..66b32888
 +    case R_SKIPCLANK: o->skip_clank = !o->skip_clank; break;
 +    case R_SKIPINTRO: o->skip_intro = !o->skip_intro; break;
 +    case R_SKIPSTART: o->skip_press_start = !o->skip_press_start; break;
++    case R_LANG:    o->language = cycle(o->language, (int)N_OF(k_lang_codes), dir); break;
++    case R_FPSCAP:  o->fps_cap = o->fps_cap == 0 ? 30 : 0; break;   /* 60 <-> steady 30 (a cap set by hand goes to 60) */
++    case R_STARTSKIP: o->start_skips_movies = !o->start_skips_movies; break;
++    case R_ALLCUTS: o->all_cutscenes = !o->all_cutscenes; break;
++    case R_FREELAND: o->free_landing = !o->free_landing; break;
++    case R_TODDISC: o->tod_discount = !o->tod_discount; break;
++    case R_POWERPACK: o->power_pack = !o->power_pack; break;
++    case R_CHEATS:  o->cheats = !o->cheats; break;
++    case R_SAVEUI:  o->save_ui = !o->save_ui; break;
 +    default: UNLOCK(); return;
 +    }
 +    o->gen++;
@@ -18349,7 +18424,7 @@ index 00000000..66b32888
 +    s_quit_armed = 0;
 +}
 +
-+/* Switch to page `page` (0 General, 1 Graphics, 2 Controls; wraps) at its
++/* Switch to page `page` (0 General, 1 Graphics, 2 Controls, 3 Game, TR_PAGE; wraps) at its
 + * first selectable row. */
 +static void set_page(int page)
 +{
@@ -19411,7 +19486,7 @@ index 00000000..66b32888
 +int rsx_host_ui_save_pick(int is_save, rsx_save_entry* entries, int n, int allow_new, int initial,
 +                          int (*del)(const char* dir))
 +{
-+    { const char* v = getenv("RACACIT_SAVE_UI"); if (v && *v == '0') return RSX_SAVE_PICK_UNAVAILABLE; }
++    { rsx_host_ui_load_options(); LOCK(); const int on = s_opt.save_ui; UNLOCK(); if (!on) return RSX_SAVE_PICK_UNAVAILABLE; }
 +    if (!s_win || !entries || n < 0) return RSX_SAVE_PICK_UNAVAILABLE;
 +    if (n > SV_MAX) n = SV_MAX;
 +    LOCK();
@@ -19990,10 +20065,10 @@ index 00000000..66b32888
 +#endif
 diff --git a/libs/video/rsx_host_ui.h b/libs/video/rsx_host_ui.h
 new file mode 100644
-index 00000000..63042d81
+index 00000000..e40452c5
 --- /dev/null
 +++ b/libs/video/rsx_host_ui.h
-@@ -0,0 +1,258 @@
+@@ -0,0 +1,270 @@
 +/*
 + * ps3recomp - host settings menu and on-screen display (RaCACiT)
 + *
@@ -20077,6 +20152,18 @@ index 00000000..63042d81
 +                           * the follow camera's angle (game/stubs.cpp racacit_follow_fov) */
 +    int   cam_dist;       /* the follow camera's distance behind Ratchet, percent of the
 +                           * game's (100 = as shipped, 50..200; racacit_follow_dist) */
++    /* The launcher's Game and Frame rate options, also in the menu so both have the same
++     * settings. The game reads them once at start (game/stubs.cpp), so a change made here
++     * applies from the next start; save_ui is read at each save screen. */
++    int   language;       /* 0 English, then k_lang_codes: the disc's translations (RACACIT_LANGUAGE) */
++    int   fps_cap;        /* RACACIT_FPS_CAP as set: 0 = 60 fps, 30 = steady 30, above 60 set by hand */
++    int   start_skips_movies; /* 1: START skips a movie (RACACIT_START_SKIPS_MOVIES)       */
++    int   all_cutscenes;  /* 1: every cutscene can be skipped (RACACIT_ALL_CUTSCENES_SKIPPABLE) */
++    int   free_landing;   /* 1: every moon and planet can be landed on (RACACIT_SPACE_FREE_LANDING) */
++    int   tod_discount;   /* 1: the Tools of Destruction owners' discount (RACACIT_TOD_DISCOUNT) */
++    int   power_pack;     /* 1: the Power pack pre-order bonus (RACACIT_POWER_PACK)    */
++    int   cheats;         /* 1: the Cheats page (RACACIT_CHEATS)                      */
++    int   save_ui;        /* 1: the save list screen (RACACIT_SAVE_UI)                */
 +    unsigned gen;          /* bumped on every change                           */
 +    unsigned swap_gen;     /* bumped when the swapchain must be rebuilt        */
 +    unsigned sampler_gen;  /* bumped when texture filtering changed            */
