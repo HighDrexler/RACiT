@@ -240,6 +240,7 @@ target_sources(${PROJECT_NAME} PRIVATE
     menu_archive.cpp
     desktop_mouse.cpp
     discord_rpc.cpp
+    frame_times.cpp
     ${LIBSRE_SOURCES}
     ${PS3RECOMP_SCAFFOLD}
     ${HLE_NID_TABLE}
