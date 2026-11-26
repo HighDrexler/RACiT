@@ -24,6 +24,10 @@ path = "src/bin/lift-spu-jobs.rs"
 name = "prepare-game-host"
 path = "src/bin/prepare-game-host.rs"
 
+[[bin]]
+name = "check-repo"
+path = "src/bin/check-repo.rs"
+
 [profile.release]
 opt-level = 3
 codegen-units = 1

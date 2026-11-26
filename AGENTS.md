@@ -19,15 +19,15 @@ Read `BUILDING.md` first. It has the build steps, the layout and how to change t
 ## Runtime changes
 
 - Every change to ps3recomp lives in `patches/ps3recomp-0001-racacit-runtime-fixes.patch`. Regenerate it as `BUILDING.md` says, with `core.autocrlf=false`, so line endings don't churn.
-- After regenerating it, check it: `grep -c $'\r$' patches/ps3recomp-0001-racacit-runtime-fixes.patch` (Git Bash on Windows) prints 0, no CRLF lines, and `git diff --stat` on the patch is about the size of your change. A patch diff that rewrites whole files means Git changed their line endings (on Windows, `git config --global core.autocrlf false`). Fix that before committing. The 1.2 commit rewrote three files that way, about 12,500 lines with no change, and every runtime change after it conflicted.
+- After regenerating it, run `rust/racit-lift/target/release/check-repo` (scripts/pipeline.sh runs it too and stops on a problem): no CRLF lines added, no line changed only by its line ending. Also check `git diff --stat` on the patch is about the size of your change. A patch diff that rewrites whole files means Git changed their line endings (on Windows, `git config --global core.autocrlf false`). Fix that before committing. The 1.2 commit rewrote three files that way, about 12,500 lines with no change, and every runtime change after it conflicted.
 - The runtime runs on Windows, macOS, Linux and Android. Text players see doesn't name one system's settings or tools unless it's inside that platform's `#ifdef`.
 - State that more than one thread reads or writes goes through atomics (or a lock), with the order spelled out in code. A comment that a racing thread "sees both or neither" isn't a guarantee in C, and ARM cores (Apple Silicon, Android) do reorder plain stores.
 - New on-screen elements don't cover existing ones: the FPS counter is at the top left, trophies at the top right.
 
 ## Pull requests
 
+- Run `check-repo` (rust/racit-lift) before committing. It also refuses tracked game data: executables, firmware modules, keys, disc images, packages, the game's audio and video, and any file over 10 MB.
 - A change that adds, removes or changes a setting (launcher option, in-game menu entry or `settings.txt` name) updates the Settings tables in `README.md` in the same PR: name, default and what it does, in words a player understands.
-
 - Every change reaches `main` through a pull request. Don't push to `main` directly, even for a release: a release is a set of merged PRs, then a release commit that only bumps versions and notes if one is needed.
 - `main` and the `v*` release tags are protected by the rulesets in `.github/rulesets/` (imported under Settings > Rules > Rulesets). If a push is refused, open a PR. Don't ask for a bypass.
 - One concern per PR, on current `main`.
