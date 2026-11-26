@@ -11,7 +11,7 @@ get_filename_component(RACACIT_ROOT "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
 # stayed a real call (to zig's software square root) even with AVX2 on. Neither changes
 # a result: x86's square root is correctly rounded, as the software one was.
 if(NOT MSVC)
-    add_compile_options(-fomit-frame-pointer -fno-math-errno)
+    add_compile_options("$<$<COMPILE_LANGUAGE:C,CXX>:-fomit-frame-pointer;-fno-math-errno>")
 endif()
 
 # ---- SDL2 (prebuilt by scripts/build_windows.sh into tools/sdl2-win) -------

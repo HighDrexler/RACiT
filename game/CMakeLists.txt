@@ -354,11 +354,21 @@ if(ANDROID AND SPU_SOURCES)
     set_source_files_properties(${SPU_SOURCES} PROPERTIES COMPILE_OPTIONS "-O3;-ffp-contract=off")
 endif()
 
-# app.rc carries the icon, the version block and the manifest, and needs a
-# resource compiler. Listing it as a source on a host that has none is not a
-# link error, it is a "no rule to make" for a file nothing can consume.
-if(WIN32 AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/app.rc")
-    target_sources(${PROJECT_NAME} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/app.rc")
+# The launcher hands off Unicode paths. Use UTF-8 for the game's narrow
+# file APIs, command line and environment on Windows 10 1903 and later.
+if(WIN32)
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/app.rc")
+        # A custom app.rc supplies its own application manifest.
+        enable_language(RC)
+        target_sources(${PROJECT_NAME} PRIVATE app.rc)
+    elseif(MSVC)
+        target_sources(${PROJECT_NAME} PRIVATE racacit.manifest)
+    else()
+        enable_language(RC)
+        target_sources(${PROJECT_NAME} PRIVATE racacit.rc)
+        set_property(SOURCE racacit.rc APPEND PROPERTY
+            OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/racacit.manifest")
+    endif()
 endif()
 
 target_include_directories(${PROJECT_NAME} PRIVATE
@@ -456,19 +466,17 @@ endif()
 # ---------------------------------------------------------------------------
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     target_compile_options(${PROJECT_NAME} PRIVATE
-        -Wall -Wextra -Wno-unused-parameter
-        -fno-strict-aliasing
+        "$<$<COMPILE_LANGUAGE:C,CXX>:-Wall;-Wextra;-Wno-unused-parameter;-fno-strict-aliasing>"
     )
 elseif(MSVC)
     target_compile_options(${PROJECT_NAME} PRIVATE
-        /W3 /wd4100 /wd4244 /wd4267
-        /Zc:__cplusplus         # report correct __cplusplus value
+        "$<$<COMPILE_LANGUAGE:C,CXX>:/W3;/wd4100;/wd4244;/wd4267;/Zc:__cplusplus>"
         # ppu_recomp.h defines PPU_FENCE, the lowering of the guest's
         # sync/lwsync/eieio/isync, and in C that is <stdatomic.h>. The lifter
         # writes C++ by default, but --single-file writes ppu_recomp.c, and a
         # port that took it would not compile without this. The runtime's own
         # build already carries the same flag for the same reason.
-        /experimental:c11atomics
+        "$<$<COMPILE_LANGUAGE:C,CXX>:/experimental:c11atomics>"
     )
     target_compile_definitions(${PROJECT_NAME} PRIVATE
         _CRT_SECURE_NO_WARNINGS
