@@ -26,6 +26,8 @@ Read `BUILDING.md` first. It has the build steps, the layout and how to change t
 
 ## Pull requests
 
+- A change that adds, removes or changes a setting (launcher option, in-game menu entry or `settings.txt` name) updates the Settings tables in `README.md` in the same PR: name, default and what it does, in words a player understands.
+
 - Every change reaches `main` through a pull request. Don't push to `main` directly, even for a release: a release is a set of merged PRs, then a release commit that only bumps versions and notes if one is needed.
 - `main` and the `v*` release tags are protected by the rulesets in `.github/rulesets/` (imported under Settings > Rules > Rulesets). If a push is refused, open a PR. Don't ask for a bypass.
 - One concern per PR, on current `main`.
