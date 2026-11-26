@@ -8008,10 +8008,10 @@ index f073f327..e08ef642 100644
  }
 diff --git a/libs/video/rsx_be_proxy.c b/libs/video/rsx_be_proxy.c
 new file mode 100644
-index 00000000..8e7ada64
+index 00000000..32aaab2a
 --- /dev/null
 +++ b/libs/video/rsx_be_proxy.c
-@@ -0,0 +1,922 @@
+@@ -0,0 +1,934 @@
 +/*
 + * ps3recomp - the draw engine's backend on its own thread (default; RSX_BACKEND_THREAD=0 = off)
 + *
@@ -8189,6 +8189,10 @@ index 00000000..8e7ada64
 +/* Live from Settings > Graphics > Frame pacing (rsx_host_ui.c); -1 = not set
 + * there, RACACIT_PRESENT_PACE decides. */
 +volatile int g_racacit_present_pace = -1;
++/* The worker: where the record being replayed ends (px_pace_present, which
++ * runs on the worker too, checks for published work behind the present it
++ * holds). */
++static unsigned long long s_rec_end;
 +static void px_pace_present(u32 surface)
 +{
 +    static u32 pc_last_surface; static unsigned long long pc_last_call;
@@ -8243,6 +8247,13 @@ index 00000000..8e7ada64
 +                at = ready + hold;
 +            }
 +        }
++        /* Never while more work is already queued behind this present: the
++         * hold runs on this worker, which also translates the next frame, so
++         * holding then only stalls it, the producer waits on the two-present
++         * throttle and the learnt period grows -- update 1.20 settled at
++         * 30 fps that way (33 fps paced, 57 unpaced, same build). Pace only a
++         * game that is ahead, which is what the hold is for. */
++        if (at > ready && atomic_load_explicit(&s_w, memory_order_acquire) > s_rec_end) at = ready;
 +    }
 +    if (at > ready) px_wait_until(at);
 +    const unsigned long long now = px_us();
@@ -8522,6 +8533,7 @@ index 00000000..8e7ada64
 +        }
 +        const u8* rec = s_ring + (u32)(r % PX_RING_BYTES);
 +        const u32 n = ((const px_hdr*)rec)->bytes;
++        s_rec_end = r + n;
 +        if (s_stats > 0) {
 +            const unsigned long long t0 = px_us();
 +            px_replay(rec);
