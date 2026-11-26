@@ -14,8 +14,9 @@ is CHECKED: the instructions at the USA address and at the converted address mus
 match (branch targets and immediates masked). A mismatch stops here, before
 anything is built. Without it the conversion is not checked, and says so.
 
-The copy's patch_lift.py stops the build if a hook did not land: most of its
-patches skip in silence when their target is not found.
+The copy's patch-lift (rust/racit-lift) stops the build if a hook did not land
+(versions/required-hooks.txt): most of its patches skip in silence when their target
+is not found.
 """
 import bisect, filecmp, hashlib, json, os, re, shutil, struct, subprocess, sys
 
@@ -23,13 +24,13 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Files that hold guest addresses.
 ADDRESS_FILES = ['game/stubs.cpp', 'game/main.cpp', 'game/hot_ppu.h', 'game/discord_rpc.cpp',
-                 'game/mod_hookable.h', 'scripts/patch_lift.py',
-                 'scripts/fix_vmx_alias.py', 'scripts/name_pass.py', 'scripts/lift_spu_jobs.py',
-                 'scripts/lift_policy_modules.py', 'scripts/find_submodules.py',
+                 'game/mod_hookable.h', 'rust/racit-lift/src/bin/patch-lift.rs',
+                 'scripts/name_pass.py', 'rust/racit-lift/src/bin/lift-spu-jobs.rs',
+                 'scripts/find_submodules.py',
                  'game/hot_spu_modules.cmake', 'scripts/spu_submodules.txt']
 # What the build needs from the repository; generated folders are left out.
-COPY_DIRS = ['game', 'scripts', 'windows', 'versions']
-SKIP_DIRS = {'src', 'spu', 'prx', '__pycache__'}
+COPY_DIRS = ['game', 'scripts', 'windows', 'versions', 'rust']
+SKIP_DIRS = {'src', 'spu', 'prx', '__pycache__', 'target'}   # rust/ keeps its src
 
 # Where each kind of address sits in BCES00511, measured on its ELF.
 VERSIONS = {
@@ -42,29 +43,20 @@ VERSIONS = {
         # address is right): the check skips them.
         'changed': {0x0004E7B8: 'movie queue: a language lookup is added at its start',
                     0x00051CE4: 'a Lua binding table: larger stack frame',
-                    0x004C4C68: 'hero part masks (func_004C46FC) compiled differently; patch_lift #24 is USA-only'},
+                    0x004C4C68: 'hero part masks (func_004C46FC) compiled differently; patch-lift #24 is USA-only'},
     },
 }
 
-# Every hook patch_lift.py puts into the USA lift. Add a new hook's name here.
-REQUIRED_HOOKS = r"""
-
-# Added by scripts/retarget.py: on another disc a wrong address must stop the build.
-REQUIRED = '''racacit_armor_look racacit_bink_opened racacit_bonus_grant racacit_bonus_owned
+# Every hook patch-lift puts into the USA lift (add a new hook's name here), written to the copy's
+# versions/required-hooks.txt: on another disc a wrong address must stop the build.
+REQUIRED_HOOKS = '''racacit_armor_look racacit_bink_opened racacit_bonus_grant racacit_bonus_owned
 racacit_caster_box racacit_equip_skin racacit_follow_dist racacit_follow_dist_unscale racacit_follow_fov
 racacit_follow_fov_unscale racacit_force_abort racacit_front_end_cards racacit_gcm_put_moved racacit_jb_pop
 racacit_jb_push racacit_level_change racacit_longjmp racacit_lua_exec_hook racacit_lua_throw_hook
 racacit_luac_trace racacit_movie_update_hook racacit_skillpoint_blocked racacit_skin_armor_rows
 racacit_skin_armor_selected racacit_snd_play_hook racacit_snd_start_end racacit_snd_stop_hook
 racacit_stream_pause_hook racacit_wait_begin racacit_wait_end racit_camera_peek
-racit_camera_turn racit_publish_menu_keyboard'''.split()
-REQUIRED += ['racacit: get re-read', 'racacit: on the disc']
-_blob = ''.join(open(p, encoding='latin-1').read() for p in glob.glob(os.path.join(RECOMP, 'ppu_recomp_*.cpp')))
-_missing = [r for r in REQUIRED if r not in _blob]
-if _missing:
-    sys.exit('patch_lift: hooks not applied: ' + ', '.join(_missing))
-print('patch_lift: all %d hooks applied' % len(REQUIRED))
-"""
+racit_camera_turn racit_publish_menu_keyboard'''.split() + ['racacit: get re-read', 'racacit: on the disc']
 
 
 class Retarget:
@@ -132,10 +124,10 @@ class Retarget:
         short = r'(?<![0-9A-Za-z_])(0x)([0-9A-F]{5,6})(u?)\b'
         if name == 'scripts/name_pass.py':
             n = re.sub(short, self.literal, n)
-        elif name in ('scripts/lift_spu_jobs.py', 'scripts/lift_policy_modules.py', 'scripts/find_submodules.py'):
+        elif name in ('rust/racit-lift/src/bin/lift-spu-jobs.rs', 'scripts/find_submodules.py'):
             low = self.v['ranges'][0][0]
             n = re.sub(short, lambda m: self.literal(m) if int(m.group(2), 16) >= low else m.group(0), n)
-        elif name in ('game/stubs.cpp', 'game/main.cpp', 'game/discord_rpc.cpp', 'scripts/patch_lift.py'):
+        elif name in ('game/stubs.cpp', 'game/main.cpp', 'game/discord_rpc.cpp', 'rust/racit-lift/src/bin/patch-lift.rs'):
             n = re.sub(r'(?<![0-9A-Za-z_])(0x)([0-9A-F]{6})(u?)\b', self.literal, n)
         return n
 
@@ -250,7 +242,8 @@ def main():
 
     for top in COPY_DIRS:
         for folder, dirs, files in os.walk(os.path.join(ROOT, top)):
-            dirs[:] = [d for d in dirs if d not in SKIP_DIRS and not d.startswith('build')]
+            dirs[:] = [d for d in dirs if (d not in SKIP_DIRS or (top == 'rust' and d == 'src'))
+                       and not d.startswith('build')]
             to = os.path.join(work, os.path.relpath(folder, ROOT))
             os.makedirs(to, exist_ok=True)
             for f in files:
@@ -259,9 +252,10 @@ def main():
                     shutil.copy2(src, dst)
 
     for name, text in out.items():
-        if name == 'scripts/patch_lift.py':
-            text = text.rstrip('\n') + '\n' + REQUIRED_HOOKS
         write_if_changed(os.path.join(work, name), text)
+    write_if_changed(os.path.join(work, 'versions', 'required-hooks.txt'),
+                     '# Written by scripts/retarget.py: patch-lift stops unless the lift has each of these.\n'
+                     + ''.join(h + '\n' for h in REQUIRED_HOOKS))
 
     # The copy builds this disc and only this disc (scripts/pipeline.sh checks the profile).
     prof = json.load(open(os.path.join(ROOT, 'versions', 'profiles.json'), encoding='utf-8'))

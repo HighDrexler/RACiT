@@ -1,0 +1,36 @@
+[package]
+name = "racit-lift"
+version = "0.1.0"
+edition = "2024"
+description = "Build-time patching and checks of the lifted RACiT sources"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "check-lift-hooks"
+path = "src/bin/check-lift-hooks.rs"
+
+[[bin]]
+name = "patch-lift"
+path = "src/bin/patch-lift.rs"
+
+[[bin]]
+name = "lift-spu-jobs"
+path = "src/bin/lift-spu-jobs.rs"
+
+[[bin]]
+name = "prepare-game-host"
+path = "src/bin/prepare-game-host.rs"
+
+[profile.release]
+opt-level = 3
+codegen-units = 1
+lto = "thin"
+
+[dependencies]
+memchr = "2.8.3"
+regex = "1.13.2"
+serde_json = "1.0.154"
+sha2 = "0.11.1"

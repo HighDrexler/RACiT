@@ -1,5 +1,5 @@
 """update120_unlock_hooks.py RECOMP: add the frame-rate unlock hooks
-(patch_lift.py steps 23, 24 and 25 for the disc) to the 1.20 hook recipe.
+(patch-lift steps 23, 24 and 25 for the disc) to the 1.20 hook recipe.
 
 RECOMP is an unhooked 1.20 lift (ppu_recomp_*.cpp straight from the lifter).
 Each function below is located by its 1.20 address (matched to the disc's

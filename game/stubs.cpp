@@ -142,7 +142,7 @@ extern "C" void ps3_load_prx_modules(void)
  */
 
 /* ---------------------------------------------------------------------------
- * Guest setjmp/longjmp (Lua error handling) -- see scripts/patch_lift.py.
+ * Guest setjmp/longjmp (Lua error handling) -- see patch-lift (rust/racit-lift).
  * A per-thread stack of host jmp_bufs keyed by the 16-byte-aligned guest
  * jmp_buf address (the guest routines align it the same way).
  * -----------------------------------------------------------------------*/
@@ -207,7 +207,7 @@ __attribute__((constructor)) static void racacit_register_npdrm(void)
  * language (cellSysutilGetSystemParamInt, CELL_SYSUTIL_SYSTEMPARAM_ID_LANG)
  * and loads that translation from the disc. The USA disc has the text and
  * speech of all six; its list of allowed languages stops at en, fr, es, and
- * scripts/patch_lift.py #15 opens it. The runtime's answer is always 1,
+ * patch-lift (rust/racit-lift) #15 opens it. The runtime's answer is always 1,
  * English (US). This handler gives the chosen one instead and answers
  * every other id exactly as the runtime's table does (v91: LANG and
  * ENTER_BUTTON_ASSIGN 1 = Cross, 0x141 and 0x152 1, the rest of its known
@@ -385,7 +385,7 @@ static void racacit_lua_alltrace_init(void)   /* first script execute(): setting
 }
 
 /* racacit: RACACIT_LUA_CTRACE=1 (diagnostic) -- the entry of the script
- * functions patch_lift.py lists (scenes, speech, cameras, control), with up to
+ * functions patch-lift lists (scenes, speech, cameras, control), with up to
  * four arguments. Lua 5.1 with 8-byte TValues (value, then type; numbers are
  * floats): L->top at +8, L->base at +12. Repeats of one name are thinned. */
 extern "C" void vm_write32(uint64_t a, uint32_t v);
@@ -397,7 +397,7 @@ extern "C" void ds_player_stop_lines(int all);
 extern "C" void ds_player_stream_pause(uint32_t stream, int on);
 extern "C" unsigned long long ps3_qpc_us(void);
 /* func_0099B4E0, SCREAM's stream pause callback (r3 the stream, r4 paused), patched in by
- * patch_lift.py. It fires for every stream at every start too, paused then resumed: only a
+ * patch-lift. It fires for every stream at every start too, paused then resumed: only a
  * stream that stays paused means anything (ds_player.c). RACACIT_DS_DEBUG=1 logs them. */
 extern "C" void racacit_stream_pause_hook(ppu_context* ctx)
 {
@@ -487,7 +487,7 @@ extern "C" void racacit_luac_trace(ppu_context* ctx, const char* name)
  * than a radius from the sphere's centre in today's camera space, the box is
  * rebuilt around that point, and from then on follows the sphere every frame
  * for as long as the game leaves it untouched. A box the game keeps current
- * is left exactly as computed. patch_lift.py calls this before the box is read.
+ * is left exactly as computed. patch-lift calls this before the box is read.
  * RACACIT_KEEP_STALE_BOXES=1 turns it off.
  * -----------------------------------------------------------------------*/
 extern "C" void vm_write32(uint64_t a, uint32_t v);
@@ -542,7 +542,7 @@ extern "C" void racacit_caster_box(uint32_t moby)
  * Insomniac's movie layer keeps a table of 32-byte slots: slot+0 is the BINK*,
  * slot+8 "stopped", slot+9 "loop". func_006511BC is the per-frame update for a
  * slot and returns 1 while the movie is still playing, 0 once it has ended --
- * its caller then stops and closes it. scripts/patch_lift.py routes that
+ * its caller then stops and closes it. patch-lift (rust/racit-lift) routes that
  * return value and every BinkOpen (func_009A8798, called from func_0065282C)
  * through the two hooks below. A START press during a one-shot movie makes
  * the update report "ended", so the game's own end-of-movie path runs exactly
@@ -804,7 +804,7 @@ extern "C" void racacit_front_end_menu(ppu_context* ctx)
  * options reach the three queue functions (func_0004E7B8 movie, 0004E598
  * cinematic, 0004E6F0 scene) as r5, with the abort flag at +0x61 -- the
  * option defaults to false, which is why some cutscenes could never be
- * skipped. patch_lift.py calls this at each queue function's entry.
+ * skipped. patch-lift calls this at each queue function's entry.
  * -----------------------------------------------------------------------*/
 extern "C" void vm_write8(uint64_t a, uint8_t v);
 extern "C" void racacit_force_abort(uint32_t opts, int kind)
@@ -842,7 +842,7 @@ extern "C" void racacit_force_abort(uint32_t opts, int kind)
  * resync, the game's "GPU sit and spin" watchdog, and a level that never
  * appeared while its audio played.
  *
- * patch_lift.py calls this after each of the two put writes: wait = 0 wakes
+ * patch-lift calls this after each of the two put writes: wait = 0 wakes
  * the walker (the title waits for idle itself), wait = 1 blocks until the
  * walker has caught up, which is what the hardware guarantees here.
  * -----------------------------------------------------------------------*/
@@ -864,7 +864,7 @@ extern "C" void racacit_gcm_put_moved(int wait)
  * the given id, so LOAD on any save goes straight to that level -- e.g. 2 =
  * zolar_forest, the first Ratchet level. Ids come from the name table at
  * 0xDE1820 (1 great_clock_a, 2 zolar_forest, 3 space_sector_1, ...).
- * patch_lift.py calls this at the function's entry.
+ * patch-lift calls this at the function's entry.
  * -----------------------------------------------------------------------*/
 /* "Clank levels: Skip" in the Settings menu (RACACIT_SKIP_CLANK=1): a load into
  * one of Clank's Great Clock levels goes to the level that Great Clock level
@@ -885,7 +885,7 @@ extern "C" void racacit_gcm_put_moved(int wait)
  * and the game's other cameras keep their own. Its field of view (+0x90, in
  * degrees: 75.9 on Zolar) eases toward a
  * target (+0x1D4) every frame (func_0003E874): racacit_follow_fov scales the
- * target there (patch_lift.py #18), so a change glides in like the game's own
+ * target there (patch-lift #18), so a change glides in like the game's own
  * zooms, and the camera manager carries the angle on into the struct at
  * 0x00F511A0 (+0x90) that the picture is drawn from. The scripts'
  * get_follow_cam_fov (func_0022CDC0) gets the angle back unscaled.
@@ -940,7 +940,7 @@ extern "C" double racacit_follow_dist_unscale(double d)
     return k == 100 ? d : d * (100.0 / k);
 }
 
-/* The game's owner bonuses (patch_lift.py #19; RACACIT_BONUSES=0 leaves the
+/* The game's owner bonuses (patch-lift #19; RACACIT_BONUSES=0 leaves the
  * game's own answers). On a PS3 the "NP DRM" thread (func_0029AFCC) looks for
  * the pre-order licences (/dev_hdd0/game/<ACiT id>/USRDIR/preorder_*.edat) and
  * for the other two games installed (/dev_hdd0/game/<id>/PARAM.SFO) and keeps
@@ -1036,7 +1036,7 @@ extern "C" void racacit_bonus_grant(uint32_t player, uint32_t pool)
 }
 
 /* Armor looks, picked in the game's own Extras > Skins menu (settings.txt
- * RACACIT_ARMOR_LOOK; scripts/patch_lift.py #16 and #17): Ratchet wears the
+ * RACACIT_ARMOR_LOOK; patch-lift (rust/racit-lift) #16 and #17): Ratchet wears the
  * chosen armor's look -- 1 Holoflux, 2 Ectoflux, 3 Thermaflux, 4 Hyperflux --
  * whichever armor he has. Only his part mask (func_001709B4) asks: the damage he
  * takes is the worn armor's, set with it (hero +0x17F8), and the save, the
@@ -1396,7 +1396,7 @@ __attribute__((constructor)) static void racacit_collrec_install(void)
 }
 
 /* ---------------------------------------------------------------------------
- * Frame-wait hooks (scripts/patch_lift.py step 10): the entry and the exit
+ * Frame-wait hooks (patch-lift (rust/racit-lift) step 10): the entry and the exit
  * of the game's SPU waits -- job_wait func_00696614 and batch_wait
  * func_00660924. render_build_views (func_004DFDF0) makes ~9 submit/wait
  * round trips per view per frame. With SPU_KICK_ON_WAIT=1 the entry also
@@ -1540,7 +1540,7 @@ static int racacit_lua_run(ppu_context* ctx, uint32_t L, const char* code, int q
  * in a save a cheat was used in -- the mark is byte +0xE0C3 of the player
  * record, which is GAME.SAV itself (padding before the save counter at
  * +0xE0C4; no game code reads or writes it). A copy of the save from before
- * keeps no mark. Skill points: func_0021EF30 (patch_lift.py #20); trophies:
+ * keeps no mark. Skill points: func_0021EF30 (patch-lift #20); trophies:
  * the runtime's unlock gate (sceNpTrophySetUnlockGate). The Insomniac Museum
  * is not a destination (owner: it stays behind the 40 Zoni and Vorselon).
  * ======================================================================== */
@@ -1912,7 +1912,7 @@ extern "C" void racacit_wait_end(void)
     }
 }
 
-/* racacit: sound starts (scripts/patch_lift.py #12): tag 0 = func_00577ED8
+/* racacit: sound starts (patch-lift (rust/racit-lift) #12): tag 0 = func_00577ED8
  * (play a sound spec), 1 = func_0057AEC0 (the backend virtual it ends in,
  * also called directly by the sound-instance layer). RACACIT_SND_TRACE=1
  * logs each new (tag, r4, caller chain) the first time it plays, with the
@@ -2086,7 +2086,7 @@ extern "C" void racacit_snd_start_end(void)
     t_ds_cat = 0; t_ds_hcat = 0; t_ds_in = 0; t_ds_inst = 0;
 }
 
-/* A sound instance stopped (scripts/patch_lift.py #12: func_006DE478 sets the
+/* A sound instance stopped (patch-lift (rust/racit-lift) #12: func_006DE478 sets the
  * instance's stopping flag and stops its SCREAM sound, func_006DDC58 stops it
  * at once; r3 = the instance): the controller's copy ends with it. */
 static void racacit_hb_remove(uint32_t inst);
@@ -2351,7 +2351,7 @@ extern "C" void racacit_snd_play_hook(ppu_context* ctx, int tag)
     __sync_lock_release(&mu);
 }
 
-// Disc-only 1.20 fixes begin. (scripts/prepare_game_host.py drops them from the update 1.20 build: 1.20 has them natively.)
+// Disc-only 1.20 fixes begin. (prepare-game-host in rust/racit-lift drops them from the update 1.20 build: 1.20 has them natively.)
 /* ---------------------------------------------------------------------------
  * Update 1.20's hero part masks in the disc build
  *
@@ -2369,7 +2369,7 @@ extern "C" void racacit_snd_play_hook(ppu_context* ctx, int tag)
  *    last two);
  *  - groups 0 and 2: row 2's columns 1 and 2 swap, and an unset row (3) adds
  *    no part (the disc read the byte after the row's three).
- * patch_lift.py calls this where func_004C46FC's mask paths meet
+ * patch-lift calls this where func_004C46FC's mask paths meet
  * (loc_004C4C68) and it writes both masks as 1.20 would; the rows' bound (4
  * in 1.20, 3 on the disc) and func_004C3C44's default are patched in place.
  * Everything here is a disc 1.00 address: only that lift calls it.

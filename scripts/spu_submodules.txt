@@ -1,7 +1,7 @@
 # Job modules a parent job loads above itself:
 #   <module EBOOT EA> <LS base> <parent job GUID (LS 0x100)>   (hex)
 # Generated and merged by scripts/find_submodules.py from SPU_DUMP_JOBS snapshots;
-# lifted by scripts/lift_spu_jobs.py --sub as content-matched overlays at these bases.
+# lifted by lift-spu-jobs --sub as content-matched overlays at these bases.
 AD8F80 3F580 42061402431f0282434b1902421c4b82
 AD8F80 3F580 4248d602429f248242830d024395c782
 AD8F80 3F580 431afa02426b5a8242b23d02433b2182
