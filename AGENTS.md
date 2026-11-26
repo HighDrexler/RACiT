@@ -12,15 +12,21 @@ Read `BUILDING.md` first. It has the build steps, the layout and how to change t
 
 ## Game code hooks
 
+- Comments and docs say which game versions code runs on, and check it against the 1.20 recipe: a hook patch-lift adds for the disc usually has a 1.20 recipe entry too.
 - A hook in the generated code goes into both lifts: the disc's (patch-lift) and update 1.20's recipe (`versions/BCUS98124-1.20-hooks.json`, fingerprinted edits per function). Find the 1.20 function by its normalized code, not by its address.
 - The build stops when a required hook is missing or applied twice. Keep it that way.
 
 ## Runtime changes
 
 - Every change to ps3recomp lives in `patches/ps3recomp-0001-racacit-runtime-fixes.patch`. Regenerate it as `BUILDING.md` says, with `core.autocrlf=false`, so line endings don't churn.
+- After regenerating it, check it: `grep -c $'\r$' patches/ps3recomp-0001-racacit-runtime-fixes.patch` (Git Bash on Windows) prints 0, no CRLF lines, and `git diff --stat` on the patch is about the size of your change. A patch diff that rewrites whole files means Git changed their line endings (on Windows, `git config --global core.autocrlf false`). Fix that before committing. The 1.2 commit rewrote three files that way, about 12,500 lines with no change, and every runtime change after it conflicted.
+- The runtime runs on Windows, macOS, Linux and Android. Text players see doesn't name one system's settings or tools unless it's inside that platform's `#ifdef`.
+- State that more than one thread reads or writes goes through atomics (or a lock), with the order spelled out in code. A comment that a racing thread "sees both or neither" isn't a guarantee in C, and ARM cores (Apple Silicon, Android) do reorder plain stores.
+- New on-screen elements don't cover existing ones: the FPS counter is at the top left, trophies at the top right.
 
 ## Pull requests
 
+- Every change reaches `main` through a pull request. Don't push to `main` directly, even for a release: a release is a set of merged PRs, then a release commit that only bumps versions and notes if one is needed.
 - One concern per PR, on current `main`.
 - The description says what was wrong, who it hits and how it showed, what the change does, and only the checks that actually ran, with their scope (which platform, which game version).
 - A PR that changes the build reaches gameplay on 1.00 and 1.20 before it's ready. Keep owner saves untouched: test on copies.
