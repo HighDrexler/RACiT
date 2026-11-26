@@ -167,10 +167,9 @@ fn lifted(name: &str, ok: bool) -> Result<()> {
     if ok {
         Ok(())
     } else {
-        Err(
-            format!("{name}: lifter FAILED; registry unchanged. See out/spu_jobs/{name}.lift.log")
-                .into(),
-        )
+        Err(format!(
+            "{name}: lifter FAILED; registry unchanged. See out/spu_jobs/{name}.lift.log"
+        ))
     }
 }
 
