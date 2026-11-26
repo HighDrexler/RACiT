@@ -289,6 +289,10 @@ static const std::vector<Opt>& opts()
         { "Game", "RACACIT_SAVE_UI", "Save list screen", "1", { { "1", "On" }, { "0", "Off" } } },
         { "Game", "RACACIT_FPS", "FPS counter", "0", { { "0", "Off" }, { "1", "On" } } },
         { "Game", "RACACIT_DISCORD", "Discord status", "1", { { "1", "On" }, { "0", "Off" } } },
+        // Skip puzzles (game/skip_puzzles.cpp, also Settings > General > Puzzles in the game):
+        // auto solves each as it starts; key = the Skip puzzle key (Key bindings) or R3 + Down
+        // held a second on a controller.
+        { "Game", "RACACIT_SKIP_PUZZLES", "Puzzles", "key", { { "key", "Skip button (hold Square or F2)" }, { "off", "Play" }, { "auto", "Solve at once" } } },
         { "Game", "RACACIT_SKIP_CLANK", "Clank levels (testing)", "0", { { "0", "Play" }, { "1", "Skip" } } },
     };
     return o;
@@ -619,6 +623,7 @@ static const Bind k_binds[] = {
     { "LS_LEFT", "Move (left stick)", "Left", "A" },
     { "LS_RIGHT", "Move (left stick)", "Right", "D" },
     { "WALK", "Move (left stick)", "Walk (hold: half speed)", "Left Alt" },
+    { "SKIP_PUZZLE", "Puzzles (Settings: Puzzles = Skip button)", "Skip puzzle", "F2" },
     { "RS_UP", "Camera keys (right stick; the mouse turns it too)", "Camera up", "I" },
     { "RS_DOWN", "Camera keys (right stick; the mouse turns it too)", "Camera down", "K" },
     { "RS_LEFT", "Camera keys (right stick; the mouse turns it too)", "Camera left", "J" },

@@ -173,7 +173,11 @@ static const char* kSettingsTemplateRest =
     "# A relative GAME path starts in the launcher folder.\r\n"
     "# --- Cutscenes ---\r\n"
     "RACACIT_START_SKIPS_MOVIES=1\r\n"
-    "RACACIT_ALL_CUTSCENES_SKIPPABLE=1\r\n";
+    "RACACIT_ALL_CUTSCENES_SKIPPABLE=1\r\n"
+    "# --- Puzzles (also Settings > General > Puzzles in the game) ---\r\n"
+    "# key = a SKIP prompt shows during each puzzle: hold Square a second, press the skip key\r\n"
+    "# (RACACIT_BIND_SKIP_PUZZLE, F2) or hold R3 + Down to solve it. off = play them, auto = solve each as it starts.\r\n"
+    "RACACIT_SKIP_PUZZLES=key\r\n";
 
 static const char* kIniTemplate =
     "# RACiT Launcher options (NAME=value)\r\n"

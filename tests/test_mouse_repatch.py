@@ -24,7 +24,7 @@ PATCH_LIFT = ROOT / 'scripts' / 'patch_lift.py'
 def recipe():
     """MOUSE_CAMERAS, _DISC_CAMERAS and OLD_FOLLOW_MOUSE, read without running patch_lift.py."""
     tree = ast.parse(PATCH_LIFT.read_text(encoding='utf-8'))
-    wanted = {'MOUSE_CAMERAS', 'OLD_FOLLOW_MOUSE', 'OLD_MOUSE_DECL', '_DISC_CAMERAS'}
+    wanted = {'MOUSE_CAMERAS', 'OLD_FOLLOW_MOUSE', 'OLD_MOUSE_DECL', '_DISC_CAMERAS', 'PUZZLE_HOOKS', '_DISC_PUZZLES'}
     names = {}
     for node in tree.body:
         if isinstance(node, ast.Assign) and len(node.targets) == 1 and getattr(node.targets[0], 'id', '') in wanted:
@@ -69,6 +69,13 @@ def camera_function(func, edits):
     return '\n'.join(lines) + '\n'
 
 
+def puzzle_functions(names):
+    """The skip-puzzle functions (step 25), each with only its anchor line: the disc pass
+    stops without them."""
+    return ''.join('void %s(ppu_context* ctx) {\n        ctx->gpr[3] = 0;\n        %s\n        ctx->gpr[4] = 1;\n}\n'
+                   % (func, names['PUZZLE_HOOKS'][name][0]) for name, func in sorted(names['_DISC_PUZZLES'].items()))
+
+
 def old_patched_follow(names, update120=False):
     """func_000459D4 as v1.0.0's step 22 (or its update 1.20 recipe) left it."""
     old = names['OLD_FOLLOW_MOUSE'][3:] if update120 else names['OLD_FOLLOW_MOUSE']
@@ -92,6 +99,7 @@ class MouseRepatch(unittest.TestCase):
         for name, func in sorted(cameras.items()):
             parts.append(follow if name == 'follow' else self.lock_function(func) if name == 'lock'
                          else camera_function(func, names['MOUSE_CAMERAS'][name]))
+        parts.append(puzzle_functions(names))
         path = Path(directory) / 'ppu_recomp_000.cpp'
         path.write_text(''.join(parts), encoding='utf-8')
         return path
