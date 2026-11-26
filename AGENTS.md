@@ -24,3 +24,9 @@ Read `BUILDING.md` first. It has the build steps, the layout and how to change t
 - One concern per PR, on current `main`.
 - The description says what was wrong, who it hits and how it showed, what the change does, and only the checks that actually ran, with their scope (which platform, which game version).
 - A PR that changes the build reaches gameplay on 1.00 and 1.20 before it's ready. Keep owner saves untouched: test on copies.
+
+## Releases
+
+- A release is built from one commit on `main`, the same for every platform. The draft release's target is that commit's full SHA, not `main`, and its notes say `Built from <sha>`.
+- Before building a platform's zip for a draft, check out that SHA (`git checkout <sha>`), not the tip of `main`. If `main` has moved and the release should include the new commits, move the draft's target and the notes to the new SHA, and rebuild every zip already on the draft from it.
+- Each zip goes on the same draft. Whoever publishes checks that every zip was built from the SHA in the notes. The tag is created at that SHA when the draft is published.
