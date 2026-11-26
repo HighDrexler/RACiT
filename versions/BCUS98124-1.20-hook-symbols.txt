@@ -7,6 +7,8 @@
 @function 004A2DF4
 racacit_armor_look 1
 racacit_bink_opened 2
+racacit_bonus_grant 1
+racacit_bonus_owned 1
 racacit_caster_box 1
 racacit_clock_tick 1
 racacit_equip_skin 1
@@ -28,6 +30,7 @@ racacit_lua_exec_hook 1
 racacit_lua_throw_hook 1
 racacit_luac_trace 43
 racacit_movie_update_hook 1
+racacit_skillpoint_blocked 1
 racacit_new60 23
 racacit_skin_armor_rows 1
 racacit_skin_armor_selected 1
