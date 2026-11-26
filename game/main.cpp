@@ -54,6 +54,10 @@ extern "C" void ppu_threads_dump_stacks(ppu_context* main_ctx);
 #include <sys/mman.h>
 #include <unistd.h>   /* _exit */
 #endif
+#if defined(__linux__) && !defined(__ANDROID__)
+#include <filesystem>
+#include <fstream>
+#endif
 
 #ifdef __ANDROID__
 /* SDLActivity loads libmain.so and calls SDL_main: SDL.h renames main(). */
@@ -114,6 +118,7 @@ extern int32_t g_sys_process_exit_code;
 uint8_t* vm_base = nullptr;
 extern "C" void racacit_ring_dump(void);   /* spu_channels.c: RACACIT_LINE_RING */
 extern "C" uint32_t ppu_hle_inject_base;   /* libs/video/cellGcmSys.c */
+extern "C" uint32_t sys_mapper_base;       /* runtime/syscalls/sys_memory.c */
 extern uint32_t ppu_vm_size;                  /* ppu_loader.cpp: the OOB guard */
 
 /* At a stall: the state of the game's SPU job queues, always (owner logs have
@@ -258,6 +263,10 @@ static int rsx_backend_init_linux(uint32_t w, uint32_t h, const char* title)
             g_rsx_name    = "Vulkan";
             return 0;
         }
+#    if defined(__linux__) && !defined(__ANDROID__)
+        const char* window = getenv("PS3RECOMP_VK_WINDOW");
+        if (window && *window && *window != '0') return -1;
+#    endif
         fprintf(stderr, "[rsx] Vulkan init failed -- falling back to the null backend\n");
     }
 #  endif
@@ -303,6 +312,35 @@ extern "C" unsigned ppu_boot_frames_presented(void)
     return (unsigned)g_frames_presented;
 }
 
+#ifdef __APPLE__
+/* RACACIT_LOAD_STATS=1 (macOS): "[load-stats]" lines with ms since the process
+ * started -- the renderer's init, the first event pump, every frame-clock pass
+ * that went 100 ms or more without pumping window events (macOS shows the
+ * beach ball after ~2 s of that), the main menu and each level change. */
+#include <sys/sysctl.h>
+#include <sys/time.h>
+extern "C" int racacit_load_stats_on(void)
+{
+    static int on = -1;
+    if (on < 0) { const char* e = getenv("RACACIT_LOAD_STATS"); on = (e && *e == '1') ? 1 : 0; }
+    return on;
+}
+extern "C" double racacit_since_start_ms(void)
+{
+    static double start = -1.0;
+    struct timeval tv; gettimeofday(&tv, NULL);
+    if (start < 0.0) {
+        struct kinfo_proc kp; size_t len = sizeof kp; int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, (int)getpid() };
+        start = sysctl(mib, 4, &kp, &len, NULL, 0) == 0
+            ? kp.kp_proc.p_starttime.tv_sec * 1e3 + kp.kp_proc.p_starttime.tv_usec / 1e3
+            : tv.tv_sec * 1e3 + tv.tv_usec / 1e3;
+    }
+    return tv.tv_sec * 1e3 + tv.tv_usec / 1e3 - start;
+}
+#define LOAD_STAT(...) do { if (racacit_load_stats_on()) { fprintf(stderr, "[load-stats] %8.0f ms: ", racacit_since_start_ms()); fprintf(stderr, __VA_ARGS__); fputc(10, stderr); } } while (0)
+#else
+#define LOAD_STAT(...) do { } while (0)
+#endif
 static unsigned long long rt_now_us(void);
 static unsigned long long s_rt_present_us;
 extern "C" void ps3_tl_at(unsigned long long t, char ev, uint32_t a, uint32_t b);
@@ -319,6 +357,13 @@ static void present_guest_frame(void)
      * than a volatile ++, which on arm64 is neither atomic nor a fence. */
     InterlockedIncrement(&g_frames_presented);
     racit_mods_frame();   /* code mods' frame/level events (mods.cpp) */
+#ifdef __APPLE__
+    { static unsigned long long last;   /* RACACIT_LOAD_STATS: presents 100 ms or more apart */
+      const unsigned long long now = rt_now_us();
+      if (last && now - last >= 100000 && racacit_load_stats_on())
+          LOAD_STAT("frame %.0f ms (presents >= 100 ms apart)", (now - last) / 1e3);
+      last = now; }
+#endif
 }
 
 /* The FIFO walker runs on frame_clock. A guest thread that has just moved
@@ -596,7 +641,17 @@ static DWORD WINAPI frame_clock(LPVOID)
 #endif
 
     { char _hb[160]; snprintf(_hb, sizeof _hb, "[hosttid] %lu rsx frame clock / FIFO walker%c", (unsigned long)GetCurrentThreadId(), 10); fputs(_hb, stderr); }
+    LOAD_STAT("renderer init starts");
     int rsx_ok = (rsx_backend_init(WINDOW_WIDTH, WINDOW_HEIGHT, title) == 0);
+#if defined(__linux__) && !defined(__ANDROID__) && defined(RACACIT_HAVE_VULKAN)
+    if (!rsx_ok) {
+        fputs("RACiT could not start Vulkan. See the [RSX vulkan] messages above.\n"
+              "Check the Vulkan driver and display session with vulkaninfo --summary.\n", stderr);
+        fflush(stderr);
+        _exit(3);
+    }
+#endif
+    LOAD_STAT("renderer init done");
     fprintf(stderr, "[rsx] %s backend init %s\n", RSX_BACKEND_NAME,
             rsx_ok ? "OK -- window open" : "FAILED");
 
@@ -768,6 +823,19 @@ static DWORD WINAPI frame_clock(LPVOID)
             const unsigned long long pnow = rt_now_us();
             const int pump = pnow - s_pump_us >= 4000;
             if (pump) s_pump_us = pnow;
+#ifdef __APPLE__
+            if (racacit_load_stats_on()) {
+                static unsigned long long s_pass_us, s_pres0, s_drain0; static double s_worst;
+                if (!s_pass_us) LOAD_STAT("first event pump");
+                else if (pnow - s_pass_us >= 100000) {
+                    const double ms = (pnow - s_pass_us) / 1e3;
+                    if (ms > s_worst) s_worst = ms;
+                    LOAD_STAT("main thread %.0f ms without pumping events (present %.0f, FIFO drain %.0f; longest so far %.0f)",
+                              ms, (g_rt_present_total_us - s_pres0) / 1e3, (g_rt_drain_total_us - s_drain0) / 1e3, s_worst);
+                }
+                s_pass_us = pnow; s_pres0 = g_rt_present_total_us; s_drain0 = g_rt_drain_total_us;
+            }
+#endif
             if (pump && rsx_backend_pump() != 0) {
                 /* Window closed: quit. Guest threads are still running and
                  * an orderly exit() would wait on them, so leave at once. */
@@ -1352,19 +1420,41 @@ static LONG WINAPI crash_unhandled(EXCEPTION_POINTERS* ep)
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
+/* The exe's manifest makes the process code page UTF-8, and the launcher writes settings.txt
+ * as UTF-8. A settings.txt saved by hand in the system's old code page (Windows-1252 and
+ * the like) still works: a value that isn't valid UTF-8 is converted from that code page. */
+static void settings_value_to_utf8(char* v, size_t size)
+{
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, v, -1, nullptr, 0) > 0) return;
+    UINT cp = 0;
+    if (!GetLocaleInfoEx(LOCALE_NAME_SYSTEM_DEFAULT, LOCALE_IDEFAULTANSICODEPAGE | LOCALE_RETURN_NUMBER,
+                         (LPWSTR)&cp, sizeof cp / sizeof(WCHAR)) || !cp) return;
+    wchar_t w[2048];
+    if (!MultiByteToWideChar(cp, 0, v, -1, w, 2048)) return;
+    char u[2048 * 3];
+    if (WideCharToMultiByte(CP_UTF8, 0, w, -1, u, sizeof u, nullptr, nullptr)) snprintf(v, size, "%s", u);
+}
+
 static void windows_setup(int* argc, char*** argv)
 {
-    char dir[MAX_PATH * 2];
+    /* UTF-8 takes up to 3 bytes for each of a path's MAX_PATH characters. */
+    char dir[MAX_PATH * 3];
     GetModuleFileNameA(NULL, dir, sizeof dir);
     char* slash = strrchr(dir, '\\');
     if (slash) *slash = 0;
 
-    char path[MAX_PATH * 3];
-    char game[MAX_PATH * 2] = "";
+    char path[MAX_PATH * 4];
+    char game[MAX_PATH * 3] = "";
     /* RACACIT_SETTINGS_FILE (set by the Windows launcher: its data\settings.txt)
      * names the settings file; else settings.txt beside the exe. */
     if (const char* sf = getenv("RACACIT_SETTINGS_FILE"); sf && *sf) snprintf(path, sizeof path, "%s", sf);
     else snprintf(path, sizeof path, "%s\\settings.txt", dir);
+    /* From the launcher, what it set (its paths, mod overrides) wins and the file only
+     * fills in the rest -- except a PS3_HDD0_ROOT set by hand, which keeps pointing at
+     * the player's saves as in 1.0.1. Playing update 1.20 (PS3_HDD0_HOME_ROOT set) the
+     * launcher's own dev_hdd0 holds the update, so only the saves (home) move there. */
+    const char* launched = getenv("RACACIT_LAUNCHER");
+    const bool from_launcher = launched && strcmp(launched, "1") == 0;
     if (FILE* f = fopen(path, "r")) {
         char line[2048];
         while (fgets(line, sizeof line, f)) {
@@ -1378,8 +1468,16 @@ static void windows_setup(int* argc, char*** argv)
             while (*val == ' ' || *val == '"') val++;
             char v[2048]; snprintf(v, sizeof v, "%s", val);
             size_t n = strlen(v); while (n && v[n - 1] == '"') v[--n] = 0;
+            settings_value_to_utf8(v, sizeof v);
             if (!_stricmp(line, "GAME")) snprintf(game, sizeof game, "%s", v);
-            else _putenv_s(line, v);
+            else if (from_launcher && !_stricmp(line, "PS3_HDD0_ROOT") && v[0]) {
+                const char* home = getenv("PS3_HDD0_HOME_ROOT");
+                if (home && *home) {
+                    char h[2100]; snprintf(h, sizeof h, "%s\\home", v);
+                    _putenv_s("PS3_HDD0_HOME_ROOT", h);
+                } else _putenv_s(line, v);
+            }
+            else if (!from_launcher || !getenv(line)) _putenv_s(line, v);
         }
         fclose(f);
     }
@@ -1582,16 +1680,66 @@ extern "C" int racacit_entry(void)
 #endif
 #endif
 
+#if defined(__linux__) && !defined(__ANDROID__)
+static void linux_load_settings()
+{
+    namespace fs = std::filesystem;
+    fs::path path;
+    if (const char* file = getenv("RACACIT_SETTINGS_FILE")) {
+        if (!*file) return;
+        path = file;
+    } else {
+        const char* config = getenv("XDG_CONFIG_HOME");
+        fs::path dir = config ? fs::path(config) : fs::path();
+        if (!dir.is_absolute()) {
+            const char* home = getenv("HOME");
+            if (!home || !*home) return;
+            dir = fs::path(home) / ".config";
+        }
+        dir /= "racit";
+        std::error_code error;
+        fs::create_directories(dir, error);
+        if (error) return;
+        path = dir / "settings.txt";
+        setenv("RACACIT_SETTINGS_FILE", path.c_str(), 0);
+    }
+
+    std::ifstream file(path);
+    for (std::string line; std::getline(file, line); ) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.compare(0, 8, "RACACIT_") != 0) continue;
+        const size_t separator = line.find('=');
+        if (separator == std::string::npos) continue;
+        line[separator] = '\0';
+        setenv(line.c_str(), line.c_str() + separator + 1, 0);
+    }
+}
+#endif
+
 int main(int argc, char** argv)
 {
+#if defined(__linux__) && !defined(__ANDROID__)
+    linux_load_settings();
+#endif
+#ifdef __APPLE__
+    LOAD_STAT("main() entered");
+#endif
 #if defined(__APPLE__) && defined(RACACIT_HAVE_VULKAN)
     /* Preserve IEEE shader guards before SDL or the Vulkan loader starts.
      * Pending asynchronous pipelines currently skip draws in this backend. */
     setenv("MVK_CONFIG_FAST_MATH_ENABLED", "0", 0);
     setenv("RACACIT_ASYNC_PIPELINES", "0", 0);
+#endif
+#if defined(RACACIT_HAVE_VULKAN) && (defined(__APPLE__) || (defined(__linux__) && !defined(__ANDROID__)))
+    /* Desktop defaults for a direct launch. Explicit settings and headless runs can override them. */
     setenv("RACACIT_HLE_SPURS", "1", 0);
     setenv("RACACIT_KBM", "1", 0);
     setenv("PS3RECOMP_VK_WINDOW", "1", 0);
+    /* As on Windows: the guest's own shader programs, and the title the
+     * renderer's per-game paths key on. Without them it takes the vtable path and
+     * never uploads a texture, so the window stays black (#72). */
+    setenv("PS3RECOMP_VK_GUEST_PROGRAMS", "1", 0);
+    setenv("PS3_TITLE", "Ratchet & Clank: A Crack in Time", 0);
 #endif
 #ifdef __ANDROID__
     android_setup(&argc, &argv);
@@ -1669,6 +1817,11 @@ int main(int argc, char** argv)
         /* The lifted code is built with PPU_INL_NO_HOLE (game/CMakeLists.txt):
          * ppu_run ends its inline memory window below that page instead. */
         ppu_inl_clip_hole = 1;
+        /* The title reserves its 256 MB heap with sys_mmapper_allocate_address
+         * (256 MB aligned) and has always been given 0x20000000; the GCM IO
+         * comment above, the write-watch ranges and the prompt scans expect it
+         * there. ps3recomp v0.19 starts mapper regions at 0x40000000. */
+        sys_mapper_base = 0x20000000u;
     }
 
 #if defined(_WIN32) && defined(RACACIT_HAVE_VULKAN)
@@ -1705,9 +1858,14 @@ int main(int argc, char** argv)
     /* Real title id (BCUS98124) from PARAM.SFO; without this cellGame,
      * save data and trophies all fall back to the BLES00000 placeholder. */
     {
-        char sfo[1100];
-        snprintf(sfo, sizeof sfo, "%s/PS3_GAME/PARAM.SFO", ppu_vfs_root);
-        cellGame_init_from_paramsfo(sfo);
+        const char* update_sfo = getenv("PS3_UPDATE_PARAM_SFO");
+        if (update_sfo && *update_sfo) {
+            cellGame_init_from_paramsfo(update_sfo);
+        } else {
+            char sfo[1100];
+            snprintf(sfo, sizeof sfo, "%s/PS3_GAME/PARAM.SFO", ppu_vfs_root);
+            cellGame_init_from_paramsfo(sfo);
+        }
     }
 
     ppu_recomp_register();   /* lifted function table -> address map */

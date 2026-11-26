@@ -119,7 +119,7 @@ def main():
     files = sorted(glob.glob(os.path.join(RECOMP, "ppu_recomp_*.cpp")))
     total = 0
     for path in files:
-        with open(path, newline="") as f:
+        with open(path, encoding="utf-8", errors="surrogateescape", newline="") as f:
             text = f.read()
         nl = "\r\n" if "\r\n" in text else "\n"
         lines = text.split(nl)
@@ -134,7 +134,7 @@ def main():
             total += count
             print(f"{os.path.basename(path)}: {count} vector statement(s)")
             if not CHECK:
-                with open(path, "w", newline="") as f:
+                with open(path, "w", encoding="utf-8", errors="surrogateescape", newline="") as f:
                     f.write(nl.join(lines))
     print(f"{total} statement(s) {'would be ' if CHECK else ''}rewritten")
 

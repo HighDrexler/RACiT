@@ -5,10 +5,18 @@
  * the last camera update, in radians, and adds it once to that camera's own yaw and pitch
  * step. The right stick keeps working alongside it: the hooks add to the stick's turn.
  *
- * Motion only counts while some hooked camera is updating: in menus, cutscenes and loading
- * screens no camera takes it, and it is dropped instead of turning the camera when play
- * resumes. tests/desktop_mouse_test.cpp checks this file without the game. */
+ * Motion only counts for the cameras while some hooked camera is updating: in menus,
+ * cutscenes and loading screens no camera takes it, and it is dropped instead of turning
+ * the camera when play resumes.
+ *
+ * Screens with no hooked camera that the right stick drives (the map, the rotate-object
+ * puzzles) get the mouse as a right-stick push instead (racit_mouse_feed), as the camera
+ * keys are. Only then: while any hooked camera is active the mouse never reaches the stick,
+ * so a camera never feels like a thumbstick and never gets the move twice.
+ * tests/desktop_mouse_test.cpp checks this file without the game. */
+#include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -33,6 +41,20 @@ void drop_stale(uint64_t now)
 /* Radians per count, x 1e9, at 100% (public PR #66): 0.003 rad, ~0.17 degree. */
 constexpr double kGain = 3000000.0;
 constexpr double kNano = 1000000000.0;
+/* The stick push the mouse makes while no camera is active (under the lock): counts summed
+ * over a short window, then a push for that window's speed, as 1.0.0's stick emulation. */
+struct Stick { uint64_t epoch = 0, poll = 0; int64_t dx = 0, dy = 0; float x = 0.f, y = 0.f; };
+Stick stick;
+constexpr uint64_t kStickWindow = 8000000ULL;   /* 8 ms */
+/* Speed to push: 0.11 of full per count/ms at 100%, at least 0.22 (past the game's dead zone
+ * for any move), at most full. */
+float stick_push(int64_t counts, uint64_t elapsed, float sensitivity)
+{
+    if (!counts) return 0.f;
+    const float speed = std::fabs((float)counts) / ((float)elapsed / 1000000.f) * (.11f * sensitivity / 100.f);
+    const float v = .22f + .78f * std::min(speed, 1.f);
+    return counts < 0 ? -v : v;
+}
 bool tracing()
 {
     static const int on = [] { const char* v = std::getenv("RACACIT_MOUSE_TRACE"); return v && *v == '1'; }();
@@ -49,14 +71,35 @@ extern "C" int racit_camera_active(uint64_t now)
 }
 
 /* The runtime's pad poll (cellPad.c): the captured mouse's motion since the last poll,
- * the Settings > Controls mouse speed (percent) and Invert mouse Y. */
-extern "C" void racit_camera_feed(uint64_t now, int dx, int dy, int capture, float sensitivity, int invert)
+ * the Settings > Controls mouse speed (percent) and Invert mouse Y. The motion goes to the
+ * cameras while one is active; otherwise it is a right-stick push, written to push[0]
+ * (right positive) and push[1] (down positive), each -1..1 (0 0 while a camera is active).
+ * mouse_to_stick 0 keeps the stick out of it (the quick select ring has the mouse then). */
+extern "C" void racit_mouse_feed(uint64_t now, int dx, int dy, int capture, float sensitivity, int invert,
+                                 int mouse_to_stick, float* push)
 {
     /* Whether a camera is active is read under the lock too: the takes set take_time
      * under it, so a poll can't decide "no camera" from a time a take has just moved
      * on from and then clear motion fed after that take. */
     std::lock_guard<std::mutex> hold(motion_lock);
     const bool active = capture && racit_camera_active(now);
+    /* The stick: only with no camera active, from motion made since then. A camera, the mouse
+     * let go or a gap in the polls (a hitch, a load) starts it over, so no older move, and
+     * none a camera had, ever pushes the stick. */
+    const bool gap = stick.poll && now > stick.poll && now - stick.poll >= kStale;
+    stick.poll = now;
+    if (!capture || active || !mouse_to_stick || gap) stick = Stick(), stick.poll = now;
+    else {
+        if (!stick.epoch) stick.epoch = now;
+        stick.dx += dx; stick.dy += dy;
+        if (now - stick.epoch >= kStickWindow) {
+            const uint64_t el = now - stick.epoch;
+            stick.x = stick_push(stick.dx, el, sensitivity);
+            stick.y = stick_push(stick.dy, el, sensitivity) * (invert ? -1.f : 1.f);
+            stick.dx = stick.dy = 0; stick.epoch = now;
+        }
+    }
+    if (push) { push[0] = stick.x; push[1] = stick.y; }
     const double gain = kGain * sensitivity / 100.0;
     const int64_t x = active ? (int64_t)(dx * gain) : 0, y = active ? (int64_t)(dy * gain * (invert ? -1 : 1)) : 0;
     if (!active) { camera_x = camera_y = 0; captured = capture != 0; return; }
@@ -65,6 +108,20 @@ extern "C" void racit_camera_feed(uint64_t now, int dx, int dy, int capture, flo
     camera_y += y;
     if (x || y) feed_time = now;
     captured = true;
+}
+
+/* The cameras only (1.0.1's first runtime patch called this): no stick push. */
+extern "C" void racit_camera_feed(uint64_t now, int dx, int dy, int capture, float sensitivity, int invert)
+{
+    racit_mouse_feed(now, dx, dy, capture, sensitivity, invert, 0, nullptr);
+}
+
+/* A right-stick axis from the camera keys (-1, 0 or 1, at 0.8 as before) and the mouse's
+ * push, added and kept inside the stick's range, as the pad byte (128 is centre, 1..255). */
+extern "C" int racit_stick_byte(float keys, float mouse)
+{
+    const float v = std::max(-1.f, std::min(1.f, keys * .8f + mouse));
+    return (int)(128.f + 127.f * v);   /* truncated, as the keys' push always was */
 }
 
 /* A camera hook: the motion since the last take, yaw (right positive) and pitch (down

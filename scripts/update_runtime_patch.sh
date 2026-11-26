@@ -17,13 +17,13 @@ PATCH="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"
 RESET="${3:-}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 REL=patches/ps3recomp-0001-racacit-runtime-fixes.patch
-KEPT="$RUNTIME/.git/racit-patch.applied"
 # Every git here runs with LF line endings whatever the user's settings (Git for Windows
 # defaults core.autocrlf to true), so a reset or a show gives the bytes the patch is made
 # against, and from the runtime or the repository root, never the caller's directory.
 g() { git -c core.autocrlf=false -c core.eol=lf "$@"; }
 PIN="$(g -C "$RUNTIME" rev-parse HEAD)"
 rt() { g -C "$RUNTIME" "$@"; }
+KEPT="$(rt rev-parse --absolute-git-dir)/racit-patch.applied"
 # Earlier setups kept their stamp in the runtime's tree: never count those as changes.
 rm -f "$RUNTIME/.racit-patch" "$RUNTIME/.racit-patch.applied"
 
@@ -61,7 +61,16 @@ apply_new() {
 }
 to_pin() { rt reset -q --hard "$PIN"; }
 
+check_from_pin() (
+    t="$(mktemp -d)" || exit 1
+    trap 'rm -rf "$t"' EXIT
+    export GIT_INDEX_FILE="$t/index"
+    rt read-tree "$PIN" &&
+        rt apply --cached --check --ignore-whitespace --whitespace=nowarn "$PATCH"
+)
+
 if [ "$RESET" = --reset ]; then
+    check_from_pin
     echo "Resetting $RUNTIME to its pinned commit (--reset): its changes are thrown away."
     to_pin
     rt clean -fdxq
@@ -95,6 +104,10 @@ if [ -z "$old" ]; then
     exit 1
 fi
 # Back to the pin: tracked files reset, and only the files the old patch created removed.
+if ! check_from_pin; then
+    echo "The new runtime patch does not apply to the pinned revision. The current patch was kept." >&2
+    exit 1
+fi
 created="$(paths "$old" | while IFS= read -r p; do rt cat-file -e "$PIN:$p" 2>/dev/null || printf '%s\n' "$p"; done)"
 to_pin
 printf '%s\n' "$created" | while IFS= read -r p; do

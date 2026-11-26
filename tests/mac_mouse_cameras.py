@@ -23,7 +23,7 @@ someone is playing: it refuses when a game is already running.
 """
 import argparse, os, re, shutil, signal, subprocess, sys, time
 
-START, CROSS = 0x0008, 0x4000
+SELECT, START, CROSS = 0x0001, 0x0008, 0x4000
 # (mode, key held through it with the test hook, cameras whose hook may answer in that mode).
 # Mouse3 (the right button) is strafe, L2, in the default keyboard and mouse controls.
 MODES = (('follow', None, ('follow',)), ('strafe', 'Mouse3', ('strafe',)))
@@ -254,6 +254,10 @@ class Game:
                 os.killpg(self.p.pid, signal.SIGKILL)
 
 
+# A right-stick push (the mouse where no camera is active) counts as a person at the pad, and
+# scripted pad input (START, SELECT) then stands down for 20 s (cellPad.c pad_note_human).
+HUMAN_HOLD = 21.0
+PERSON = '[cellPad] controller in use'
 PITCH_WAY = {}   # mode -> True when mouse down moved the picture down (rows > 0)
 
 
@@ -335,16 +339,67 @@ def turns(g, mode, cameras, key, results):
     time.sleep(4.0)   # the mode's key is let go by now (3 s after the last press)
 
 
+def game_map(g, results):
+    """The map (SELECT) has no hooked camera: the mouse pans it through the right stick, no
+    camera turns meanwhile, and none turns after it closes. Inconclusive when SELECT showed
+    nothing new (the map didn't open, so nothing was tested)."""
+    before = g.capture('map-before')
+    g.press('0x%04X 4' % SELECT); time.sleep(3.0)
+    m0 = g.capture('map-0'); time.sleep(0.6); m1 = g.capture('map-1')
+    opened = shift(before, m0)[2] > 4 * max(1.0, shift(m0, m1)[2])   # the picture changed, then held still
+    still = shift(m0, m1)
+    # The scripted right stick first (before the mouse's push stands scripted input down):
+    # whether this map moves with the stick at all.
+    g.press('0 60 128 128 255 128'); time.sleep(1.5); s1 = g.capture('map-stick')
+    by_stick = shift(m1, s1)[2] > 4 * max(1.0, still[2])
+    time.sleep(0.5); m1 = g.capture('map-1b')
+    turns_at = len(re.findall(r'\[mouse\] \S+ turn', g.text()))
+    at = len(g.text())
+    for _ in range(120):   # ~1.5 s of steady motion to the right: a held push
+        g.mouse(12, 0); time.sleep(0.012)
+    time.sleep(0.2); m2 = g.capture('map-2')
+    pan = shift(m1, m2)
+    vpan = vshift(m1, m2)
+    turned = len(re.findall(r'\[mouse\] \S+ turn', g.text())) - turns_at
+    if PERSON in g.text()[at:]:
+        time.sleep(HUMAN_HOLD)   # else the SELECT that closes the map is ignored
+    g.press('0x%04X 4' % SELECT); time.sleep(2.5)
+    after = len(re.findall(r'\[mouse\] \S+ turn', g.text())) - turns_at - turned
+    # Moved: shifted, or changed (a zoom) more than it does by itself.
+    moved = ((abs(pan[0]) >= max(4, 3 * abs(still[0])) and pan[1] < pan[2]) or (abs(vpan[0]) >= 3 and vpan[1] < vpan[2])
+             or pan[2] > 4 * max(1.0, still[2]))
+    # Untested (None) when the map didn't open or doesn't move with the stick either.
+    ok = None if not (opened and by_stick) else (moved and turned == 0 and after == 0)
+    results.append(('map', ok, '%s, stick moves it %s, mouse: pan %d columns / %d rows, change %.1f (still %.1f), camera turns on the map %d, after closing %d'
+                    % ('opened' if opened else 'SELECT showed no map (untested)', 'yes' if by_stick else 'no (untested)',
+                       pan[0], vpan[0], pan[2], still[2], turned, after)))
+
+
 def menu(g, results):
-    """The pause menu takes no mouse turn, and nothing turns when play resumes."""
+    """The pause menu takes no mouse turn, and nothing turns when play resumes. With no camera
+    active the mouse is a right-stick push there too, so the menu itself must not move with it
+    either (no scrolling, no other entry picked): the picture changes no more under steady mouse
+    motion than it does by itself."""
     g.press('0x%04X 4' % START); time.sleep(2.5)
     before = len(re.findall(r'\[mouse\] \S+ turn', g.text()))
-    g.mouse(300, 0); time.sleep(1.0)
+    at = len(g.text())
+    q0 = g.capture('pause-0'); time.sleep(1.0); q1 = g.capture('pause-1')
+    g.mouse(300, 0)
+    for dx, dy in ((0, 6), (6, 0), (0, -6), (-6, 0)):   # ~0.5 s each way: a held push
+        for _ in range(20):
+            g.mouse(dx, dy); time.sleep(0.025)
+    time.sleep(0.5); q2 = g.capture('pause-2')
+    by_itself, with_mouse = shift(q0, q1)[2], shift(q1, q2)[2]
+    still = with_mouse <= 2 * max(1.0, by_itself)
     paused = len(re.findall(r'\[mouse\] \S+ turn', g.text())) - before
+    pushed = PERSON in g.text()[at:]   # the mouse did reach the stick while paused
+    if pushed:
+        time.sleep(HUMAN_HOLD)
     g.press('0x%04X 4' % START); time.sleep(2.5)
     resumed = len(re.findall(r'\[mouse\] \S+ turn', g.text())) - before
-    results.append(('pause menu', paused == 0 and resumed == 0,
-                    'turns while paused %d, after resuming %d' % (paused, resumed)))
+    results.append(('pause menu', paused == 0 and resumed == 0 and still,
+                    'turns while paused %d, after resuming %d, menu change with the mouse %.1f (by itself %.1f), stick push %s'
+                    % (paused, resumed, with_mouse, by_itself, 'yes' if pushed else 'no')))
 
 
 def main():
@@ -355,6 +410,7 @@ def main():
     ap.add_argument('--installed', help="the game's HDD install folder (hdd0/game/BCUS98124 of a profile that has played)")
     ap.add_argument('--settings'); ap.add_argument('--vk-icd')
     ap.add_argument('--level-wait', type=float, default=45)
+    ap.add_argument('--map', action='store_true', help='also check the mouse pans the map (SELECT)')
     o = ap.parse_args()
     check_inputs(o)
     for name in ('RaCACiTRecomp', 'racit-player'):
@@ -378,6 +434,8 @@ def main():
         mode, key, cameras = MODES[0]
         turns(g, mode, cameras, key, results)
         menu(g, results)
+        if o.map:
+            game_map(g, results)
         for mode, key, cameras in MODES[1:]:
             turns(g, mode, cameras, key, results)
     finally:

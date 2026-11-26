@@ -1,0 +1,9 @@
+[package]
+name = "controller-icons"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Turns assets/controller-icons/*.png into game/controller_icons.h (palette + run-length pictures for the button prompts)"
+
+[dependencies]
+png = "0.18"

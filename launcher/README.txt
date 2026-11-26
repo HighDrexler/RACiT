@@ -1,4 +1,4 @@
-RACiT Launcher 1.0.0 -- Ratchet & Clank Future: A Crack in Time (PC), Windows
+RACiT Launcher 1.0.2 -- Ratchet & Clank Future: A Crack in Time (PC), Windows
 ================================================================================
 
 Everything the game needs comes in this folder: the launcher, the game build
@@ -6,6 +6,41 @@ Everything the game needs comes in this folder: the launcher, the game build
 A Crack in Time (USA BCUS98124, or Europe BCES00511):
   1. the game: its disc image (.iso), or the dumped game's folder (USRDIR)
   2. EBOOT.elf, the game's main program, unlocked with RPCS3
+
+NEW IN 1.0.2
+A Crack in Time fixes. Into the Nexus is unchanged (0.1.1).
+- Menus, the HUD and quick select show your keys instead of PS3 buttons when
+  you play with a keyboard, and switch back when you pick up a controller.
+- The mouse turns every camera directly (follow, strafe, first person,
+  turrets and the ships), and moves maps and puzzles like the right stick.
+- The comma key can be bound.
+- Update 1.20: when the release has a 1.20 build (builds\vNN-u120), the
+  launcher plays it as well as disc 1.00. Set up step 3 adds the installed
+  update (RPCS3's dev_hdd0\game\BCUS98124 with a decrypted EBOOT.elf in it);
+  saves are shared between the two, and Your game switches back to 1.00.
+- Fixes for Play failing when the game folder was given as a relative path, and
+  for launcher updates that were only partly copied.
+- macOS: the 1.0.0 and 1.0.1 Mac launchers cannot update themselves to 1.0.2.
+  Download RACiT-1.0.2-macos.zip once and copy what is in its RACiT-1.0.2-macos
+  folder into your RACiT folder: replace RaCACiT Launcher.app and README.txt,
+  and copy the vNN folders inside its builds folder into your builds folder.
+  Leave your mods folder as it is (the bundled mods have not changed). Your
+  saves, settings and game are not in the zip. Updates from 1.0.2 on work from
+  the launcher.
+
+NEW IN 1.0.1
+Into the Nexus test build 0.1.1 (nexus\builds\v97): fixes for freezes of about
+a second (sometimes several) when the game reached a new area, for levels
+drawn in flat bright colours with the sky and ground missing on some
+graphics cards (seen on Intel Arc), two graphics errors that stricter drivers
+(AMD, Intel) could trip over, and a shorter stutter when a level starts.
+Details: nexus\builds\v97\README.txt.
+A Crack in Time is unchanged (build v124).
+Updating from 1.0.0 inside the launcher takes two steps: the 1.0.0 launcher
+puts in the new launcher and starts it again; the new launcher then offers
+1.0.1 once more ("Finish the update") to put in Into the Nexus's new build.
+Accept that one too. Or copy what is in this zip's RACiT_1.0.1 folder over your
+RACiT_1.0.0 folder (your saves, settings and game are not in the zip).
 
 TWO GAMES: A CRACK IN TIME AND INTO THE NEXUS (TEST)
 The bar down the left edge switches games: click a tile, press Tab, or L1 / R1
@@ -63,7 +98,18 @@ The same launcher and the same steps, in the Mac release (RACiT-<version>-macos)
      then EBOOT.elf. RPCS3 has a Mac version (rpcs3.net, Apple Silicon); its Utilities >
      Decrypt PS3 Binaries makes EBOOT.elf the same way.
   4. Play. The launcher starts builds/vNN/RaCACiT, which brings its own Vulkan (MoltenVK)
-     and SDL; nothing else to install. Needs macOS on an M1 or later.
+     and SDL; nothing else to install. Needs macOS 14 or later on an M1 or later.
+  Update 1.20 (optional; the Mac release has a build of it, builds/vNN-u120):
+     a. Install the update's .pkg in RPCS3 (File > Install Packages). The launcher
+        ships no PlayStation keys, so it does not open .pkg files itself.
+     b. "3. Optional: add update 1.20": pick the folder RPCS3 made,
+        dev_hdd0/game/BCUS98124 (it holds PARAM.SFO and USRDIR).
+     c. Decrypt that folder's USRDIR/EBOOT.BIN with RPCS3 and add the EBOOT.elf it makes
+        in step 2 ("Show the update's EBOOT.BIN" opens the folder). The launcher tells the
+        1.00 and 1.20 EBOOT.elf apart by their SHA-256 and keeps both.
+     Play then runs 1.20 ("Play version" on the Your game screen switches back to 1.00).
+     It still reads the disc's data; saves are shared by both versions, and 1.20 keeps
+     its own copy of the installed game data in data/dev_hdd0_u120.
 The folders below sit beside the .app as they sit beside the .exe on Windows (paths
 use / there: data/settings.txt). The launcher goes to the Dock while the game runs.
 

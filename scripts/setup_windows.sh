@@ -25,7 +25,19 @@ tools/venv/Scripts/python.exe -m pip install -q --disable-pip-version-check \
     pycryptodome==3.24.1 tabulate==0.10.0 tqdm==4.70.1
 
 echo "== Sources"
-pin ps3recomp      sp00nznet/ps3recomp         5244db92669b54831c6d3ebb7a96d58c4dbfa6df
+runtime_pin=de4f090328ea08bef6b2f15caec0b85e343a7ece
+pin ps3recomp      sp00nznet/ps3recomp         "$runtime_pin"
+# A checkout from an earlier pin (1.0.x used 5244db92) moves with --reset, which throws away its changes.
+if [ "$(git -C tools/ps3recomp rev-parse HEAD)" != "$runtime_pin" ] && [ "${1:-}" = --reset ]; then
+    echo "Moving tools/ps3recomp to $runtime_pin (--reset): its changes are thrown away."
+    git -C tools/ps3recomp -c core.autocrlf=false -c core.eol=lf fetch -q --depth 1 origin "$runtime_pin"
+    git -C tools/ps3recomp -c core.autocrlf=false -c core.eol=lf checkout -q -f --detach FETCH_HEAD
+fi
+if [ "$(git -C tools/ps3recomp rev-parse HEAD)" != "$runtime_pin" ]; then
+    echo "tools/ps3recomp is at $(git -C tools/ps3recomp rev-parse --short HEAD), this tree needs $runtime_pin." >&2
+    echo "Run this setup again with --reset to move it (throws away changes there), or use a separate checkout." >&2
+    exit 1
+fi
 pin Vulkan-Headers KhronosGroup/Vulkan-Headers c46850864f4661461b0f6cb9922c058ffea4915e
 pin glslang-src    KhronosGroup/glslang        2fbed5e1fb43a1c480fe020e3bb686a31010989a
 pin zlib           madler/zlib                 767c4c947852e143f582c85f14cf573411df1b35

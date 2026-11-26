@@ -71,7 +71,7 @@ class Retarget:
     def __init__(self, title):
         self.v = VERSIONS[title]
         self.map = {}
-        with open(os.path.join(ROOT, 'versions', title, 'addr_map.tsv')) as f:
+        with open(os.path.join(ROOT, 'versions', title, 'addr_map.tsv'), encoding='utf-8') as f:
             for line in f:
                 if line.startswith('#') or not line.strip():
                     continue
@@ -184,7 +184,7 @@ def sha256(path):
 
 def check(r, title, target_elf):
     """Every converted code address against both executables; None if it cannot run."""
-    profiles = {p['id'].split('-')[0]: p for p in json.load(open(os.path.join(ROOT, 'versions', 'profiles.json')))['profiles']
+    profiles = {p['id'].split('-')[0]: p for p in json.load(open(os.path.join(ROOT, 'versions', 'profiles.json'), encoding='utf-8'))['profiles']
                 if p['app_version'] == '1.00'}
     if sha256(target_elf) != profiles[title]['elf_sha256']:
         sys.exit('input/%s/EBOOT.ELF is not the %s disc 1.00 executable (SHA-256 differs).' % (title, title))
@@ -264,7 +264,7 @@ def main():
         write_if_changed(os.path.join(work, name), text)
 
     # The copy builds this disc and only this disc (scripts/pipeline.sh checks the profile).
-    prof = json.load(open(os.path.join(ROOT, 'versions', 'profiles.json')))
+    prof = json.load(open(os.path.join(ROOT, 'versions', 'profiles.json'), encoding='utf-8'))
     for p in prof['profiles']:
         mine = p['title_id'] == title and p['app_version'] == '1.00'
         p['buildable'] = mine

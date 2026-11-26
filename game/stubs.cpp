@@ -184,7 +184,7 @@ extern "C" void racacit_longjmp(uint32_t guest_buf)
  * no file, no licence. (There are no .rap licences in a disc dump, so an
  * .edat that does exist cannot be decrypted either; report it as unlicensed.)
  * -----------------------------------------------------------------------*/
-#include "../tools/ps3recomp/runtime/ppu/ppu_context.h"
+#include "ppu_context.h"
 extern "C" void ps3_hle_register_ctx(uint32_t nid, const char* name, void (*fn)(ppu_context*));
 extern "C" uint8_t* vm_base;
 static void racacit_npdrm_is_available(ppu_context* ctx)
@@ -656,6 +656,10 @@ extern "C" uint32_t racacit_movie_update_hook(uint32_t slot, uint32_t playing)
  * logos shown, PRESS START stays: the menu would have to be opened after the
  * CardController's last card, which no hook here sees.
  * -----------------------------------------------------------------------*/
+#ifdef __APPLE__
+extern "C" int racacit_load_stats_on(void);      /* game/main.cpp, RACACIT_LOAD_STATS */
+extern "C" double racacit_since_start_ms(void);
+#endif
 void func_004C64C8(ppu_context* ctx);
 void func_0094EF08(ppu_context* ctx);
 extern "C" void ps3_indirect_call(ppu_context* ctx);
@@ -785,6 +789,9 @@ extern "C" void racacit_front_end_menu(ppu_context* ctx)
     front_end_leave(ctx, c);
     fprintf(stderr, "[front-end] PRESS START skipped: main menu opens (RACACIT_SKIP_PRESS_START)%s\n",
             ok ? "" : " -- SetVariable said no");
+#ifdef __APPLE__
+    { if (racacit_load_stats_on()) fprintf(stderr, "[load-stats] %8.0f ms: main menu (CreateOptions in 10 frames)%c", racacit_since_start_ms(), 10); }
+#endif
 }
 
 /* ---------------------------------------------------------------------------
@@ -1168,6 +1175,9 @@ extern "C" { volatile unsigned g_racacit_level_changes = 0; }
 extern "C" uint32_t racacit_level_change(uint32_t level)
 {
     g_racacit_level_changes = g_racacit_level_changes + 1;
+#ifdef __APPLE__
+    { if (racacit_load_stats_on()) fprintf(stderr, "[load-stats] %8.0f ms: level change to %u%c", racacit_since_start_ms(), level, 10); }
+#endif
     ds_player_stop_lines(1);   /* the game's voices end with the level: a line on the controller did not */
     static int done = 0;
     static long want = -1;

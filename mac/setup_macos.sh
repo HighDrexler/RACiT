@@ -5,7 +5,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RUNTIME="$ROOT/tools/ps3recomp"
-COMMIT=5244db92669b54831c6d3ebb7a96d58c4dbfa6df
+COMMIT=de4f090328ea08bef6b2f15caec0b85e343a7ece
 PATCH="$ROOT/patches/ps3recomp-0001-racacit-runtime-fixes.patch"
 
 [ "$(uname -s)" = Darwin ] || { echo "Run this setup on macOS."; exit 1; }
@@ -23,8 +23,15 @@ if ! git -C "$RUNTIME" rev-parse --verify HEAD >/dev/null 2>&1; then
   git -C "$RUNTIME" -c core.autocrlf=false -c core.eol=lf fetch --depth 1 origin "$COMMIT"
   git -C "$RUNTIME" -c core.autocrlf=false -c core.eol=lf checkout -q --detach FETCH_HEAD
 fi
+# A checkout from an earlier pin (1.0.x used 5244db92) moves with --reset, which throws away its changes.
+if [ "$(git -C "$RUNTIME" rev-parse HEAD)" != "$COMMIT" ] && [ "${1:-}" = --reset ]; then
+  echo "Moving $RUNTIME to $COMMIT (--reset): its changes are thrown away."
+  git -C "$RUNTIME" -c core.autocrlf=false -c core.eol=lf fetch -q --depth 1 origin "$COMMIT"
+  git -C "$RUNTIME" -c core.autocrlf=false -c core.eol=lf checkout -q -f --detach FETCH_HEAD
+fi
 [ "$(git -C "$RUNTIME" rev-parse HEAD)" = "$COMMIT" ] || {
-  echo "Runtime revision differs. Use the pinned runtime in a separate checkout."
+  echo "$RUNTIME is at $(git -C "$RUNTIME" rev-parse --short HEAD), this tree needs $COMMIT."
+  echo "Run this setup again with --reset to move it (throws away changes there), or use a separate checkout."
   exit 1
 }
 # The patch, swapped whenever it changed (scripts/update_runtime_patch.sh). Your own edits in

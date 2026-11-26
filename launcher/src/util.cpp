@@ -1,6 +1,9 @@
 #include "util.h"
 
 #ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX   // windows.h min/max macros break std::min/std::max with MSVC
+#endif
 #include <windows.h>
 #include <bcrypt.h>
 #include <shellapi.h>
@@ -140,10 +143,12 @@ std::string copy_tree(const fs::path& src, const fs::path& dst, Progress* p)
     fs::create_directories(dst, ec);
     if (ec) return "cannot create " + u8(dst) + ": " + ec.message();
     std::vector<char> buf(4u << 20);
-    for (auto it = fs::recursive_directory_iterator(src, fs::directory_options::skip_permission_denied, ec);
+    // No skip_permission_denied: a folder that cannot be read fails the copy rather than leaving a
+    // partial game or update that looks complete.
+    for (auto it = fs::recursive_directory_iterator(src, ec);
          !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
         if (p && p->cancel) return "cancelled";
-        const fs::path rel = fs::relative(it->path(), src, ec);
+        const fs::path rel = it->path().lexically_relative(src);
         const fs::path out = dst / rel;
         if (it->is_directory(ec)) { fs::create_directories(out, ec); continue; }
         if (!it->is_regular_file(ec)) continue;
@@ -154,17 +159,28 @@ std::string copy_tree(const fs::path& src, const fs::path& dst, Progress* p)
         fs::create_directories(out.parent_path(), ec);
         HANDLE o = CreateFileW(out.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (o == INVALID_HANDLE_VALUE) { CloseHandle(in); return "cannot write " + u8(out); }
-        DWORD got = 0; bool ok = true;
-        while (ReadFile(in, buf.data(), (DWORD)buf.size(), &got, nullptr) && got) {
+        std::string failure;
+        for (;;) {
+            DWORD got = 0;
+            if (!ReadFile(in, buf.data(), (DWORD)buf.size(), &got, nullptr)) {
+                failure = "read failed at " + u8(it->path());
+                break;
+            }
+            if (got == 0) break;
             DWORD put = 0;
-            if (!WriteFile(o, buf.data(), got, &put, nullptr) || put != got) { ok = false; break; }
+            if (!WriteFile(o, buf.data(), got, &put, nullptr) || put != got) {
+                failure = "write failed (disk full?) at " + u8(out);
+                break;
+            }
             if (p) p->done += got;
-            if (p && p->cancel) { ok = false; break; }
+            if (p && p->cancel) { failure = "cancelled"; break; }
         }
-        FILETIME ct, at, wt;
-        if (GetFileTime(in, &ct, &at, &wt)) SetFileTime(o, &ct, &at, &wt);
+        if (failure.empty()) {
+            FILETIME ct, at, wt;
+            if (GetFileTime(in, &ct, &at, &wt)) SetFileTime(o, &ct, &at, &wt);
+        }
         CloseHandle(in); CloseHandle(o);
-        if (!ok) { DeleteFileW(out.c_str()); return p && p->cancel ? "cancelled" : "write failed (disk full?) at " + u8(out); }
+        if (!failure.empty()) { DeleteFileW(out.c_str()); return failure; }
     }
     if (ec) return "reading " + u8(src) + ": " + ec.message();
     return {};
@@ -559,8 +575,12 @@ std::string sha256_file(const fs::path& p, Progress* prog)
     if (BCryptCreateHash(alg, &h, nullptr, 0, nullptr, 0, 0) == 0) {
         HANDLE f = CreateFileW(p.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
         if (f != INVALID_HANDLE_VALUE) {
-            std::vector<unsigned char> buf(1u << 20); DWORD got = 0; bool ok = true;
-            while (ReadFile(f, buf.data(), (DWORD)buf.size(), &got, nullptr) && got) {
+            std::vector<unsigned char> buf(1u << 20);
+            bool ok = true;
+            for (;;) {
+                DWORD got = 0;
+                if (!ReadFile(f, buf.data(), (DWORD)buf.size(), &got, nullptr)) { ok = false; break; }
+                if (got == 0) break;
                 if (BCryptHashData(h, buf.data(), got, 0) != 0) { ok = false; break; }
                 if (prog) { prog->done += got; if (prog->cancel) { ok = false; break; } }
             }
