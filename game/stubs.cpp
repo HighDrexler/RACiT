@@ -2614,7 +2614,8 @@ extern "C" void racacit_clock_tick(ppu_context* ctx)
  * game's 50 us polls. A cap under 60 (RACACIT_FPS_CAP=30, the launcher's
  * steady-30 option, 2026-11-23) runs the same logic with a period of at least
  * 1/cap (game time is unaffected: the clock's max_dt is 0.08 s, RACACIT_CLOCK_LOG).
- * Returns 0 (run the original) otherwise. USA disc only, like the rest of the unlock.
+ * Returns 0 (run the original) otherwise. On both the disc and update 1.20, like the rest of
+ * the unlock (1.20 gets this hook from versions/BCUS98124-1.20-hooks.json, func_005C54A0).
  * -------------------------------------------------------------------------*/
 #include <thread>
 extern "C" uint64_t ppu_timebase_now(void);
