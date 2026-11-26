@@ -17467,10 +17467,10 @@ index b6bf0704..7dc3db15 100644
   * PSO identity should use rsx_fp_structural_hash in buffered mode. */
 diff --git a/libs/video/rsx_host_ui.c b/libs/video/rsx_host_ui.c
 new file mode 100644
-index 00000000..80d77be2
+index 00000000..9997141e
 --- /dev/null
 +++ b/libs/video/rsx_host_ui.c
-@@ -0,0 +1,2470 @@
+@@ -0,0 +1,2477 @@
 +/*
 + * ps3recomp - host settings menu and on-screen display. See rsx_host_ui.h.
 + */
@@ -18715,7 +18715,14 @@ index 00000000..80d77be2
 +    LOCK();
 +    snprintf(s_note.head, sizeof s_note.head, "Display at %d Hz", hz);
 +    snprintf(s_note.l1, sizeof s_note.l1, "60 fps can't be shown evenly at %d Hz: without G-Sync/FreeSync, motion judders.", hz);
-+    snprintf(s_note.l2, sizeof s_note.l2, "Turn on G-Sync/FreeSync, or set the display to 60, 120 or 240 Hz in Windows.");
++#if defined(_WIN32)
++    const char* where = "in Windows display settings";
++#elif defined(__APPLE__)
++    const char* where = "in System Settings > Displays";
++#else
++    const char* where = "in the system display settings";
++#endif
++    snprintf(s_note.l2, sizeof s_note.l2, "Turn on G-Sync/FreeSync, or set the display to 60, 120 or 240 Hz %s.", where);
 +    s_note.t0 = 0; s_note.on = 1;
 +    s_hint_hz = hz;
 +    UNLOCK();
@@ -19537,7 +19544,7 @@ index 00000000..80d77be2
 +    UNLOCK();
 +}
 +
-+/* display_check's notice: top left (trophies take the right), 12 s, fades. */
++/* display_check's notice: top centre (the FPS counter takes the left, trophies the right), 12 s, fades. */
 +static void note_popup(ui_out* o, int sw, int sh)
 +{
 +    (void)sh;
@@ -19560,7 +19567,7 @@ index 00000000..80d77be2
 +    float alpha = 1.0f;
 +    if (age > life - 600) alpha = (float)(life - age) / 600.0f;
 +    const int a = (int)(alpha * 255.0f);
-+    const float x0 = px * 0.8f, y0 = px * 0.8f;
++    const float x0 = ((float)sw - pw) * 0.5f, y0 = px * 0.8f;
 +    rect(o, x0, y0, x0 + pw, y0 + ph, rgba(16, 18, 26, (int)(alpha * 236.0f)));
 +    rect(o, x0, y0, x0 + px * 0.16f, y0 + ph, rgba(242, 140, 40, a));
 +    text(o, x0 + pad * 1.4f, y0 + pad, s_note.head, rgba(242, 140, 40, a));
