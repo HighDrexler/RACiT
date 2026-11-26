@@ -9431,7 +9431,7 @@ index c4e4d849..0ed12868 100644
  /* ---- decoded state getters -------------------------------------------- */
  
 diff --git a/libs/video/rsx_draw_engine.c b/libs/video/rsx_draw_engine.c
-index 19548e0a..6356204b 100644
+index 19548e0a..661ca903 100644
 --- a/libs/video/rsx_draw_engine.c
 +++ b/libs/video/rsx_draw_engine.c
 @@ -11,6 +11,7 @@
@@ -11941,9 +11941,9 @@ index 19548e0a..6356204b 100644
 +#define PSTAGE(i) do { const u64 _n = eng_rdtsc(); s_pstage[i] += _n - _pt; _pt = _n; } while (0)
 +static u64 s_last_pipe_key;   /* the key eng_pipeline_get last resolved (RSX_ENG_PROBE) */
 +static int s_srgb_draw;       /* the draw eng_pipeline_get last saw packs its colour as sRGB */
-+const rsx_prog_inputs* rsx_draw_engine_cur_prog;
-+const u8* rsx_draw_engine_cur_vp;
-+const u8* rsx_draw_engine_cur_fp;
++RSX_ENG_TLS const rsx_prog_inputs* rsx_draw_engine_cur_prog;
++RSX_ENG_TLS const u8* rsx_draw_engine_cur_vp;
++RSX_ENG_TLS const u8* rsx_draw_engine_cur_fp;
 +
 +/* The shader text eng_pipeline_get builds, from its inputs alone (the shader
 + * prepare calls it again for recorded programs). The same calls in the same
@@ -16342,7 +16342,7 @@ index 19548e0a..6356204b 100644
  {
      g.last_flip_buffer = buffer_id & 7u;
 diff --git a/libs/video/rsx_draw_engine.h b/libs/video/rsx_draw_engine.h
-index 097692ce..5176400c 100644
+index 097692ce..1b0a6084 100644
 --- a/libs/video/rsx_draw_engine.h
 +++ b/libs/video/rsx_draw_engine.h
 @@ -71,9 +71,11 @@ typedef struct rsx_be_sampler_desc {
@@ -16535,7 +16535,7 @@ index 097692ce..5176400c 100644
  
  /* --- test hooks ---------------------------------------------------------- */
  
-@@ -404,6 +478,37 @@ void rsx_draw_engine_write_topology_indices(u32 primitive, u32 source_refs,
+@@ -404,6 +478,49 @@ void rsx_draw_engine_write_topology_indices(u32 primitive, u32 source_refs,
                                              const u32* occurrence_to_unique,
                                              u32* indices);
  
@@ -16559,10 +16559,22 @@ index 097692ce..5176400c 100644
 +    u32 wpos_grid[2];            /* v2: 0 unless WPOS is scaled */
 +} rsx_prog_inputs;
 +
-+/* Set by the engine around each backend pipeline_create call (NULL otherwise). */
-+extern const rsx_prog_inputs* rsx_draw_engine_cur_prog;
-+extern const u8* rsx_draw_engine_cur_vp;
-+extern const u8* rsx_draw_engine_cur_fp;
++/* Set by the engine around each backend pipeline_create call (NULL otherwise).
++ * Per thread: with the backend on its own thread (rsx_be_proxy.c) the engine
++ * sets these on the render thread while the worker sets its own copies around
++ * the real pipeline_create it replays, then clears them. Shared, the render
++ * thread could pass the NULL check and then copy from a pointer the worker
++ * had just cleared (an access violation in p_pipe_create, Windows 1.0.1). */
++#if defined(__cplusplus)
++#  define RSX_ENG_TLS thread_local
++#elif defined(_MSC_VER) && !defined(__clang__)
++#  define RSX_ENG_TLS __declspec(thread)
++#else
++#  define RSX_ENG_TLS _Thread_local
++#endif
++extern RSX_ENG_TLS const rsx_prog_inputs* rsx_draw_engine_cur_prog;
++extern RSX_ENG_TLS const u8* rsx_draw_engine_cur_vp;
++extern RSX_ENG_TLS const u8* rsx_draw_engine_cur_fp;
 +
 +/* The vertex and pixel shader text for `in` and its programs, as the engine builds it.
 + * *vi / *fi: the decompilers' results (> 0 ok); *nconst: the fragment constants it reads. */
