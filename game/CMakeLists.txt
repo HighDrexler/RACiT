@@ -357,6 +357,9 @@ if(SPU_SOURCES)
         else()
             set_source_files_properties(${SPU_SOURCES} PROPERTIES COMPILE_OPTIONS "-O2")
             if(APPLE)
+                # -O3 as on x86-64 and Android: the broad-phase collision job
+                # (B9B580) and the PPU hand commands back and forth all frame.
+                set_source_files_properties(${SPU_SOURCES} PROPERTIES COMPILE_OPTIONS "-O3")
                 set_source_files_properties(${SPU_SOURCES} PROPERTIES
                     COMPILE_DEFINITIONS "SPU_USE_DISPATCH_MT;SPU_LS_DIAG=0;SPU_LS_IN_CONTEXT=1")
             endif()
