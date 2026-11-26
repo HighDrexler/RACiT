@@ -5,6 +5,7 @@
 #include <cstdlib>
 extern "C" {
 int racit_skip_puzzles_mode(const char* setting);
+int racit_skip_puzzle_prompt_at(unsigned long long now_ms);
 void racit_skip_puzzles_set(int mode);
 void racit_skip_puzzle_input_at(unsigned long long now_ms, int key_held, int combo_held, int menu_open);
 int racit_skip_puzzle_now_at(const char* puzzle, unsigned long long now_ms);
@@ -15,17 +16,19 @@ static int failures;
 int main()
 {
     /* The setting (settings.txt RACACIT_SKIP_PUZZLES): words or numbers, any case, else off. */
-    CHECK(racit_skip_puzzles_mode(nullptr) == 0);
-    CHECK(racit_skip_puzzles_mode("") == 0);
+    CHECK(racit_skip_puzzles_mode(nullptr) == 2);   /* unset: the Skip button */
+    CHECK(racit_skip_puzzles_mode("") == 2);
     CHECK(racit_skip_puzzles_mode("off") == 0 && racit_skip_puzzles_mode("0") == 0);
     CHECK(racit_skip_puzzles_mode("auto") == 1 && racit_skip_puzzles_mode("AUTO") == 1 && racit_skip_puzzles_mode("1") == 1);
     CHECK(racit_skip_puzzles_mode("key") == 2 && racit_skip_puzzles_mode(" Key\r\n") == 2 && racit_skip_puzzles_mode("2") == 2);
     CHECK(racit_skip_puzzles_mode("yes") == 0 && racit_skip_puzzles_mode("3") == 0 && racit_skip_puzzles_mode("keys") == 0);
 
-    /* Unset in the environment: off, and nothing solves, key or not. */
+    /* Unset in the environment: the Skip button, so a press solves the puzzle being played and
+     * nothing solves without one. */
     unsigned long long t = 1000;
+    CHECK(!racit_skip_puzzle_now_at("p", t));
     racit_skip_puzzle_input_at(t, 1, 0, 0); racit_skip_puzzle_input_at(t + 16, 0, 0, 0);
-    CHECK(!racit_skip_puzzle_now_at("p", t + 20));
+    CHECK(racit_skip_puzzle_now_at("p", t + 20));
 
     /* Auto: every puzzle, every time it asks. */
     racit_skip_puzzles_set(1);
@@ -92,6 +95,18 @@ int main()
     racit_skip_puzzle_input_at(t + 2000, 1, 0, 0); racit_skip_puzzle_input_at(t + 2016, 0, 0, 0);
     racit_skip_puzzles_set(2);
     CHECK(!racit_skip_puzzle_now_at("p", t + 2020));
+    /* The Skip prompt shows while a puzzle hook keeps asking, goes 300 ms after it stops, and
+     * only in the Skip button mode. */
+    t = 40000;
+    racit_skip_puzzle_now_at("p", t);
+    CHECK(racit_skip_puzzle_prompt_at(t + 16) && racit_skip_puzzle_prompt_at(t + 300));
+    CHECK(!racit_skip_puzzle_prompt_at(t + 400));
+    racit_skip_puzzles_set(1);
+    racit_skip_puzzle_now_at("p", t + 500);
+    CHECK(!racit_skip_puzzle_prompt_at(t + 516));
+    racit_skip_puzzles_set(0);
+    racit_skip_puzzle_now_at("p", t + 600);
+    CHECK(!racit_skip_puzzle_prompt_at(t + 616));
     std::printf(failures ? "skip_puzzles_test: %d failure(s)\n" : "skip_puzzles_test: all passed\n", failures);
     return failures ? 1 : 0;
 }

@@ -175,9 +175,9 @@ static const char* kSettingsTemplateRest =
     "RACACIT_START_SKIPS_MOVIES=1\r\n"
     "RACACIT_ALL_CUTSCENES_SKIPPABLE=1\r\n"
     "# --- Puzzles (also Settings > General > Puzzles in the game) ---\r\n"
-    "# off = play them, auto = solve each as it starts, key = the skip key\r\n"
-    "# (RACACIT_BIND_SKIP_PUZZLE, F2), or R3 + Down held a second on a controller, solves the current one.\r\n"
-    "RACACIT_SKIP_PUZZLES=off\r\n";
+    "# key = a SKIP prompt shows during each puzzle: hold Square a second, press the skip key\r\n"
+    "# (RACACIT_BIND_SKIP_PUZZLE, F2) or hold R3 + Down to solve it. off = play them, auto = solve each as it starts.\r\n"
+    "RACACIT_SKIP_PUZZLES=key\r\n";
 
 static const char* kIniTemplate =
     "# RACiT Launcher options (NAME=value)\r\n"
