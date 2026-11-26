@@ -161,6 +161,16 @@ fn lift(c: &Ctx, b: &Block) -> Result<bool> {
 }
 
 /// Every block lifted on its own thread; results in block order.
+/// A requested module whose lift failed stops the run before its registry is written, so a
+/// build never silently ships without that SPU code (the registry keeps its last good copy).
+fn lifted(name: &str, ok: bool) -> Result<()> {
+    if ok {
+        Ok(())
+    } else {
+        Err(format!("{name}: lifter FAILED; registry unchanged. See out/spu_jobs/{name}.lift.log").into())
+    }
+}
+
 fn lift_all(c: &Ctx, blocks: &[Block]) -> Result<Vec<bool>> {
     parallel_map(blocks, c.jobs, |b| lift(c, b))
         .into_iter()
@@ -376,9 +386,7 @@ fn main_jobs(
     let (mut decls, mut regs, mut blobs) = (Vec::new(), Vec::new(), Vec::new());
     for ((&(i, a, size), b), ok) in plan.iter().zip(&blocks).zip(ok) {
         let name = &b.name;
-        if !ok {
-            return Err(format!("{name}: lifter FAILED; registry unchanged. See out/spu_jobs/{name}.lift.log").into());
-        }
+        lifted(name, ok)?;
         let img = IMAGE_ID_BASE + i;
         decls.push(format!("extern void {name}_spu_recomp_register(void);"));
         blobs.push(blob(name, &b.raw));
@@ -446,9 +454,7 @@ fn main_extra(
     for (((&(name, _, size, base, img), b), ok), ea) in
         EXTRA_BLOCKS.iter().zip(&blocks).zip(ok).zip(eas)
     {
-        if !ok {
-            return Err(format!("{name}: lifter FAILED; registry unchanged. See out/spu_jobs/{name}.lift.log").into());
-        }
+        lifted(name, ok)?;
         if b.name == "igpm_rt" {
             patch_igpm_clear(&c.spu_dir.join(name).join("spu_recomp.c"))?;
         }
@@ -672,9 +678,7 @@ fn main_sub(
                 if version.is_some() && ea == 0xDB4180 && img != 506 {
                     return Err("Changed update module image order differs".into());
                 }
-                if !ok[block] {
-                    return Err(format!("{name}: lifter FAILED; registry unchanged. See out/spu_jobs/{name}.lift.log").into());
-                }
+                lifted(name, ok[block])?;
                 let base = b.base;
                 decls.push(format!("extern void {name}_spu_recomp_register(void);"));
                 blobs.push(blob(name, &b.raw));
@@ -885,5 +889,17 @@ fn main() -> ExitCode {
             eprintln!("{msg}");
             ExitCode::from(1)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::lifted;
+
+    #[test]
+    fn a_failed_lift_stops_the_run() {
+        assert!(lifted("job_B9B580", true).is_ok());
+        let error = lifted("job_B9B580", false).unwrap_err().to_string();
+        assert!(error.contains("job_B9B580: lifter FAILED; registry unchanged"), "{error}");
     }
 }
