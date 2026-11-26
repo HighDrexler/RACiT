@@ -346,6 +346,7 @@ static unsigned long long s_rt_present_us;
 extern "C" void ps3_tl_at(unsigned long long t, char ev, uint32_t a, uint32_t b);
 extern "C" void ps3_tl(char ev, uint32_t a, uint32_t b);
 extern "C" unsigned long long ps3_qpc_us(void);
+extern "C" void racit_record_present(void);   /* frame_times.cpp */
 static void present_guest_frame(void)
 {
     unsigned long long _t = rt_now_us();
@@ -364,6 +365,7 @@ static void present_guest_frame(void)
           LOAD_STAT("frame %.0f ms (presents >= 100 ms apart)", (now - last) / 1e3);
       last = now; }
 #endif
+    racit_record_present();
 }
 
 /* The FIFO walker runs on frame_clock. A guest thread that has just moved
