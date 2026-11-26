@@ -38,6 +38,8 @@ esac
 LIFT_TOOLS="${RACIT_LIFT_TARGET:-$ROOT/rust/racit-lift/target}"
 command -v cargo >/dev/null || { echo "The build tools under rust/ need Rust: install it from https://rustup.rs (or Homebrew on macOS) and run this again."; exit 1; }
 cargo build --release --quiet --manifest-path "$ROOT/rust/racit-lift/Cargo.toml" --target-dir "$LIFT_TOOLS"
+# Repository rules (runtime patch line endings, no game data tracked): rust/racit-lift check-repo.
+"$LIFT_TOOLS/release/check-repo" --root "$ROOT"
 PATCH_LIFT=("$LIFT_TOOLS/release/patch-lift" --root "$ROOT")
 # lift-spu-jobs lifts the SPU job modules in parallel, each through ps3recomp's Python tools.
 LIFT_SPU_JOBS=("$LIFT_TOOLS/release/lift-spu-jobs" --root "$ROOT" ${JOBS:+--jobs "$JOBS"})
