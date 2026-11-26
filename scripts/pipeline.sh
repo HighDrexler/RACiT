@@ -74,6 +74,16 @@ mkdir -p "$OUT" "$RECOMP" "$SPU" "$PRX" "$HOST"
 # with their own function and data addresses.
 [ "$HOST" = "$ROOT/game" ] || "$LIFT_TOOLS/release/prepare-game-host" --root "$ROOT" "$ELF" "$HOST" --profile "$PROFILE"
 
+# The lift (stages 1 to 4) is skipped when nothing it reads changed and its published
+# output is as the last lift left it (rust/racit-lift lift-stamp). RACIT_RELIFT=1 lifts anyway.
+LIFT_STAMP=("$LIFT_TOOLS/release/lift-stamp")
+STAMP="$OUT/.lift-stamp"
+STAMP_ARGS=(--root "$ROOT" --elf "$ELF" --libsre "$LIBSRE" --profile "$PROFILE" "$RECOMP" "$SPU" "$PRX")
+if "${LIFT_STAMP[@]}" check "$STAMP" "${STAMP_ARGS[@]}"; then
+  echo "== 1-4/5 Lift unchanged since the last run: skipped (RACIT_RELIFT=1 lifts anyway)"
+else
+rm -f -- "$STAMP"
+
 echo "== 1/5 Loader"
 $PY "$PS3R/tools/ppu_loader.py" "$ELF" --output "$OUT"
 BASE="$(basename "${ELF%.*}")"
@@ -166,6 +176,8 @@ publish_lift "$PPU_STAGE" "$RECOMP"
 publish_lift "$RACACIT_SPU_DIR" "$SPU"
 publish_lift "$RACACIT_PRX_DIR" "$PRX"
 export RACACIT_SPU_DIR="$SPU" RACACIT_PRX_DIR="$PRX"
+"${LIFT_STAMP[@]}" write "$STAMP" "${STAMP_ARGS[@]}"
+fi
 
 # SKIP_DESKTOP=1: lift only (Windows: the build is windows/, see README).
 [ "${SKIP_DESKTOP:-0}" = 1 ] && { echo "Lifted: $RECOMP and $SPU"; exit 0; }
