@@ -374,6 +374,10 @@ static void present_guest_frame(void)
  * idle menu, ~40 in play, with every thread mostly waiting. */
 #if defined(_WIN32) || defined(__ANDROID__) || defined(__APPLE__)
 extern "C" int racacit_few_cpus(void);   /* sys_timer.c */
+#if defined(_WIN32)
+extern "C" void racacit_cpu_setup(int allow_placement);   /* sys_timer.c */
+extern "C" void racacit_cpu_role(int role);               /* sys_timer.c: 0 = the FIFO walker's quiet core */
+#endif
 static HANDLE s_walker_wake;
 static void walker_wake(void) { if (s_walker_wake) SetEvent(s_walker_wake); }
 #endif
@@ -642,6 +646,10 @@ static DWORD WINAPI frame_clock(LPVOID)
 
     { char _hb[160]; snprintf(_hb, sizeof _hb, "[hosttid] %lu rsx frame clock / FIFO walker%c", (unsigned long)GetCurrentThreadId(), 10); fputs(_hb, stderr); }
     LOAD_STAT("renderer init starts");
+#ifdef _WIN32
+    /* A physical core of its own on SMT CPUs with 6+ cores (sys_timer.c quiet cores). */
+    racacit_cpu_role(0);
+#endif
     int rsx_ok = (rsx_backend_init(WINDOW_WIDTH, WINDOW_HEIGHT, title) == 0);
 #if defined(__linux__) && !defined(__ANDROID__) && defined(RACACIT_HAVE_VULKAN)
     if (!rsx_ok) {
@@ -1798,7 +1806,21 @@ int main(int argc, char** argv)
         const char* build = "standard build (RaCACiT.exe, AVX2)";
 #endif
         printf("[racacit] %s; CPU: %s, %lu logical processors\n", build, *b ? b : "unknown",
-               (unsigned long)si.dwNumberOfProcessors); }
+               (unsigned long)si.dwNumberOfProcessors);
+        /* The Windows build (RtlGetVersion: GetVersionEx answers 6.2 to an exe
+         * without a manifest entry): hybrid CPUs schedule very differently on
+         * Windows 10 and 11. */
+        {   typedef LONG (WINAPI* rgv_t)(OSVERSIONINFOW*);
+            OSVERSIONINFOW vi; memset(&vi, 0, sizeof vi); vi.dwOSVersionInfoSize = sizeof vi;
+            HMODULE nt = GetModuleHandleA("ntdll.dll");
+            rgv_t rgv = nt ? (rgv_t)(void*)GetProcAddress(nt, "RtlGetVersion") : NULL;
+            if (rgv && rgv(&vi) == 0)
+                printf("[racacit] Windows %lu.%lu build %lu%s\n", (unsigned long)vi.dwMajorVersion,
+                       (unsigned long)vi.dwMinorVersion, (unsigned long)vi.dwBuildNumber,
+                       vi.dwMajorVersion == 10 && vi.dwBuildNumber >= 22000 ? " (Windows 11)" : ""); }
+        /* Core classes and chiplets, the wait style, and on a hybrid CPU the
+         * game kept on its fast cores (sys_timer.c). Before any game thread. */
+        racacit_cpu_setup(!prepare_only); }
 #endif
 
     if (!alloc_guest_vm()) {

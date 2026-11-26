@@ -25,7 +25,7 @@
 #include "gfx.h"
 #include "store.h"
 
-static const char* kLauncherVersion = "1.0.2";
+static const char* kLauncherVersion = "1.2";
 const char* g_launcher_version = kLauncherVersion;
 enum { WM_APP_TASK = WM_APP + 1, WM_APP_GAME_EXIT, WM_APP_UPDATE, TIMER_TICK = 1 };
 
@@ -244,6 +244,10 @@ static const std::vector<Opt>& opts()
         // Into the Nexus only (add_options): the game's own 30 fps mode, as on the PS3. The game
         // reads NEXUS_FPS=30 at start (rac-nexus patch_lift_nexus.py fps60); unset = 60 fps.
         { "Performance", "NEXUS_FPS", "Frame rate", "", { { "", "60 fps" }, { "30", "30 fps (as the PS3)" } } },
+        // A Crack in Time only (add_options): RACACIT_FPS_CAP=30 runs the game's frame limiter at a
+        // steady 30 (game/stubs.cpp racacit_frame_limit; USA disc and update 1.20). Above 60 is the
+        // frame-rate unlock, set by hand; it shows as "(custom)".
+        { "Performance", "RACACIT_FPS_CAP", "Frame rate", "", { { "", "60 fps" }, { "30", "Steady 30 fps (for slower PCs)" } } },
         { "Performance", "RACACIT_CPU_MODE", "CPU usage", "efficient", { { "efficient", "Efficient" }, { "max", "Maximum (spin on all cores)" } } },
         // Which exe Play starts (Store::launch): RaCACiT.exe (AVX2, FMA, BMI2) or RaCACiT_compat.exe
         // (SSE4.2, for older processors). Automatic: by what this PC's processor has.
@@ -437,7 +441,7 @@ static void import_screen()
                      if (!r.empty()) message("Could not import", r);
                      else if (S->game().ok) { message("Ready to play", *sum + "\nPress Play."); set_screen(home); }
                      else { message("Game imported", *sum + "\nNow add EBOOT.elf (step 2)."); set_screen(import_screen); }
-                     delete sum; refresh();
+                     delete sum; ::g.forget_images(); refresh();
                  });
     });
     iso.accent = !have_game;
@@ -449,6 +453,7 @@ static void import_screen()
         const fs::path p = pick_folder(g_hwnd, L"Pick your game's USRDIR folder (in PS3_GAME)");
         if (p.empty()) return;
         const std::string r = S->use_game_in_place(p);
+        ::g.forget_images();   // its art (refresh_art), not the picture cached from the last disc
         std::error_code ec;
         if (r.empty() && !S->game().ok && fs::exists(S->pending_elf(), ec)) S->add_elf(S->pending_elf());
         const GameInfo g = S->game();
@@ -539,6 +544,14 @@ static Item ds_plus_item()
     return it;
 }
 
+/* Game build set to Older processors by hand on a PC whose processor has AVX2: Play starts the
+ * slower exe (Store::launch reads the setting the same way). A Crack in Time only: Into the
+ * Nexus has no older-processor build. */
+static bool compat_on_avx2()
+{
+    return S->prof == &kRacitProfile && lower(trim(S->settings.get("RACACIT_GAME_BUILD"))) == "compat" && cpu_has_avx2();
+}
+
 static int s_bind_tab = 0;   // Key bindings: 0 by button, 1 by key
 static void bindings_screen();
 static void pad_bindings_screen();
@@ -550,6 +563,8 @@ static void add_options(const std::vector<std::string>& sections)
         if (!sections.empty() && std::find(sections.begin(), sections.end(), std::string(o.section)) == sections.end()) continue;
         if (!plus && ds_plus_only(o.key)) continue;
         if (!strncmp(o.key, "NEXUS_", 6) && g_prof != &kNexusProfile) continue;   /* Into the Nexus's own */
+        if (!strcmp(o.key, "RACACIT_GAME_UPDATE") && g_prof != &kRacitProfile) continue;   /* A Crack in Time's own */
+        if (!strcmp(o.key, "RACACIT_FPS_CAP") && g_prof != &kRacitProfile) continue;
         if (section != o.section) {
             section = o.section; scr.items.push_back(header(section));
             if (section == "Controller") scr.items.push_back(ds_plus_item());
@@ -557,6 +572,10 @@ static void add_options(const std::vector<std::string>& sections)
         std::string value, label; int idx; std::vector<std::pair<std::string, std::string>> ch;
         option_value(o, &value, &label, &idx, &ch);
         Item it; it.kind = K_OPTION; it.label = o.label; it.sub = label;
+        /* Older processors chosen by hand on a PC that has AVX2: slower, and it stays visible
+         * (players picked it hoping for more frames; the notice when it is chosen is easy to miss). */
+        if (!strcmp(o.key, "RACACIT_GAME_BUILD") && compat_on_avx2())
+            it.sub = "Older processors -- slower on this PC";   /* the row fits about 40 characters */
         const Opt* op = &o;
         auto step = [op](int d) {
             std::string value, label; int idx; std::vector<std::pair<std::string, std::string>> ch;
@@ -570,9 +589,21 @@ static void add_options(const std::vector<std::string>& sections)
                         "This PC's processor has no AVX2, which the standard build needs: it will not start. "
                         "Automatic or Older processors picks the build made for it.");
             if (!strcmp(op->key, "RACACIT_GAME_BUILD") && ch[idx].first == "compat" && cpu_has_avx2())
-                message("Older-processor build",
-                        "This PC's processor has AVX2, so the standard build runs here and is faster. The older-"
-                        "processor build works too; it is meant for processors without AVX2.");
+                message("Older-processor build: slower on this PC",
+                        "This PC's processor has AVX2, so the standard build runs here, and it is faster: the "
+                        "older-processor build gave about 15% fewer frames in our tests.\n\n"
+                        "It does not help a low frame rate. It only exists so processors without AVX2 (before "
+                        "Intel 2013 / AMD Ryzen) can start the game at all. Automatic picks the right build.");
+            if (!strcmp(op->key, "RACACIT_FPS_CAP") && ch[idx].first == "30") {
+                const GameInfo gi = S->game();
+                message("Steady 30 fps",
+                        std::string("The game holds an even 30 frames a second: every frame stays on screen for two refreshes of "
+                        "a 60 Hz display. For PCs that cannot keep 60, where the frame rate swings between 25 and 50 and "
+                        "feels uneven. Game speed stays right.") +
+                        (gi.ok && gi.title_id != "BCUS98124"
+                             ? "\n\nThis needs the USA disc (BCUS98124); your game is " + gi.title_id + ", so it stays at 60 for now."
+                             : std::string()));
+            }
             if (!strcmp(op->key, "RACACIT_CHEATS") && ch[idx].first == "1")
                 message("Cheat menu on",
                         "The game's Settings menu (F1) now has a Cheats page where the Trophies page was: bolts, "
@@ -1415,6 +1446,9 @@ static void home()
         scr.info.push_back({ "Last saved", file_date(newest / L"GAME.SAV") });
     }
     if (!en.empty()) scr.info.push_back({ "Mods", std::to_string(en.size()) + " on" });
+    if (gi.ok && compat_on_avx2())
+        scr.info.push_back({ "Game build", "Older processors, set in Settings > Performance. This PC has AVX2, so the "
+                             "standard build is faster here: set Game build to Automatic.", col::TEXT_BAD });
     if (!last_session.empty()) scr.info.push_back({ "Last session", last_session, col::TEXT_DIM });
     const bool show_update = g_update_ready && !game_proc;
     if (game_proc) {
@@ -1931,7 +1965,7 @@ static void switch_game(int k)
     R->ini.put("last_game", S->prof->key); R->ini.save();
     S->reload();
     std::error_code ec;
-    if (S->game().ok && !fs::exists(S->logo(), ec)) S->refresh_art();
+    if (!S->art_current()) { S->refresh_art(); g.forget_images(); }   // the art of the disc it points at (a wrong pick used to stay)
     focus = 0; scroll = scroll_to = 0; hover = -1; editing = false;
 #ifdef __APPLE__
     SDL_SetWindowTitle((SDL_Window*)g_hwnd, S->prof->full_name);
@@ -2214,7 +2248,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show)
     sdl_ok = SDL_Init(0) == 0;
     pad_open();
 
-    if (S->game().ok && !fs::exists(S->logo())) S->refresh_art();   // refresh_art_once: art from before 0.4
+    if (!S->art_current()) S->refresh_art();   // art from before 0.4, or left by another disc (assets/art_source.txt)
     set_screen(home);
     if (!S->game().ok) set_screen(import_screen);   // first run: where the game comes from
     ShowWindow(g_hwnd, show == SW_HIDE ? SW_SHOWNORMAL : show);

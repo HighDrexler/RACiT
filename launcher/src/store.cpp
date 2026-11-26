@@ -42,13 +42,13 @@ extern char** environ;
 #ifdef __APPLE__
 const GameProfile kRacitProfile = { "racit", "A Crack in Time", "Ratchet & Clank Future: A Crack in Time", "RATCHET & CLANK FUTURE", L"",
     { { "BCUS98124", "USA", RACIT_GAME_EXE, L"RaCACiT_compat.exe", "406bded328d9dbdfa9684ed392554ca34c76f4ed95aa21685f622d3ab2b04592" },
-      { "BCES00511", "Europe", L"RaCACiT_BCES00511.exe", L"RaCACiT_BCES00511_compat.exe", "6debdca0f181f35d98ebe23faabe2531b697c558b4e3384b06630173400674c1" } }, true, { "BCUS98124", "BCES00511" }, "1.0.2" };
+      { "BCES00511", "Europe", L"RaCACiT_BCES00511.exe", L"RaCACiT_BCES00511_compat.exe", "6debdca0f181f35d98ebe23faabe2531b697c558b4e3384b06630173400674c1" } }, true, { "BCUS98124", "BCES00511" }, "1.2" };
 const GameProfile kNexusProfile = { "nexus", "Into the Nexus", "Ratchet & Clank: Into the Nexus", "RATCHET & CLANK", L"nexus",
     { { "BCUS99245", "USA", L"RaCNexus", nullptr, "ca1a1a293d211095fc834eaaa10cd5fa9248b0e0328919fdeadeed1675c52c3f" } }, false, { "BCUS99245", "NPUA80908" }, "0.1.1" };
 #else
 const GameProfile kRacitProfile = { "racit", "A Crack in Time", "Ratchet & Clank Future: A Crack in Time", "RATCHET & CLANK FUTURE", L"",
     { { "BCUS98124", "USA", L"RaCACiT.exe", L"RaCACiT_compat.exe", "406bded328d9dbdfa9684ed392554ca34c76f4ed95aa21685f622d3ab2b04592" },
-      { "BCES00511", "Europe", L"RaCACiT_BCES00511.exe", L"RaCACiT_BCES00511_compat.exe", "6debdca0f181f35d98ebe23faabe2531b697c558b4e3384b06630173400674c1" } }, true, { "BCUS98124", "BCES00511" }, "1.0.2" };
+      { "BCES00511", "Europe", L"RaCACiT_BCES00511.exe", L"RaCACiT_BCES00511_compat.exe", "6debdca0f181f35d98ebe23faabe2531b697c558b4e3384b06630173400674c1" } }, true, { "BCUS98124", "BCES00511" }, "1.2" };
 const GameProfile kNexusProfile = { "nexus", "Into the Nexus", "Ratchet & Clank: Into the Nexus", "RATCHET & CLANK", L"nexus",
     { { "BCUS99245", "USA", L"RaCNexus.exe", nullptr, "ca1a1a293d211095fc834eaaa10cd5fa9248b0e0328919fdeadeed1675c52c3f" } }, false, { "BCUS99245", "NPUA80908" }, "0.1.1" };
 #endif
@@ -558,16 +558,46 @@ std::string Store::prepare_update_hdd()
     return {};
 }
 
+// The art comes from the disc the profile points at -- and only from a disc of
+// this profile's game: pointing Into the Nexus at A Crack in Time's folder copied
+// ACiT's icon and background into nexus\assets, and they stayed after the folder
+// was put right (tester report, 2026-11-24), because the art was only fetched again when
+// pic0.png was missing. assets\art_source.txt names the disc the art is from
+// (title id + folder); art_current() compares it with the profile's disc now.
+static std::string art_stamp(const GameInfo& g) { return g.title_id + "|" + u8(g.root); }
+static bool art_disc(const GameInfo& g) { return !g.title_id.empty() && supported_title(g.title_id); }
+bool Store::art_current() const
+{
+    const GameInfo g = game();
+    std::error_code ec;   // another game's disc (or none): current once refresh_art has cleared the art
+    if (!art_disc(g)) return !fs::exists(icon(), ec) && !fs::exists(background(), ec) && !fs::exists(logo(), ec);
+    if (art_stamp_cache_.empty()) art_stamp_cache_ = trim(read_text(assets() / L"art_source.txt", 4096));
+    if (art_stamp_cache_.empty()) art_stamp_cache_ = "?";
+    return art_stamp_cache_ == art_stamp(g);
+}
+
 std::string Store::refresh_art()
 {
     const GameInfo g = game();
     std::error_code ec;
     const fs::path pg = g.root / L"PS3_GAME";
+    if (!art_disc(g)) {   // another game's disc (or none): its art is not this game's
+        for (const fs::path& p : { icon(), background(), logo(), assets() / L"art_source.txt" }) fs::remove(p, ec);
+        art_stamp_cache_.clear();
+        return {};
+    }
     int n = 0;
     fs::create_directories(assets(), ec);
-    if (fs::exists(pg / L"ICON0.PNG", ec)) { fs::copy_file(pg / L"ICON0.PNG", icon(), fs::copy_options::overwrite_existing, ec); n += !ec; }
-    if (fs::exists(pg / L"PIC1.PNG", ec)) { fs::copy_file(pg / L"PIC1.PNG", background(), fs::copy_options::overwrite_existing, ec); n += !ec; }
-    if (fs::exists(pg / L"PIC0.PNG", ec)) { fs::copy_file(pg / L"PIC0.PNG", logo(), fs::copy_options::overwrite_existing, ec); }
+    auto take = [&](const wchar_t* from, const fs::path& to) {
+        if (fs::exists(pg / from, ec)) { fs::copy_file(pg / from, to, fs::copy_options::overwrite_existing, ec); return !ec; }
+        fs::remove(to, ec);   // the disc has none: no other disc's left behind
+        return false;
+    };
+    n += take(L"ICON0.PNG", icon());
+    n += take(L"PIC1.PNG", background());
+    take(L"PIC0.PNG", logo());
+    write_text_atomic(assets() / L"art_source.txt", art_stamp(g) + "\r\n");
+    art_stamp_cache_ = art_stamp(g);
     return n ? std::string() : "The game folder has no ICON0.PNG / PIC1.PNG.";
 }
 

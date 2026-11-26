@@ -2581,7 +2581,7 @@ extern "C" void racacit_clock_tick(ppu_context* ctx)
     static int cap = -1;
     if (cap < 0) { const char* e = getenv("RACACIT_FPS_CAP"); cap = e ? atoi(e) : 0; }
     static int log = -1;
-    if (log < 0) log = (cap > 60 || getenv("RACACIT_CLOCK_LOG")) ? 1 : 0;
+    if (log < 0) log = (cap > 60 || (cap > 0 && cap < 60) || getenv("RACACIT_CLOCK_LOG")) ? 1 : 0;
     const uint32_t clk = (uint32_t)ctx->gpr[3];
     racacit_frame60_tick(clk);
     if (cap > 60) {
@@ -2611,7 +2611,10 @@ extern "C" void racacit_clock_tick(ppu_context* ctx)
  * if the frame was late; display+0x2E0 keeps the slack. With RACACIT_FPS_CAP
  * above 60 this replaces it at its head with the same logic at a 1/cap period
  * (f1 keeps half-rate states at half rate) and a host sleep instead of the
- * game's 50 us polls. Returns 0 (run the original) otherwise.
+ * game's 50 us polls. A cap under 60 (RACACIT_FPS_CAP=30, the launcher's
+ * steady-30 option, 2026-11-23) runs the same logic with a period of at least
+ * 1/cap (game time is unaffected: the clock's max_dt is 0.08 s, RACACIT_CLOCK_LOG).
+ * Returns 0 (run the original) otherwise. USA disc only, like the rest of the unlock.
  * -------------------------------------------------------------------------*/
 #include <thread>
 extern "C" uint64_t ppu_timebase_now(void);
@@ -2620,10 +2623,16 @@ static void racacit_wr64(uint32_t ea, uint64_t v) { vm_write32(ea, (uint32_t)(v 
 extern "C" int racacit_frame_limit(ppu_context* ctx)
 {
     const int cap = racacit_fps_cap();
-    if (cap <= 60) return 0;
+    if (cap <= 0 || cap == 60) return 0;
     const uint32_t disp = vm_read32(vm_read32((uint32_t)ctx->gpr[2] - 0x5120u) - 0x7FF8u);
     const uint64_t tb_hz = 79800000ull;
-    const uint64_t period = (uint64_t)(ctx->fpr[1] / (double)cap * (double)tb_hz);
+    /* Above 60: f1 refresh periods of 1/cap. Under 60 (the steady-30 option for
+     * PCs that cannot hold 60: an even 2 refreshes a frame on a 60 Hz screen
+     * instead of 20-25 ms frames that judder between 1 and 2): at least 1/cap,
+     * and the game's own f1 refresh periods when those are longer. */
+    const double secs = cap > 60 ? ctx->fpr[1] / (double)cap
+                                 : (ctx->fpr[1] / 59.94 > 1.0 / (double)cap ? ctx->fpr[1] / 59.94 : 1.0 / (double)cap);
+    const uint64_t period = (uint64_t)(secs * (double)tb_hz);
     uint64_t now = ppu_timebase_now();
     uint64_t dl = racacit_rd64(disp + 0x2D8u);
     if (now < dl) {

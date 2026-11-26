@@ -146,6 +146,8 @@ public:
     bool update_ready() const;          // and its EBOOT.elf is in place
     bool plays_update() const;          // Play runs the 1.20 build
     std::string refresh_art();          // ICON0.PNG / PIC1.PNG from PS3_GAME into assets\ (the game's own art)
+    bool art_current() const;           // assets\ holds the art of the disc the profile points at now
+    mutable std::string art_stamp_cache_;   // assets\art_source.txt, read once
     fs::path icon() const { return assets() / L"icon0.png"; }
     fs::path background() const { return assets() / L"pic1.png"; }
     fs::path logo() const { return assets() / L"pic0.png"; }   // the game's title logo
