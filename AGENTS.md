@@ -27,6 +27,7 @@ Read `BUILDING.md` first. It has the build steps, the layout and how to change t
 ## Pull requests
 
 - Every change reaches `main` through a pull request. Don't push to `main` directly, even for a release: a release is a set of merged PRs, then a release commit that only bumps versions and notes if one is needed.
+- `main` and the `v*` release tags are protected by the rulesets in `.github/rulesets/` (imported under Settings > Rules > Rulesets). If a push is refused, open a PR. Don't ask for a bypass.
 - One concern per PR, on current `main`.
 - The description says what was wrong, who it hits and how it showed, what the change does, and only the checks that actually ran, with their scope (which platform, which game version).
 - A PR that changes the build reaches gameplay on 1.00 and 1.20 before it's ready. Keep owner saves untouched: test on copies.
