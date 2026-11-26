@@ -167,7 +167,10 @@ fn lifted(name: &str, ok: bool) -> Result<()> {
     if ok {
         Ok(())
     } else {
-        Err(format!("{name}: lifter FAILED; registry unchanged. See out/spu_jobs/{name}.lift.log").into())
+        Err(
+            format!("{name}: lifter FAILED; registry unchanged. See out/spu_jobs/{name}.lift.log")
+                .into(),
+        )
     }
 }
 
@@ -900,6 +903,9 @@ mod tests {
     fn a_failed_lift_stops_the_run() {
         assert!(lifted("job_B9B580", true).is_ok());
         let error = lifted("job_B9B580", false).unwrap_err().to_string();
-        assert!(error.contains("job_B9B580: lifter FAILED; registry unchanged"), "{error}");
+        assert!(
+            error.contains("job_B9B580: lifter FAILED; registry unchanged"),
+            "{error}"
+        );
     }
 }
