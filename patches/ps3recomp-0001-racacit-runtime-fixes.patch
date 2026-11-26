@@ -8008,10 +8008,10 @@ index f073f327..e08ef642 100644
  }
 diff --git a/libs/video/rsx_be_proxy.c b/libs/video/rsx_be_proxy.c
 new file mode 100644
-index 00000000..32aaab2a
+index 00000000..762f4909
 --- /dev/null
 +++ b/libs/video/rsx_be_proxy.c
-@@ -0,0 +1,934 @@
+@@ -0,0 +1,935 @@
 +/*
 + * ps3recomp - the draw engine's backend on its own thread (default; RSX_BACKEND_THREAD=0 = off)
 + *
@@ -8187,7 +8187,8 @@ index 00000000..32aaab2a
 +    }
 +}
 +/* Live from Settings > Graphics > Frame pacing (rsx_host_ui.c); -1 = not set
-+ * there, RACACIT_PRESENT_PACE decides. */
++ * there, RACACIT_PRESENT_PACE decides (off unless it is 1: most players never
++ * open the settings, and pacing costs fps where the backend is busy). */
 +volatile int g_racacit_present_pace = -1;
 +/* The worker: where the record being replayed ends (px_pace_present, which
 + * runs on the worker too, checks for published work behind the present it
@@ -8196,7 +8197,7 @@ index 00000000..32aaab2a
 +static void px_pace_present(u32 surface)
 +{
 +    static u32 pc_last_surface; static unsigned long long pc_last_call;
-+    if (s_pace < 0) { const char* e = getenv("RACACIT_PRESENT_PACE"); s_pace = !(e && *e == '0');
++    if (s_pace < 0) { const char* e = getenv("RACACIT_PRESENT_PACE"); s_pace = e && *e && *e != '0';
 +                      s_pace_stats = getenv("RACACIT_PACE_STATS") ? 1 : 0; }
 +    if (g_racacit_present_pace >= 0) s_pace = g_racacit_present_pace;
 +    if (!s_pace && !s_pace_stats) return;
@@ -17466,10 +17467,10 @@ index b6bf0704..7dc3db15 100644
   * PSO identity should use rsx_fp_structural_hash in buffered mode. */
 diff --git a/libs/video/rsx_host_ui.c b/libs/video/rsx_host_ui.c
 new file mode 100644
-index 00000000..a511991e
+index 00000000..80d77be2
 --- /dev/null
 +++ b/libs/video/rsx_host_ui.c
-@@ -0,0 +1,2438 @@
+@@ -0,0 +1,2470 @@
 +/*
 + * ps3recomp - host settings menu and on-screen display. See rsx_host_ui.h.
 + */
@@ -17553,6 +17554,13 @@ index 00000000..a511991e
 +static unsigned long long s_last_present;
 +static char  s_fps_text[64];
 +static unsigned long long s_fps_next;
++/* The frame pacing hint (rsx_host_ui_on_present): pacing is off by default,
++ * so when the frame rate stays uneven or low for a while with it off, the
++ * notice (s_note) says once per run where to turn it on. s_pace_score counts
++ * the uneven half seconds, less the even ones. Only the present thread uses
++ * these. */
++static int s_pace_score, s_pace_hinted;
++static unsigned long long s_first_present_ms;
 +
 +static unsigned long long now_ms(void) { return (unsigned long long)SDL_GetTicks64(); }
 +
@@ -17617,7 +17625,7 @@ index 00000000..a511991e
 +    o.tex_quality   = env_is("RACACIT_TEX_QUALITY", "low") || env_is("RACACIT_TEX_QUALITY", "2") ? 2
 +                    : env_is("RACACIT_TEX_QUALITY", "medium") || env_is("RACACIT_TEX_QUALITY", "1") ? 1 : 0;
 +    o.cpu_mode      = env_is("RACACIT_CPU_MODE", "max") || env_is("RACACIT_CPU_MODE", "maximum") ? 1 : 0;
-+    o.present_pace  = env_int("RACACIT_PRESENT_PACE", 1) ? 1 : 0;
++    o.present_pace  = env_int("RACACIT_PRESENT_PACE", 0) ? 1 : 0;
 +    o.kbm           = env_int("RACACIT_KBM", 1) ? 1 : 0;
 +    { const char* v = getenv("RACACIT_MOUSE_SENS"); const double m = v && *v ? atof(v) : 1.0;
 +      o.mouse_sens = clampi((int)(m * 100.0 + 0.5), 10, 500); }
@@ -18200,7 +18208,7 @@ index 00000000..a511991e
 +    case R_PRESET: { const int p = preset_of(o); snprintf(b, n, "%s", p >= 0 ? k_presets[p].name : "Custom"); break; }
 +    case R_TEXQ:    snprintf(b, n, "%s%s", o->tex_quality == 2 ? "Low" : o->tex_quality == 1 ? "Medium" : "High (original)",
 +                         o->tex_quality != s_texq_active ? "  - after restart" : ""); break;
-+    case R_PACE:    snprintf(b, n, "%s", o->present_pace ? "On (even 60 Hz)" : "Off"); break;
++    case R_PACE:    snprintf(b, n, "%s", o->present_pace ? "On (even 60 Hz)" : "Off (turn on if motion stutters)"); break;
 +    case R_CPU:     snprintf(b, n, "%s", o->cpu_mode ? "Maximum (spin on all cores)" : "Efficient"); break;
 +    case R_KBM:     snprintf(b, n, "%s", o->kbm ? "On" : "Off"); break;
 +    case R_MSENS:   snprintf(b, n, "%d%%", o->mouse_sens); break;
@@ -18743,6 +18751,31 @@ index 00000000..a511991e
 +    if (n && sum > 0.0) snprintf(b, sizeof b, "%.0f FPS   %.1f ms   (worst %.0f ms)", n * 1000.0 / sum, sum / n, worst);
 +    else snprintf(b, sizeof b, "-- FPS");
 +    LOCK(); memcpy(s_fps_text, b, sizeof b); UNLOCK();
++    /* Uneven (a frame twice the average and past 25 ms) or low (under 45
++     * fps) for about 10 s more than it was even, past the first 90 s of boot
++     * and loading, with pacing off: show the hint, unless another notice or
++     * the menu is up. */
++    if (!s_first_present_ms) s_first_present_ms = ms;
++    if (!s_pace_hinted && !s_open && !s_note.on && g_racacit_present_pace == 0 && n >= 15 && sum > 0.0
++        && ms - s_first_present_ms > 90000) {
++        const double avg = sum / n, fps = n * 1000.0 / sum;
++        const int bad = (worst > avg * 2.0 && worst > 25.0) || fps < 45.0;
++        s_pace_score = bad ? s_pace_score + 1 : (s_pace_score > 0 ? s_pace_score - 1 : 0);
++        if (s_pace_score >= 20) {
++            s_pace_hinted = 1;
++            fprintf(stderr, "[settings] frame rate uneven with pacing off (%.0f fps, worst %.0f ms): showing the frame pacing hint%c", fps, worst, 10);
++            LOCK();
++            snprintf(s_note.head, sizeof s_note.head, "Frame rate uneven?");
++#ifdef __ANDROID__
++            snprintf(s_note.l1, sizeof s_note.l1, "Frame pacing in the RACiT menu (hold Select) can even it out.");
++#else
++            snprintf(s_note.l1, sizeof s_note.l1, "Frame pacing in the RACiT menu (F1, or L3+R3 on a controller) can even it out.");
++#endif
++            snprintf(s_note.l2, sizeof s_note.l2, "It can lower the frame rate when the GPU is busy.");
++            s_note.t0 = 0; s_note.on = 1;
++            UNLOCK();
++        }
++    }
 +}
 +
 +/* ---------------------------------------------------------------------------

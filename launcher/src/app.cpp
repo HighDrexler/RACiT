@@ -240,7 +240,7 @@ static const std::vector<Opt>& opts()
         { "Image", "RACACIT_ANISO", "Anisotropic filtering", "0", { { "0", "Off" }, { "2", "2x" }, { "4", "4x" }, { "8", "8x" }, { "16", "16x" } } },
         { "Image", "RACACIT_TRILINEAR", "Trilinear filtering", "0", { { "0", "Off" }, { "1", "On" } } },
         { "Image", "RACACIT_TEX_QUALITY", "Texture quality", "high", { { "high", "High (original)" }, { "medium", "Medium" }, { "low", "Low" } } },
-        { "Performance", "RACACIT_PRESENT_PACE", "Frame pacing", "1", { { "1", "On (even 60 Hz)" }, { "0", "Off" } } },
+        { "Performance", "RACACIT_PRESENT_PACE", "Frame pacing", "0", { { "0", "Off" }, { "1", "On (even 60 Hz, turn on if motion stutters)" } } },
         // Into the Nexus only (add_options): the game's own 30 fps mode, as on the PS3. The game
         // reads NEXUS_FPS=30 at start (rac-nexus patch_lift_nexus.py fps60); unset = 60 fps.
         { "Performance", "NEXUS_FPS", "Frame rate", "", { { "", "60 fps" }, { "30", "30 fps (as the PS3)" } } },
