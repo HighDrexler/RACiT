@@ -1120,7 +1120,7 @@ static void updates_screen();
 /* The Into the Nexus build that ships with this launcher version. A 1.0.0 launcher updating to
  * 1.0.1 installs the launcher and A Crack in Time but not nexus\builds (its installer did not
  * know that part), so the same release is offered once more, and this launcher installs it. */
-static const int kNexusBuild = 97;
+static const int kNexusBuild = 107;
 static bool nexus_behind()
 {
     std::error_code ec;
