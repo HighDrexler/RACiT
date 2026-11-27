@@ -20497,14 +20497,68 @@ index 0ba88a8c..7fac0a01 100644
      .clear_depth_stencil  = eng_clear_depth_stencil,
 diff --git a/libs/video/rsx_perf_graph.h b/libs/video/rsx_perf_graph.h
 new file mode 100644
-index 00000000..62e144bc
+index 00000000..50d44516
 --- /dev/null
 +++ b/libs/video/rsx_perf_graph.h
-@@ -0,0 +1,65 @@
+@@ -0,0 +1,122 @@
 +/* Uses the existing present-interval rings; no sampling thread or file output.
 + * Three graphs: FPS and frame time per frame (the last 128), then the average,
 + * 1% low and 0.1% low FPS over the last 60 s (one point every 0.5 s, each over
-+ * the 10 s before it). */
++ * the 10 s before it).
++ *
++ * The lines are drawn as geometry, not pixels: each segment is a quad with a
++ * one-pixel edge on both sides whose alpha falls to 0, so the GPU's vertex
++ * colour interpolation antialiases it, and the FPS and frame time graphs get
++ * a fill under the line that fades out towards the bottom. Everything samples
++ * the atlas' solid block, so no texture or shader changes. */
++
++/* One triangle, per-vertex colour (the overlay interpolates it). */
++static void pg_tri(ui_out* o, float x0, float y0, uint32_t c0, float x1, float y1, uint32_t c1,
++                   float x2, float y2, uint32_t c2)
++{
++    if (o->n + 3 > o->cap) return;
++    const float u = 2.0f / o->aw, v = 2.0f / o->ah;   /* inside the block */
++    rsx_ui_vtx* p = o->v + o->n;
++    p[0] = (rsx_ui_vtx){ x0, y0, u, v, c0 };
++    p[1] = (rsx_ui_vtx){ x1, y1, u, v, c1 };
++    p[2] = (rsx_ui_vtx){ x2, y2, u, v, c2 };
++    o->n += 3;
++}
++
++static uint32_t pg_alpha(uint32_t c, unsigned a) { return (c & 0x00FFFFFFu) | ((uint32_t)a << 24); }
++
++/* A segment `w` pixels wide plus a 1 px feather on each side. */
++static void pg_seg(ui_out* o, float x0, float y0, float x1, float y1, float w, uint32_t c)
++{
++    float dx = x1 - x0, dy = y1 - y0;
++    const float len = sqrtf(dx * dx + dy * dy);
++    if (len < 1e-4f) return;
++    const float nx = -dy / len, ny = dx / len, h = w * .5f, f = h + 1.0f;
++    const uint32_t z = pg_alpha(c, 0);
++    /* core */
++    pg_tri(o, x0 + nx * h, y0 + ny * h, c, x1 + nx * h, y1 + ny * h, c, x1 - nx * h, y1 - ny * h, c);
++    pg_tri(o, x0 + nx * h, y0 + ny * h, c, x1 - nx * h, y1 - ny * h, c, x0 - nx * h, y0 - ny * h, c);
++    /* feathers */
++    pg_tri(o, x0 + nx * f, y0 + ny * f, z, x1 + nx * f, y1 + ny * f, z, x1 + nx * h, y1 + ny * h, c);
++    pg_tri(o, x0 + nx * f, y0 + ny * f, z, x1 + nx * h, y1 + ny * h, c, x0 + nx * h, y0 + ny * h, c);
++    pg_tri(o, x0 - nx * h, y0 - ny * h, c, x1 - nx * h, y1 - ny * h, c, x1 - nx * f, y1 - ny * f, z);
++    pg_tri(o, x0 - nx * h, y0 - ny * h, c, x1 - nx * f, y1 - ny * f, z, x0 - nx * f, y0 - ny * f, z);
++}
++
++/* A polyline through n points, and (fill != 0) the area under it down to
++ * `bottom`, `fill` alpha at the line fading to 0 at the bottom. */
++static void pg_line(ui_out* o, const float* xs, const float* ys, unsigned n, float w, uint32_t c,
++                    float bottom, unsigned fill)
++{
++    if (fill)
++        for (unsigned i = 1; i < n; ++i) {
++            const uint32_t a = pg_alpha(c, fill), z = pg_alpha(c, 0);
++            pg_tri(o, xs[i - 1], ys[i - 1], a, xs[i], ys[i], a, xs[i], bottom, z);
++            pg_tri(o, xs[i - 1], ys[i - 1], a, xs[i], bottom, z, xs[i - 1], bottom, z);
++        }
++    for (unsigned i = 1; i < n; ++i) pg_seg(o, xs[i - 1], ys[i - 1], xs[i], ys[i], w, c);
++}
++
 +static void racit_perf_overlay(ui_out* out, const rsx_ui_font* font)
 +{
 +    double frames[128]; unsigned count;
@@ -20522,6 +20576,8 @@ index 00000000..62e144bc
 +    if (!summary[0]) snprintf(summary, sizeof summary, "-- FPS / -- ms");
 +    const float px = (float)font->px, x = px * .6f, y = px * .5f;
 +    const float width = px * 27, height = px * 2.4f, line = (float)font->line_h;
++    const float lw = px * .14f > 1.5f ? px * .14f : 1.5f;   /* line width */
++    float xs[N_OF(s_lows) > 128 ? N_OF(s_lows) : 128], ys[N_OF(s_lows) > 128 ? N_OF(s_lows) : 128];
 +    rect(out, 0, 0, x + width + px, y + line * 4 + height * 3 + px,
 +         rgba(0, 0, 0, 180));
 +    text(out, x, y, summary, rgba(255, 230, 120, 255));
@@ -20537,14 +20593,14 @@ index 00000000..62e144bc
 +        text(out, x, top - line, label, rgba(210, 220, 235, 255));
 +        rect(out, x, top, x + width, top + height, rgba(35, 42, 52, 210));
 +        const float guide = top + height * (1.f - (float)((graph ? 16.666667 : 60.0) / maximum));
-+        rect(out, x, guide, x + width, guide + 1, rgba(125, 130, 140, 180));
++        pg_seg(out, x, guide, x + width, guide, 1.0f, rgba(125, 130, 140, 170));
 +        for (unsigned i = 0; i < count; ++i) {
 +            const double value = graph ? frames[i] : frames[i] > 0 ? 1000.0 / frames[i] : 0;
-+            const float left = x + width * (float)(128 - count + i) / 128.f;
-+            rect(out, left, top + height * (1.f - (float)(value / maximum)),
-+                 left + width / 128.f, top + height,
-+                 graph ? rgba(100, 190, 255, 240) : rgba(120, 230, 160, 240));
++            xs[i] = x + width * ((float)(128 - count + i) + .5f) / 128.f;
++            ys[i] = top + height * (1.f - (float)(value / maximum));
 +        }
++        pg_line(out, xs, ys, count, lw, graph ? rgba(100, 190, 255, 255) : rgba(120, 230, 160, 255),
++                top + height, 90);
 +    }
 +    /* The lows: one line each, average (green), 1% low (yellow), 0.1% low (red). */
 +    const uint32_t colour[3] = { rgba(120, 230, 160, 255), rgba(255, 210, 90, 255), rgba(255, 110, 100, 255) };
@@ -20557,14 +20613,15 @@ index 00000000..62e144bc
 +    text(out, x, top - line, label, rgba(210, 220, 235, 255));
 +    rect(out, x, top, x + width, top + height, rgba(35, 42, 52, 210));
 +    const float guide = top + height * (1.f - (float)(60.0 / maximum));
-+    rect(out, x, guide, x + width, guide + 1, rgba(125, 130, 140, 180));
-+    const float step = width / (float)N_OF(s_lows), thick = px * .18f > 1.f ? px * .18f : 1.f;
-+    for (int k = 2; k >= 0; --k)
++    pg_seg(out, x, guide, x + width, guide, 1.0f, rgba(125, 130, 140, 170));
++    const float step = width / (float)N_OF(s_lows);
++    for (int k = 2; k >= 0; --k) {
 +        for (unsigned i = 0; i < nlows; ++i) {
-+            const float left = x + step * (float)(N_OF(s_lows) - nlows + i);
-+            const float v = top + height * (1.f - (float)(lows[i][k] / maximum));
-+            rect(out, left, v - thick * .5f, left + step + .5f, v + thick * .5f, colour[k]);
++            xs[i] = x + step * ((float)(N_OF(s_lows) - nlows + i) + .5f);
++            ys[i] = top + height * (1.f - (float)(lows[i][k] / maximum));
 +        }
++        pg_line(out, xs, ys, nlows, lw, colour[k], top + height, 0);
++    }
 +}
 diff --git a/libs/video/rsx_shader_spirv.cpp b/libs/video/rsx_shader_spirv.cpp
 index 4aa4a176..322614af 100644
