@@ -20497,10 +20497,10 @@ index 0ba88a8c..7fac0a01 100644
      .clear_depth_stencil  = eng_clear_depth_stencil,
 diff --git a/libs/video/rsx_perf_graph.h b/libs/video/rsx_perf_graph.h
 new file mode 100644
-index 00000000..50d44516
+index 00000000..c0d98f6c
 --- /dev/null
 +++ b/libs/video/rsx_perf_graph.h
-@@ -0,0 +1,122 @@
+@@ -0,0 +1,161 @@
 +/* Uses the existing present-interval rings; no sampling thread or file output.
 + * Three graphs: FPS and frame time per frame (the last 128), then the average,
 + * 1% low and 0.1% low FPS over the last 60 s (one point every 0.5 s, each over
@@ -20556,7 +20556,46 @@ index 00000000..50d44516
 +            pg_tri(o, xs[i - 1], ys[i - 1], a, xs[i], ys[i], a, xs[i], bottom, z);
 +            pg_tri(o, xs[i - 1], ys[i - 1], a, xs[i], bottom, z, xs[i - 1], bottom, z);
 +        }
-+    for (unsigned i = 1; i < n; ++i) pg_seg(o, xs[i - 1], ys[i - 1], xs[i], ys[i], w, c);
++    /* Joined, not segment by segment: separate quads leave a wedge-shaped gap
++     * on the outside of every bend. Each point gets one offset along the
++     * average of its two segments' normals (a miter, at most 2x long so a
++     * spike doesn't shoot out), and neighbouring segments share it. */
++    enum { PG_MAX = 256 };
++    if (n < 2) return;
++    if (n > PG_MAX) n = PG_MAX;
++    float mx[PG_MAX], my[PG_MAX];
++    for (unsigned i = 0; i < n; ++i) {
++        float sx = 0, sy = 0;
++        for (int s = 0; s < 2; ++s) {   /* the segments before and after point i */
++            const unsigned a = s ? i : i - 1, b = s ? i + 1 : i;
++            if ((s == 0 && i == 0) || (s == 1 && i + 1 >= n)) continue;
++            const float dx = xs[b] - xs[a], dy = ys[b] - ys[a], len = sqrtf(dx * dx + dy * dy);
++            if (len > 1e-4f) { sx += -dy / len; sy += dx / len; }
++        }
++        const float sl = sqrtf(sx * sx + sy * sy);
++        if (sl < 1e-4f) { mx[i] = 0; my[i] = -1; continue; }
++        float ux = sx / sl, uy = sy / sl, k = 1.0f;
++        /* the miter's length: 1 / cos(half the bend), from either segment's normal */
++        const unsigned a = i + 1 < n ? i : i - 1, b = a + 1;
++        const float dx = xs[b] - xs[a], dy = ys[b] - ys[a], len = sqrtf(dx * dx + dy * dy);
++        if (len > 1e-4f) { const float d = ux * (-dy / len) + uy * (dx / len); k = d > 0.5f ? 1.0f / d : 2.0f; }
++        mx[i] = ux * k; my[i] = uy * k;
++    }
++    const float h = w * .5f, f = h + 1.0f;
++    const uint32_t z = pg_alpha(c, 0);
++    for (unsigned i = 1; i < n; ++i) {
++        const unsigned p = i - 1;
++        const float pax = xs[p] + mx[p] * h, pay = ys[p] + my[p] * h, pbx = xs[p] - mx[p] * h, pby = ys[p] - my[p] * h;
++        const float qax = xs[i] + mx[i] * h, qay = ys[i] + my[i] * h, qbx = xs[i] - mx[i] * h, qby = ys[i] - my[i] * h;
++        const float pfx = xs[p] + mx[p] * f, pfy = ys[p] + my[p] * f, pgx = xs[p] - mx[p] * f, pgy = ys[p] - my[p] * f;
++        const float qfx = xs[i] + mx[i] * f, qfy = ys[i] + my[i] * f, qgx = xs[i] - mx[i] * f, qgy = ys[i] - my[i] * f;
++        pg_tri(o, pax, pay, c, qax, qay, c, qbx, qby, c);   /* core */
++        pg_tri(o, pax, pay, c, qbx, qby, c, pbx, pby, c);
++        pg_tri(o, pfx, pfy, z, qfx, qfy, z, qax, qay, c);   /* feather, + side */
++        pg_tri(o, pfx, pfy, z, qax, qay, c, pax, pay, c);
++        pg_tri(o, pbx, pby, c, qbx, qby, c, qgx, qgy, z);   /* feather, - side */
++        pg_tri(o, pbx, pby, c, qgx, qgy, z, pgx, pgy, z);
++    }
 +}
 +
 +static void racit_perf_overlay(ui_out* out, const rsx_ui_font* font)
