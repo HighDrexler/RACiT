@@ -426,6 +426,13 @@ if(APPLE OR (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ZLIB_SOURCES))
     target_link_libraries(${PROJECT_NAME} PRIVATE ZLIB::ZLIB)
     target_link_libraries(ps3recomp_runtime PRIVATE ZLIB::ZLIB)
 endif()
+# The overlay font (rsx_host_ui.c): Core Text on macOS; fontconfig on Linux is
+# loaded with dlopen, which needs libdl on glibc before 2.34.
+if(APPLE)
+    target_link_libraries(ps3recomp_runtime PRIVATE "-framework CoreText" "-framework CoreGraphics" "-framework CoreFoundation")
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID)
+    target_link_libraries(ps3recomp_runtime PRIVATE ${CMAKE_DL_LIBS})
+endif()
 if(ANDROID)
     # SDL_main / SDL_AndroidGetExternalStoragePath, and logcat.
     target_link_libraries(${PROJECT_NAME} PRIVATE SDL2::SDL2 log android)

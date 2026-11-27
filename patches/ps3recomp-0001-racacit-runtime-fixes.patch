@@ -17467,10 +17467,10 @@ index b6bf0704..7dc3db15 100644
   * PSO identity should use rsx_fp_structural_hash in buffered mode. */
 diff --git a/libs/video/rsx_host_ui.c b/libs/video/rsx_host_ui.c
 new file mode 100644
-index 00000000..05bef3aa
+index 00000000..507507bf
 --- /dev/null
 +++ b/libs/video/rsx_host_ui.c
-@@ -0,0 +1,2592 @@
+@@ -0,0 +1,2782 @@
 +/*
 + * ps3recomp - host settings menu and on-screen display. See rsx_host_ui.h.
 + */
@@ -19054,6 +19054,188 @@ index 00000000..05bef3aa
 +}
 +#endif
 +
++#if !defined(_WIN32) && !defined(__ANDROID__)
++/* macOS and Linux: a real font in place of the 5x7 pixels, laid out in the
++ * atlas the way the GDI glyphs are (cells in rows of a 1024-wide R8 atlas,
++ * drawn `pad` in from the cell's left, baseline at the cell's top + 1 + ascent).
++ * It is built once per text size; drawing it costs what the pixel font did.
++ *
++ * Any font file: RACACIT_UI_FONT=<.ttf/.otf/.ttc>, rasterized with
++ * stb_truetype (libs/font). Linux without it: the desktop's sans-serif from
++ * fontconfig (loaded at run time, so the build needs nothing new), else the
++ * usual DejaVu and Noto paths. macOS without it: the system UI font, semibold,
++ * through Core Text. If none works the pixel font is still there. */
++#define STB_TRUETYPE_IMPLEMENTATION
++#define STBTT_STATIC
++#include "../font/stb_truetype.h"
++
++static unsigned char* font_read_file(const char* path)
++{
++    FILE* fp = fopen(path, "rb");
++    if (!fp) return NULL;
++    unsigned char* data = NULL;
++    if (fseek(fp, 0, SEEK_END) == 0) {
++        const long n = ftell(fp);
++        if (n > 0 && n < (64L << 20) && fseek(fp, 0, SEEK_SET) == 0 && (data = (unsigned char*)malloc((size_t)n)))
++            if (fread(data, 1, (size_t)n, fp) != (size_t)n) { free(data); data = NULL; }
++    }
++    fclose(fp);
++    return data;
++}
++
++static int font_build_stb(rsx_ui_font* f, int px, const char* path)
++{
++    /* Kept for the process: the text size changes with the window. */
++    static unsigned char* s_data; static char s_path[512]; static stbtt_fontinfo s_info;
++    if (!s_data || strcmp(s_path, path) != 0) {
++        unsigned char* d = font_read_file(path);
++        if (!d) return -1;
++        stbtt_fontinfo info;
++        const int off = stbtt_GetFontOffsetForIndex(d, 0);
++        if (off < 0 || !stbtt_InitFont(&info, d, off)) { free(d); return -1; }
++        free(s_data); s_data = d; s_info = info;
++        snprintf(s_path, sizeof s_path, "%s", path);
++    }
++    const float scale = stbtt_ScaleForMappingEmToPixels(&s_info, (float)px);
++    int va, vd, vg; stbtt_GetFontVMetrics(&s_info, &va, &vd, &vg);
++    const int asc = (int)ceilf((float)va * scale), lh = asc + (int)ceilf((float)-vd * scale);
++    const int pad = px / 6 + 2, aw = 1024, rows_h = lh + 2;
++    int gx[95], gy[95], gw[95], bx0[95], by0[95], bw[95], bh[95], adv[95];
++    int x = 8, y = 0;
++    for (int c = 0; c < 95; c++) {
++        int a, lsb, x0, y0, x1, y1;
++        stbtt_GetCodepointHMetrics(&s_info, 32 + c, &a, &lsb);
++        stbtt_GetCodepointBitmapBox(&s_info, 32 + c, scale, scale, &x0, &y0, &x1, &y1);
++        bx0[c] = x0; by0[c] = y0; bw[c] = x1 - x0; bh[c] = y1 - y0;
++        adv[c] = (int)lroundf((float)a * scale);
++        const int w = (bw[c] > 0 ? bw[c] : 0) + 2 * pad;
++        if (x + w > aw) { x = 8; y += rows_h; }
++        gx[c] = x; gy[c] = y; gw[c] = w; x += w;
++    }
++    const int ah = y + rows_h + 4;
++    if (font_alloc(f, aw, ah)) return -1;
++    for (int c = 0; c < 95; c++) {
++        int top = gy[c] + 1 + asc + by0[c], h = bh[c], skip = 0;
++        if (top < gy[c]) { skip = gy[c] - top; top = gy[c]; h -= skip; }
++        if (top + h > gy[c] + rows_h) h = gy[c] + rows_h - top;
++        if (bw[c] > 0 && h > 0 && !skip)
++            stbtt_MakeCodepointBitmap(&s_info, f->pixels + (size_t)top * aw + gx[c] + pad, bw[c], h, aw, scale, scale, 32 + c);
++        f->g[c] = (rsx_ui_glyph){ (short)gx[c], (short)gy[c], (short)gw[c], (short)rows_h,
++                                  (short)(bx0[c] - pad), (short)adv[c] };
++    }
++    font_block(f);
++    f->line_h = rows_h; f->ascent = asc + 1;
++    return 0;
++}
++#endif
++
++#if defined(__linux__) && !defined(__ANDROID__)
++#include <dlfcn.h>
++/* The file fontconfig matches for sans-serif at medium weight, or NULL. */
++static const char* font_file_fontconfig(void)
++{
++    static char path[512]; static int done;
++    if (done) return path[0] ? path : NULL;
++    done = 1;
++    void* lib = dlopen("libfontconfig.so.1", RTLD_NOW | RTLD_LOCAL);
++    if (!lib) return NULL;
++    void* (*init)(void) = (void* (*)(void))dlsym(lib, "FcInitLoadConfigAndFonts");
++    void* (*parse)(const unsigned char*) = (void* (*)(const unsigned char*))dlsym(lib, "FcNameParse");
++    int (*subst)(void*, void*, int) = (int (*)(void*, void*, int))dlsym(lib, "FcConfigSubstitute");
++    void (*dflt)(void*) = (void (*)(void*))dlsym(lib, "FcDefaultSubstitute");
++    void* (*match)(void*, void*, int*) = (void* (*)(void*, void*, int*))dlsym(lib, "FcFontMatch");
++    int (*gets)(void*, const char*, int, unsigned char**) = (int (*)(void*, const char*, int, unsigned char**))dlsym(lib, "FcPatternGetString");
++    void (*destroy)(void*) = (void (*)(void*))dlsym(lib, "FcPatternDestroy");
++    if (!init || !parse || !subst || !dflt || !match || !gets || !destroy) return NULL;
++    void* cfg = init();
++    void* pat = cfg ? parse((const unsigned char*)"sans-serif:weight=100") : NULL;   /* FC_WEIGHT_MEDIUM */
++    if (!pat) return NULL;
++    subst(cfg, pat, 0 /* FcMatchPattern */); dflt(pat);
++    int res = 0; void* m = match(cfg, pat, &res);
++    unsigned char* file = NULL;
++    if (m && gets(m, "file", 0, &file) == 0 /* FcResultMatch */ && file) snprintf(path, sizeof path, "%s", (const char*)file);
++    if (m) destroy(m);
++    destroy(pat);
++    return path[0] ? path : NULL;
++}
++
++static int font_build_linux(rsx_ui_font* f, int px)
++{
++    const char* fc = font_file_fontconfig();
++    if (fc && font_build_stb(f, px, fc) == 0) return 0;
++    static const char* const k_paths[] = {
++        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/TTF/DejaVuSans.ttf",
++        "/usr/share/fonts/dejavu/DejaVuSans.ttf", "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
++        "/usr/share/fonts/noto/NotoSans-Medium.ttf", "/usr/share/fonts/truetype/noto/NotoSans-Medium.ttf",
++        "/usr/share/fonts/google-noto/NotoSans-Medium.ttf", "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
++        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf" };
++    for (int i = 0; i < N_OF(k_paths); i++)
++        if (font_build_stb(f, px, k_paths[i]) == 0) return 0;
++    return -1;
++}
++#endif
++
++#ifdef __APPLE__
++#include <CoreText/CoreText.h>
++static int font_build_coretext(rsx_ui_font* f, int px)
++{
++    CTFontRef base = CTFontCreateUIFontForLanguage(kCTFontUIFontSystem, (CGFloat)px, NULL);
++    if (!base) return -1;
++    /* Semibold, as Segoe UI is on Windows. */
++    CGFloat weight = 0.3;   /* NSFontWeightSemibold */
++    CFNumberRef wnum = CFNumberCreate(NULL, kCFNumberCGFloatType, &weight);
++    const void* tk[] = { kCTFontWeightTrait }; const void* tv[] = { wnum };
++    CFDictionaryRef traits = CFDictionaryCreate(NULL, tk, tv, 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
++    const void* ak[] = { kCTFontTraitsAttribute }; const void* av[] = { traits };
++    CFDictionaryRef attrs = CFDictionaryCreate(NULL, ak, av, 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
++    CTFontDescriptorRef desc = CTFontDescriptorCreateWithAttributes(attrs);
++    CTFontRef font = CTFontCreateCopyWithAttributes(base, (CGFloat)px, NULL, desc);
++    CFRelease(desc); CFRelease(attrs); CFRelease(traits); CFRelease(wnum); CFRelease(base);
++    if (!font) return -1;
++    UniChar chars[95]; CGGlyph glyphs[95]; CGSize advs[95]; CGRect box[95];
++    for (int c = 0; c < 95; c++) chars[c] = (UniChar)(32 + c);
++    CTFontGetGlyphsForCharacters(font, chars, glyphs, 95);
++    CTFontGetAdvancesForGlyphs(font, kCTFontOrientationHorizontal, glyphs, advs, 95);
++    CTFontGetBoundingRectsForGlyphs(font, kCTFontOrientationHorizontal, glyphs, box, 95);
++    const int asc = (int)ceil(CTFontGetAscent(font)), lh = asc + (int)ceil(CTFontGetDescent(font));
++    const int pad = px / 6 + 2, aw = 1024, rows_h = lh + 2;
++    int gx[95], gy[95], gw[95], left[95];
++    int x = 8, y = 0;
++    for (int c = 0; c < 95; c++) {
++        left[c] = (int)floor(box[c].origin.x);
++        const int w = (int)ceil(box[c].origin.x + box[c].size.width) - left[c] + 2 * pad;
++        if (x + w > aw) { x = 8; y += rows_h; }
++        gx[c] = x; gy[c] = y; gw[c] = w; x += w;
++    }
++    const int ah = y + rows_h + 4;
++    int ok = -1;
++    if (font_alloc(f, aw, ah) == 0) {
++        CGColorSpaceRef gray = CGColorSpaceCreateDeviceGray();
++        /* Row 0 of the bitmap is the top of the image; Core Graphics' y runs up from the bottom. */
++        CGContextRef cx = CGBitmapContextCreate(f->pixels, (size_t)aw, (size_t)ah, 8, (size_t)aw, gray, kCGImageAlphaNone);
++        CGColorSpaceRelease(gray);
++        if (cx) {
++            CGContextSetGrayFillColor(cx, 1.0, 1.0);
++            CGContextSetShouldAntialias(cx, true);
++            CGContextSetShouldSmoothFonts(cx, false);
++            for (int c = 0; c < 95; c++) {
++                const CGPoint at = CGPointMake((CGFloat)(gx[c] + pad - left[c]), (CGFloat)(ah - (gy[c] + 1 + asc)));
++                CTFontDrawGlyphs(font, &glyphs[c], &at, 1, cx);
++                f->g[c] = (rsx_ui_glyph){ (short)gx[c], (short)gy[c], (short)gw[c], (short)rows_h,
++                                          (short)(left[c] - pad), (short)lround(advs[c].width) };
++            }
++            CGContextFlush(cx);
++            CGContextRelease(cx);
++            font_block(f);
++            f->line_h = rows_h; f->ascent = asc + 1;
++            ok = 0;
++        }
++    }
++    CFRelease(font);
++    return ok;
++}
++#endif
++
 +/* The UI text size for a screen height: 1/44 of it, smaller when the menu at
 + * its tightest (a line a row, the layout's 0.78 squeeze) would not fit --
 + * Segoe UI's line is ~1.45 of its size. */
@@ -19077,6 +19259,14 @@ index 00000000..05bef3aa
 +    r = font_build_gdi(f, px);
 +#elif defined(__ANDROID__)
 +    r = font_build_android(f, px);
++#else
++    { const char* e = getenv("RACACIT_UI_FONT");
++      if (e && *e) r = font_build_stb(f, px, e); }
++#if defined(__APPLE__)
++    if (r) r = font_build_coretext(f, px);
++#elif defined(__linux__)
++    if (r) r = font_build_linux(f, px);
++#endif
 +#endif
 +    if (r) r = font_build_pixel(f, px);
 +    if (r) return 0;

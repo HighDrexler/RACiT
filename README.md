@@ -142,3 +142,4 @@ These aren't in the menus and are still experimental.
 | --- | --- |
 | `RACACIT_FPS_CAP` above 60 | Lets the game run past 60 fps with game speed kept at real time, for example `RACACIT_FPS_CAP=120`. Use it with `RACACIT_VBLANK_HZ` and frame pacing off. Some things may still be tied to 60. |
 | `RACACIT_VBLANK_HZ` | The console's refresh rate the game sees, 60 by default. Set it to match a frame cap above 60. |
+| `RACACIT_UI_FONT` | A font file (.ttf, .otf or .ttc) for the in-game menu and the FPS counter, for example `RACACIT_UI_FONT=/usr/share/fonts/TTF/Inter.ttf`. Without it the menu uses the system font: Segoe UI on Windows, the system font on macOS, your desktop's sans-serif on Linux, Roboto on Android. Not used on Windows or Android. |
