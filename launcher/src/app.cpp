@@ -27,6 +27,14 @@
 
 static const char* kLauncherVersion = "1.2";
 const char* g_launcher_version = kLauncherVersion;
+// Frame pacing's default, as the game's (rsx_be_proxy.c PX_PACE_DEFAULT): on for Windows,
+// where unpaced presents at a steady 60 spread 14-21 ms; off on macOS (update 1.20 on Macs
+// fell from 57 to 33 fps paced, #119).
+#ifdef __APPLE__
+static const char* const kPaceDefault = "0";
+#else
+static const char* const kPaceDefault = "1";
+#endif
 enum { WM_APP_TASK = WM_APP + 1, WM_APP_GAME_EXIT, WM_APP_UPDATE, TIMER_TICK = 1 };
 
 // ---- screen model ------------------------------------------------------------------------
@@ -247,7 +255,7 @@ static const std::vector<Opt>& opts()
         { "Image", "RACACIT_ANISO", "Anisotropic filtering", "0", { { "0", "Off" }, { "2", "2x" }, { "4", "4x" }, { "8", "8x" }, { "16", "16x" } } },
         { "Image", "RACACIT_TRILINEAR", "Trilinear filtering", "0", { { "0", "Off" }, { "1", "On" } } },
         { "Image", "RACACIT_TEX_QUALITY", "Texture quality", "high", { { "high", "High (original)" }, { "medium", "Medium" }, { "low", "Low" } } },
-        { "Performance", "RACACIT_PRESENT_PACE", "Frame pacing", "0", { { "0", "Off" }, { "1", "On (even 60 Hz, turn on if motion stutters)" } } },
+        { "Performance", "RACACIT_PRESENT_PACE", "Frame pacing", kPaceDefault, { { "0", "Off" }, { "1", "On (even 60 Hz, turn on if motion stutters)" } } },
         // Into the Nexus only (add_options): the game's own 30 fps mode, as on the PS3. The game
         // reads NEXUS_FPS=30 at start (rac-nexus patch_lift_nexus.py fps60); unset = 60 fps.
         { "Performance", "NEXUS_FPS", "Frame rate", "", { { "", "60 fps" }, { "30", "30 fps (as the PS3)" } } },

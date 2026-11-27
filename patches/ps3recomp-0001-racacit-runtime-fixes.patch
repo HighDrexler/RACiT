@@ -8008,10 +8008,10 @@ index f073f327..e08ef642 100644
  }
 diff --git a/libs/video/rsx_be_proxy.c b/libs/video/rsx_be_proxy.c
 new file mode 100644
-index 00000000..762f4909
+index 00000000..33311bec
 --- /dev/null
 +++ b/libs/video/rsx_be_proxy.c
-@@ -0,0 +1,935 @@
+@@ -0,0 +1,944 @@
 +/*
 + * ps3recomp - the draw engine's backend on its own thread (default; RSX_BACKEND_THREAD=0 = off)
 + *
@@ -8187,8 +8187,17 @@ index 00000000..762f4909
 +    }
 +}
 +/* Live from Settings > Graphics > Frame pacing (rsx_host_ui.c); -1 = not set
-+ * there, RACACIT_PRESENT_PACE decides (off unless it is 1: most players never
-+ * open the settings, and pacing costs fps where the backend is busy). */
++ * there, RACACIT_PRESENT_PACE decides, and unset it is the platform default.
++ * Windows: on. Unpaced, presents at a steady 60 spread 14-21 ms (44% outside
++ * 16-17.5 ms on a 7900X, Zolar) -- the judder pacing was made for -- and pacing
++ * cost no measurable fps there (emulated i5, Axiom: 44.7 paced, 45.8 unpaced).
++ * Elsewhere: off (public PR #119: update 1.20 on Macs fell from 57 to 33 fps
++ * paced). Same rule as RSX_UI_PACE_DEFAULT in rsx_host_ui.c. */
++#if defined(_WIN32)
++#  define PX_PACE_DEFAULT 1
++#else
++#  define PX_PACE_DEFAULT 0
++#endif
 +volatile int g_racacit_present_pace = -1;
 +/* The worker: where the record being replayed ends (px_pace_present, which
 + * runs on the worker too, checks for published work behind the present it
@@ -8197,7 +8206,7 @@ index 00000000..762f4909
 +static void px_pace_present(u32 surface)
 +{
 +    static u32 pc_last_surface; static unsigned long long pc_last_call;
-+    if (s_pace < 0) { const char* e = getenv("RACACIT_PRESENT_PACE"); s_pace = e && *e && *e != '0';
++    if (s_pace < 0) { const char* e = getenv("RACACIT_PRESENT_PACE"); s_pace = e && *e ? *e != '0' : PX_PACE_DEFAULT;
 +                      s_pace_stats = getenv("RACACIT_PACE_STATS") ? 1 : 0; }
 +    if (g_racacit_present_pace >= 0) s_pace = g_racacit_present_pace;
 +    if (!s_pace && !s_pace_stats) return;
@@ -17467,10 +17476,10 @@ index b6bf0704..7dc3db15 100644
   * PSO identity should use rsx_fp_structural_hash in buffered mode. */
 diff --git a/libs/video/rsx_host_ui.c b/libs/video/rsx_host_ui.c
 new file mode 100644
-index 00000000..507507bf
+index 00000000..349a70f3
 --- /dev/null
 +++ b/libs/video/rsx_host_ui.c
-@@ -0,0 +1,2782 @@
+@@ -0,0 +1,2790 @@
 +/*
 + * ps3recomp - host settings menu and on-screen display. See rsx_host_ui.h.
 + */
@@ -17486,6 +17495,14 @@ index 00000000..507507bf
 +#  if __has_include(<SDL2/SDL.h>)
 +#    define RSX_UI_HAVE_SDL 1
 +#  endif
++#endif
++
++/* Frame pacing's default when RACACIT_PRESENT_PACE is unset: on for Windows, off
++ * elsewhere -- why, in rsx_be_proxy.c at PX_PACE_DEFAULT (same rule). */
++#if defined(_WIN32)
++#  define RSX_UI_PACE_DEFAULT 1
++#else
++#  define RSX_UI_PACE_DEFAULT 0
 +#endif
 +
 +#ifdef RSX_UI_HAVE_SDL
@@ -17634,7 +17651,7 @@ index 00000000..507507bf
 +    o.tex_quality   = env_is("RACACIT_TEX_QUALITY", "low") || env_is("RACACIT_TEX_QUALITY", "2") ? 2
 +                    : env_is("RACACIT_TEX_QUALITY", "medium") || env_is("RACACIT_TEX_QUALITY", "1") ? 1 : 0;
 +    o.cpu_mode      = env_is("RACACIT_CPU_MODE", "max") || env_is("RACACIT_CPU_MODE", "maximum") ? 1 : 0;
-+    o.present_pace  = env_int("RACACIT_PRESENT_PACE", 0) ? 1 : 0;
++    o.present_pace  = env_int("RACACIT_PRESENT_PACE", RSX_UI_PACE_DEFAULT) ? 1 : 0;
 +    o.kbm           = env_int("RACACIT_KBM", 1) ? 1 : 0;
 +    { const char* v = getenv("RACACIT_MOUSE_SENS"); const double m = v && *v ? atof(v) : 1.0;
 +      o.mouse_sens = clampi((int)(m * 100.0 + 0.5), 10, 500); }
