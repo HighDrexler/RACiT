@@ -23,6 +23,16 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 if(APPLE)
     # A call to an API newer than the deployment target must be guarded.
     add_compile_options(-Werror=unguarded-availability-new)
+    # Release builds link with ThinLTO, the runtime and the lifted code
+    # together, so calls between them can inline. On 1.20 unlocked (M1 Pro) it
+    # was ahead in three pairs out of three, 62.5 -> 64.4 FPS on average, 1%
+    # lows up in each pair. The link takes longer; the cache keeps rebuilds of
+    # unchanged files cheap. RACACIT_MAC_THINLTO=OFF builds without it.
+    option(RACACIT_MAC_THINLTO "Link macOS Release builds with ThinLTO" ON)
+    if(RACACIT_MAC_THINLTO AND CMAKE_BUILD_TYPE STREQUAL "Release")
+        add_compile_options(-flto=thin)
+        add_link_options(-flto=thin "LINKER:-cache_path_lto,${CMAKE_BINARY_DIR}/lto-cache")
+    endif()
 endif()
 
 # Prefer Ninja if available
