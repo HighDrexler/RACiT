@@ -17467,10 +17467,10 @@ index b6bf0704..7dc3db15 100644
   * PSO identity should use rsx_fp_structural_hash in buffered mode. */
 diff --git a/libs/video/rsx_host_ui.c b/libs/video/rsx_host_ui.c
 new file mode 100644
-index 00000000..9997141e
+index 00000000..66b32888
 --- /dev/null
 +++ b/libs/video/rsx_host_ui.c
-@@ -0,0 +1,2477 @@
+@@ -0,0 +1,2517 @@
 +/*
 + * ps3recomp - host settings menu and on-screen display. See rsx_host_ui.h.
 + */
@@ -17561,6 +17561,10 @@ index 00000000..9997141e
 + * these. */
 +static int s_pace_score, s_pace_hinted;
 +static unsigned long long s_first_present_ms;
++static float s_ftl[4096];            /* frame intervals, ms, for the lows (34 s at 120 FPS) */
++static unsigned s_ftl_n;
++static float s_lows[120][3];         /* every 0.5 s: average, 1% low, 0.1% low FPS over 10 s */
++static unsigned s_lows_n;
 +
 +static unsigned long long now_ms(void) { return (unsigned long long)SDL_GetTicks64(); }
 +
@@ -18731,7 +18735,26 @@ index 00000000..9997141e
 +
 +/* ---------------------------------------------------------------------------
 + * FPS counter
++ *
++ * Every present's interval goes into two rings: the last 128 for the bar
++ * graphs, and about the last 30 s for the lows. Twice a second, over the last
++ * 10 s of frames: average FPS, and the 1% and 0.1% lows, each the frame rate
++ * over the slowest 1% (0.1%) of frames, as the headless benchmark computes
++ * them (rust/frame_metrics.rs). Those three go into a history of the last
++ * 60 s for the lows graph. The sort runs on a copy at that half-second tick,
++ * never per frame.
 + * -------------------------------------------------------------------------*/
++static int cmp_desc(const void* a, const void* b)
++{
++    const float x = *(const float*)a, y = *(const float*)b;
++    return x < y ? 1 : x > y ? -1 : 0;
++}
++static double tail_fps(const float* sorted, unsigned k)
++{
++    double s = 0.0;
++    for (unsigned i = 0; i < k; i++) s += sorted[i];
++    return s > 0.0 ? k * 1000.0 / s : 0.0;
++}
 +void rsx_host_ui_on_present(void)
 +{
 +    {   static unsigned long long s_disp_next;   /* the display: at the first present, then every 2 s */
@@ -18741,23 +18764,40 @@ index 00000000..9997141e
 +    static double freq;
 +    if (!freq) freq = (double)SDL_GetPerformanceFrequency();
 +    if (s_last_present) {
-+        s_ft[s_ft_n % N_OF(s_ft)] = (double)(t - s_last_present) * 1000.0 / freq;
++        const double d = (double)(t - s_last_present) * 1000.0 / freq;
++        s_ft[s_ft_n % N_OF(s_ft)] = d;
 +        s_ft_n++;
++        s_ftl[s_ftl_n % N_OF(s_ftl)] = (float)d;
++        s_ftl_n++;
 +    }
 +    s_last_present = t;
 +    const unsigned long long ms = now_ms();
 +    if (ms < s_fps_next) return;
 +    s_fps_next = ms + 500;
-+    /* Over the last second's frames: rate, average and worst frame time. */
-+    double sum = 0.0, worst = 0.0; unsigned n = 0;
-+    for (unsigned i = 0; i < N_OF(s_ft) && i < s_ft_n && sum < 1000.0; i++) {
-+        const double d = s_ft[(s_ft_n - 1 - i) % N_OF(s_ft)];
-+        sum += d; n++; if (d > worst) worst = d;
++    /* Over the last 10 s of frames: average and the lows. */
++    static float sorted[N_OF(s_ftl)];
++    double sum = 0.0; unsigned n = 0;
++    for (unsigned i = 0; i < N_OF(s_ftl) && i < s_ftl_n && sum < 10000.0; i++) {
++        const float d = s_ftl[(s_ftl_n - 1 - i) % N_OF(s_ftl)];
++        sorted[n++] = d; sum += d;
 +    }
 +    char b[64];
-+    if (n && sum > 0.0) snprintf(b, sizeof b, "%.0f FPS   %.1f ms   (worst %.0f ms)", n * 1000.0 / sum, sum / n, worst);
-+    else snprintf(b, sizeof b, "-- FPS");
-+    LOCK(); memcpy(s_fps_text, b, sizeof b); UNLOCK();
++    float avg = 0.f, low1 = 0.f, low01 = 0.f;
++    if (n && sum > 0.0) {
++        qsort(sorted, n, sizeof sorted[0], cmp_desc);
++        avg = (float)(n * 1000.0 / sum);
++        low1 = (float)tail_fps(sorted, (n + 99) / 100);
++        low01 = (float)tail_fps(sorted, (n + 999) / 1000);
++        snprintf(b, sizeof b, "%.0f FPS  %.1f ms  1%% low %.0f  0.1%% low %.0f", avg, sum / n, low1, low01);
++    } else snprintf(b, sizeof b, "-- FPS");
++    LOCK();
++    memcpy(s_fps_text, b, sizeof b);
++    const unsigned h = s_lows_n % N_OF(s_lows);
++    s_lows[h][0] = avg; s_lows[h][1] = low1; s_lows[h][2] = low01;
++    s_lows_n++;
++    UNLOCK();
++    /* The pacing hint reads the same 10 s window: the slowest frame is sorted[0]. */
++    const double worst = n ? sorted[0] : 0.0;
 +    /* Uneven (a frame twice the average and past 25 ms) or low (under 45
 +     * fps) for about 10 s more than it was even, past the first 90 s of boot
 +     * and loading, with pacing off: show the hint, unless another notice or
@@ -18765,8 +18805,8 @@ index 00000000..9997141e
 +    if (!s_first_present_ms) s_first_present_ms = ms;
 +    if (!s_pace_hinted && !s_open && !s_note.on && g_racacit_present_pace == 0 && n >= 15 && sum > 0.0
 +        && ms - s_first_present_ms > 90000) {
-+        const double avg = sum / n, fps = n * 1000.0 / sum;
-+        const int bad = (worst > avg * 2.0 && worst > 25.0) || fps < 45.0;
++        const double avg_ms = sum / n, fps = n * 1000.0 / sum;
++        const int bad = (worst > avg_ms * 2.0 && worst > 25.0) || fps < 45.0;
 +        s_pace_score = bad ? s_pace_score + 1 : (s_pace_score > 0 ? s_pace_score - 1 : 0);
 +        if (s_pace_score >= 20) {
 +            s_pace_hinted = 1;
@@ -20457,25 +20497,127 @@ index 0ba88a8c..7fac0a01 100644
      .clear_depth_stencil  = eng_clear_depth_stencil,
 diff --git a/libs/video/rsx_perf_graph.h b/libs/video/rsx_perf_graph.h
 new file mode 100644
-index 00000000..809a855d
+index 00000000..c0d98f6c
 --- /dev/null
 +++ b/libs/video/rsx_perf_graph.h
-@@ -0,0 +1,39 @@
-+/* Uses the existing present-interval ring; no sampling thread or file output. */
+@@ -0,0 +1,161 @@
++/* Uses the existing present-interval rings; no sampling thread or file output.
++ * Three graphs: FPS and frame time per frame (the last 128), then the average,
++ * 1% low and 0.1% low FPS over the last 60 s (one point every 0.5 s, each over
++ * the 10 s before it).
++ *
++ * The lines are drawn as geometry, not pixels: each segment is a quad with a
++ * one-pixel edge on both sides whose alpha falls to 0, so the GPU's vertex
++ * colour interpolation antialiases it, and the FPS and frame time graphs get
++ * a fill under the line that fades out towards the bottom. Everything samples
++ * the atlas' solid block, so no texture or shader changes. */
++
++/* One triangle, per-vertex colour (the overlay interpolates it). */
++static void pg_tri(ui_out* o, float x0, float y0, uint32_t c0, float x1, float y1, uint32_t c1,
++                   float x2, float y2, uint32_t c2)
++{
++    if (o->n + 3 > o->cap) return;
++    const float u = 2.0f / o->aw, v = 2.0f / o->ah;   /* inside the block */
++    rsx_ui_vtx* p = o->v + o->n;
++    p[0] = (rsx_ui_vtx){ x0, y0, u, v, c0 };
++    p[1] = (rsx_ui_vtx){ x1, y1, u, v, c1 };
++    p[2] = (rsx_ui_vtx){ x2, y2, u, v, c2 };
++    o->n += 3;
++}
++
++static uint32_t pg_alpha(uint32_t c, unsigned a) { return (c & 0x00FFFFFFu) | ((uint32_t)a << 24); }
++
++/* A segment `w` pixels wide plus a 1 px feather on each side. */
++static void pg_seg(ui_out* o, float x0, float y0, float x1, float y1, float w, uint32_t c)
++{
++    float dx = x1 - x0, dy = y1 - y0;
++    const float len = sqrtf(dx * dx + dy * dy);
++    if (len < 1e-4f) return;
++    const float nx = -dy / len, ny = dx / len, h = w * .5f, f = h + 1.0f;
++    const uint32_t z = pg_alpha(c, 0);
++    /* core */
++    pg_tri(o, x0 + nx * h, y0 + ny * h, c, x1 + nx * h, y1 + ny * h, c, x1 - nx * h, y1 - ny * h, c);
++    pg_tri(o, x0 + nx * h, y0 + ny * h, c, x1 - nx * h, y1 - ny * h, c, x0 - nx * h, y0 - ny * h, c);
++    /* feathers */
++    pg_tri(o, x0 + nx * f, y0 + ny * f, z, x1 + nx * f, y1 + ny * f, z, x1 + nx * h, y1 + ny * h, c);
++    pg_tri(o, x0 + nx * f, y0 + ny * f, z, x1 + nx * h, y1 + ny * h, c, x0 + nx * h, y0 + ny * h, c);
++    pg_tri(o, x0 - nx * h, y0 - ny * h, c, x1 - nx * h, y1 - ny * h, c, x1 - nx * f, y1 - ny * f, z);
++    pg_tri(o, x0 - nx * h, y0 - ny * h, c, x1 - nx * f, y1 - ny * f, z, x0 - nx * f, y0 - ny * f, z);
++}
++
++/* A polyline through n points, and (fill != 0) the area under it down to
++ * `bottom`, `fill` alpha at the line fading to 0 at the bottom. */
++static void pg_line(ui_out* o, const float* xs, const float* ys, unsigned n, float w, uint32_t c,
++                    float bottom, unsigned fill)
++{
++    if (fill)
++        for (unsigned i = 1; i < n; ++i) {
++            const uint32_t a = pg_alpha(c, fill), z = pg_alpha(c, 0);
++            pg_tri(o, xs[i - 1], ys[i - 1], a, xs[i], ys[i], a, xs[i], bottom, z);
++            pg_tri(o, xs[i - 1], ys[i - 1], a, xs[i], bottom, z, xs[i - 1], bottom, z);
++        }
++    /* Joined, not segment by segment: separate quads leave a wedge-shaped gap
++     * on the outside of every bend. Each point gets one offset along the
++     * average of its two segments' normals (a miter, at most 2x long so a
++     * spike doesn't shoot out), and neighbouring segments share it. */
++    enum { PG_MAX = 256 };
++    if (n < 2) return;
++    if (n > PG_MAX) n = PG_MAX;
++    float mx[PG_MAX], my[PG_MAX];
++    for (unsigned i = 0; i < n; ++i) {
++        float sx = 0, sy = 0;
++        for (int s = 0; s < 2; ++s) {   /* the segments before and after point i */
++            const unsigned a = s ? i : i - 1, b = s ? i + 1 : i;
++            if ((s == 0 && i == 0) || (s == 1 && i + 1 >= n)) continue;
++            const float dx = xs[b] - xs[a], dy = ys[b] - ys[a], len = sqrtf(dx * dx + dy * dy);
++            if (len > 1e-4f) { sx += -dy / len; sy += dx / len; }
++        }
++        const float sl = sqrtf(sx * sx + sy * sy);
++        if (sl < 1e-4f) { mx[i] = 0; my[i] = -1; continue; }
++        float ux = sx / sl, uy = sy / sl, k = 1.0f;
++        /* the miter's length: 1 / cos(half the bend), from either segment's normal */
++        const unsigned a = i + 1 < n ? i : i - 1, b = a + 1;
++        const float dx = xs[b] - xs[a], dy = ys[b] - ys[a], len = sqrtf(dx * dx + dy * dy);
++        if (len > 1e-4f) { const float d = ux * (-dy / len) + uy * (dx / len); k = d > 0.5f ? 1.0f / d : 2.0f; }
++        mx[i] = ux * k; my[i] = uy * k;
++    }
++    const float h = w * .5f, f = h + 1.0f;
++    const uint32_t z = pg_alpha(c, 0);
++    for (unsigned i = 1; i < n; ++i) {
++        const unsigned p = i - 1;
++        const float pax = xs[p] + mx[p] * h, pay = ys[p] + my[p] * h, pbx = xs[p] - mx[p] * h, pby = ys[p] - my[p] * h;
++        const float qax = xs[i] + mx[i] * h, qay = ys[i] + my[i] * h, qbx = xs[i] - mx[i] * h, qby = ys[i] - my[i] * h;
++        const float pfx = xs[p] + mx[p] * f, pfy = ys[p] + my[p] * f, pgx = xs[p] - mx[p] * f, pgy = ys[p] - my[p] * f;
++        const float qfx = xs[i] + mx[i] * f, qfy = ys[i] + my[i] * f, qgx = xs[i] - mx[i] * f, qgy = ys[i] - my[i] * f;
++        pg_tri(o, pax, pay, c, qax, qay, c, qbx, qby, c);   /* core */
++        pg_tri(o, pax, pay, c, qbx, qby, c, pbx, pby, c);
++        pg_tri(o, pfx, pfy, z, qfx, qfy, z, qax, qay, c);   /* feather, + side */
++        pg_tri(o, pfx, pfy, z, qax, qay, c, pax, pay, c);
++        pg_tri(o, pbx, pby, c, qbx, qby, c, qgx, qgy, z);   /* feather, - side */
++        pg_tri(o, pbx, pby, c, qgx, qgy, z, pgx, pgy, z);
++    }
++}
++
 +static void racit_perf_overlay(ui_out* out, const rsx_ui_font* font)
 +{
 +    double frames[128]; unsigned count;
++    float lows[N_OF(s_lows)][3]; unsigned nlows;
 +    char summary[64];
 +    LOCK();
 +    memcpy(summary, s_fps_text, sizeof summary);
 +    count = s_ft_n < N_OF(s_ft) ? s_ft_n : N_OF(s_ft);
 +    for (unsigned i = 0; i < count; ++i)
 +        frames[i] = s_ft[(s_ft_n - count + i) % N_OF(s_ft)];
++    nlows = s_lows_n < N_OF(s_lows) ? s_lows_n : N_OF(s_lows);
++    for (unsigned i = 0; i < nlows; ++i)
++        memcpy(lows[i], s_lows[(s_lows_n - nlows + i) % N_OF(s_lows)], sizeof lows[i]);
 +    UNLOCK();
 +    if (!summary[0]) snprintf(summary, sizeof summary, "-- FPS / -- ms");
 +    const float px = (float)font->px, x = px * .6f, y = px * .5f;
-+    const float width = px * 21, height = px * 2.4f, line = (float)font->line_h;
-+    rect(out, 0, 0, x + width + px, y + line * 3 + height * 2 + px,
++    const float width = px * 27, height = px * 2.4f, line = (float)font->line_h;
++    const float lw = px * .14f > 1.5f ? px * .14f : 1.5f;   /* line width */
++    float xs[N_OF(s_lows) > 128 ? N_OF(s_lows) : 128], ys[N_OF(s_lows) > 128 ? N_OF(s_lows) : 128];
++    rect(out, 0, 0, x + width + px, y + line * 4 + height * 3 + px,
 +         rgba(0, 0, 0, 180));
 +    text(out, x, y, summary, rgba(255, 230, 120, 255));
 +    for (int graph = 0; graph < 2; ++graph) {
@@ -20490,14 +20632,34 @@ index 00000000..809a855d
 +        text(out, x, top - line, label, rgba(210, 220, 235, 255));
 +        rect(out, x, top, x + width, top + height, rgba(35, 42, 52, 210));
 +        const float guide = top + height * (1.f - (float)((graph ? 16.666667 : 60.0) / maximum));
-+        rect(out, x, guide, x + width, guide + 1, rgba(125, 130, 140, 180));
++        pg_seg(out, x, guide, x + width, guide, 1.0f, rgba(125, 130, 140, 170));
 +        for (unsigned i = 0; i < count; ++i) {
 +            const double value = graph ? frames[i] : frames[i] > 0 ? 1000.0 / frames[i] : 0;
-+            const float left = x + width * (float)(128 - count + i) / 128.f;
-+            rect(out, left, top + height * (1.f - (float)(value / maximum)),
-+                 left + width / 128.f, top + height,
-+                 graph ? rgba(100, 190, 255, 240) : rgba(120, 230, 160, 240));
++            xs[i] = x + width * ((float)(128 - count + i) + .5f) / 128.f;
++            ys[i] = top + height * (1.f - (float)(value / maximum));
 +        }
++        pg_line(out, xs, ys, count, lw, graph ? rgba(100, 190, 255, 255) : rgba(120, 230, 160, 255),
++                top + height, 90);
++    }
++    /* The lows: one line each, average (green), 1% low (yellow), 0.1% low (red). */
++    const uint32_t colour[3] = { rgba(120, 230, 160, 255), rgba(255, 210, 90, 255), rgba(255, 110, 100, 255) };
++    const float top = y + line * 4 + height * 2;
++    double maximum = 120.0;
++    for (unsigned i = 0; i < nlows; ++i)
++        for (int k = 0; k < 3; ++k) if (lows[i][k] > maximum) maximum = lows[i][k];
++    char label[64];
++    snprintf(label, sizeof label, "Avg / 1%% / 0.1%% low, 60 s: 0 - %.0f", maximum);
++    text(out, x, top - line, label, rgba(210, 220, 235, 255));
++    rect(out, x, top, x + width, top + height, rgba(35, 42, 52, 210));
++    const float guide = top + height * (1.f - (float)(60.0 / maximum));
++    pg_seg(out, x, guide, x + width, guide, 1.0f, rgba(125, 130, 140, 170));
++    const float step = width / (float)N_OF(s_lows);
++    for (int k = 2; k >= 0; --k) {
++        for (unsigned i = 0; i < nlows; ++i) {
++            xs[i] = x + step * ((float)(N_OF(s_lows) - nlows + i) + .5f);
++            ys[i] = top + height * (1.f - (float)(lows[i][k] / maximum));
++        }
++        pg_line(out, xs, ys, nlows, lw, colour[k], top + height, 0);
 +    }
 +}
 diff --git a/libs/video/rsx_shader_spirv.cpp b/libs/video/rsx_shader_spirv.cpp

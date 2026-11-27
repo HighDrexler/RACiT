@@ -128,7 +128,7 @@ Buttons can be remapped in the launcher (`RACACIT_PAD_<BUTTON>` lines).
 | Cheat menu | `RACACIT_CHEATS` | Off | A Cheats page in the in-game menu (bolts, weapon levels, god mode, travel) in place of Trophies. No skill points or trophies while it's on, and never again in a save a cheat was used in. |
 | Save list screen | `RACACIT_SAVE_UI` | On | The port's own list of saves when loading and saving. Off skips the list and the save is picked without asking. |
 | Save slot (Into the Nexus) | `NEXUS_SAVE_SLOT` | Slot 1 | Into the Nexus only. Slots 2 to 8 each keep a save of their own. An empty slot starts a New Game. |
-| FPS counter | `RACACIT_FPS` | Off | Frame rate and frame time at the top left. |
+| FPS counter | `RACACIT_FPS` | Off | Frame rate, frame time and the 1% and 0.1% lows over the last 10 seconds at the top left, with a graph of them over the last minute. |
 | Discord status | `RACACIT_DISCORD` | On | Shows what you're playing in Discord. |
 | Clank levels (testing) | `RACACIT_SKIP_CLANK` | Play | Skips the Clank levels. For testing. |
 
