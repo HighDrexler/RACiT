@@ -233,6 +233,13 @@ static const std::vector<Opt>& opts()
         { "Display", "RACACIT_WINDOW_SIZE", "Window size", "", { { "", "Default" }, { "1280x720", "1280 x 720" }, { "1600x900", "1600 x 900" }, { "1920x1080", "1920 x 1080" }, { "2560x1440", "2560 x 1440" }, { "3840x2160", "3840 x 2160" } } },
         { "Display", "RACACIT_PRESENT_MODE", "VSync", "mailbox", { { "mailbox", "Off (no tearing)" }, { "fifo", "On" }, { "immediate", "Off (allow tearing)" } } },
         { "Display", "RACACIT_ASPECT", "Aspect ratio", "keep", { { "keep", "16:9" }, { "stretch", "Stretch to window" } } },
+        // Also in the in-game menu (rsx_host_ui.c R_FOV, R_CAMDIST): percent of the game's own.
+        { "Display", "RACACIT_FOV", "Field of view", "100", { { "75", "75%" }, { "80", "80%" }, { "85", "85%" }, { "90", "90%" }, { "95", "95%" }, { "100", "100% (as the game has it)" },
+                                                           { "105", "105%" }, { "110", "110%" }, { "115", "115%" }, { "120", "120%" }, { "125", "125%" }, { "130", "130%" },
+                                                           { "135", "135%" }, { "140", "140%" }, { "145", "145%" }, { "150", "150%" } } },
+        { "Display", "RACACIT_CAM_DIST", "Camera distance", "100", { { "50", "50%" }, { "60", "60%" }, { "70", "70%" }, { "80", "80%" }, { "90", "90%" }, { "100", "100% (as the game has it)" },
+                                                                   { "110", "110%" }, { "120", "120%" }, { "130", "130%" }, { "140", "140%" }, { "150", "150%" }, { "160", "160%" },
+                                                                   { "170", "170%" }, { "180", "180%" }, { "190", "190%" }, { "200", "200%" } } },
         { "Image", "RACACIT_RES_SCALE", "Internal resolution", "1", { { "0.5", "0.5x (480x352)" }, { "0.75", "0.75x (720x528)" }, { "1", "1x (960x704, PS3)" }, { "1.5", "1.5x (1440x1056)" }, { "2", "2x (1920x1408)" }, { "3", "3x (2880x2112)" }, { "4", "4x (3840x2816)" } } },
         { "Image", "RACACIT_UPSCALE", "Upscaling", "bilinear", { { "bilinear", "Bilinear" }, { "sharp", "Sharp (bicubic + sharpen)" }, { "nearest", "Nearest (pixelated)" } } },
         { "Image", "RACACIT_SHARPNESS", "Sharpness", "5", { { "0", "0%" }, { "1", "10%" }, { "2", "20%" }, { "3", "30%" }, { "4", "40%" }, { "5", "50%" }, { "6", "60%" }, { "7", "70%" }, { "8", "80%" }, { "9", "90%" }, { "10", "100%" } } },
@@ -565,6 +572,7 @@ static void add_options(const std::vector<std::string>& sections)
         if (!strncmp(o.key, "NEXUS_", 6) && g_prof != &kNexusProfile) continue;   /* Into the Nexus's own */
         if (!strcmp(o.key, "RACACIT_GAME_UPDATE") && g_prof != &kRacitProfile) continue;   /* A Crack in Time's own */
         if (!strcmp(o.key, "RACACIT_FPS_CAP") && g_prof != &kRacitProfile) continue;
+        if ((!strcmp(o.key, "RACACIT_FOV") || !strcmp(o.key, "RACACIT_CAM_DIST")) && g_prof != &kRacitProfile) continue;   /* A Crack in Time's camera hooks */
         if (section != o.section) {
             section = o.section; scr.items.push_back(header(section));
             if (section == "Controller") scr.items.push_back(ds_plus_item());

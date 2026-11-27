@@ -46,7 +46,7 @@ As of 11/18 Android and MacOS versions are available, along with a windows build
 
 ## Settings
 
-Every setting is in the launcher's Settings screen, and most of them are also in the in-game menu: press **F1** (or **Esc** when keyboard and mouse play is off), or **L3+R3** on a controller. On Android, hold Select. Changes made in either place are saved to the same `settings.txt`, so the other one sees them too. Each setting is a `NAME=value` line in that file if you'd rather edit it by hand. The names are in the tables below.
+The launcher's Settings screen and the in-game menu have the same settings, except Game build (the launcher picks the program before the game starts) the graphics preset (a shortcut in the menu for settings that are in both) and the two Into the Nexus settings. To open the in-game menu, press **F1** (or **Esc** when keyboard and mouse play is off), or **L3+R3** on a controller. On Android, hold Select. Changes made in either place are saved to the same `settings.txt`, so the other one sees them too. Each setting is a `NAME=value` line in that file if you'd rather edit it by hand. The names are in the tables below.
 
 ### Display
 
@@ -56,8 +56,8 @@ Every setting is in the launcher's Settings screen, and most of them are also in
 | Window size | `RACACIT_WINDOW_SIZE` | Default | Starting window size, from 1280x720 to 3840x2160. |
 | VSync | `RACACIT_PRESENT_MODE` | Off (no tearing) | Off without tearing (`mailbox`), on (`fifo`), or off with tearing allowed (`immediate`, lowest latency). |
 | Aspect ratio | `RACACIT_ASPECT` | 16:9 | Keep 16:9 with black bars, or stretch to fill the window. |
-| Field of view | `RACACIT_FOV` | 100% | 75% to 150% of the game's own field of view (in-game menu). |
-| Camera distance | `RACACIT_CAM_DIST` | 100% | 50% to 200% of the game's camera distance (in-game menu). |
+| Field of view | `RACACIT_FOV` | 100% | 75% to 150% of the game's own field of view. |
+| Camera distance | `RACACIT_CAM_DIST` | 100% | 50% to 200% of the game's camera distance. |
 
 ### Graphics
 
@@ -114,6 +114,8 @@ Buttons can be remapped in the launcher (`RACACIT_PAD_<BUTTON>` lines).
 | Invert mouse Y | `RACACIT_MOUSE_INVERT_Y` | Off | |
 
 ### Game
+
+These are on the in-game menu's Game page too. The game reads most of them when it starts, so a change made in the menu says "after restart" until the next start. The save list screen changes at once.
 
 | Setting | Name in settings.txt | Default | What it does |
 | --- | --- | --- | --- |
