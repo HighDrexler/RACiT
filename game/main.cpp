@@ -1457,6 +1457,10 @@ static void windows_setup(int* argc, char*** argv)
      * update made pipelinecache.bin useless (rsx_vulkan_backend.c). */
     snprintf(path, sizeof path, "%s\\pipelinelist.bin", dir);
     if (!getenv("RSX_PIPELINE_LIST")) _putenv_s("RSX_PIPELINE_LIST", path);
+    /* Frame pacing ([pace]) and GPU time ([gpu]) every 5 s in every log
+     * (2026-11-24): the owner's v98 log had none, so its dips could only be
+     * read from 5 s frame counts. Every test run here has always had them on. */
+    if (!getenv("RACACIT_PACE_STATS")) _putenv_s("RACACIT_PACE_STATS", "1");
 
     if (*argc >= 2) return;
 
