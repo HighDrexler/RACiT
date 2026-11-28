@@ -2706,12 +2706,50 @@ extern "C" void racacit_clock_tick(ppu_context* ctx)
 extern "C" uint64_t ppu_timebase_now(void);
 static uint64_t racacit_rd64(uint32_t ea) { return ((uint64_t)vm_read32(ea) << 32) | vm_read32(ea + 4u); }
 static void racacit_wr64(uint32_t ea, uint64_t v) { vm_write32(ea, (uint32_t)(v >> 32)); vm_write32(ea + 4u, (uint32_t)v); }
+/* Loading screens: the level loader's screen frame (disc func_0032DCC0, 1.20
+ * func_0032DD84, matched by code) draws the loading screen and ends with the
+ * frame limiter. Profiling a Zolar Forest load on 1.20 put about 83% of the
+ * main thread in that limiter's sleep, so the load moved one loader step per
+ * 1/60 s however fast the disk is. The hooks bracket that frame's one call of
+ * the frame end (racacit_loading_frame(1) before it, (0) after), and a
+ * limiter call inside it keeps loading frames at least 2 ms apart instead of
+ * waiting out the 1/60 s. If the frame end skips the limiter, the mark is
+ * cleared anyway. Gameplay, menus and cutscenes never run this frame, so they
+ * stay paced as before. RACACIT_FAST_LOAD=0 turns it off. On both the disc
+ * and update 1.20. */
+static thread_local int s_loading_frame;
+static thread_local uint64_t s_loading_last;   /* timebase of the last loading frame's end */
+extern "C" void racacit_loading_frame(int in_frame_end)
+{
+    static const int on = [] { const char* e = getenv("RACACIT_FAST_LOAD"); return !(e && e[0] == '0'); }();
+    s_loading_frame = on && in_frame_end;
+}
 extern "C" int racacit_frame_limit(ppu_context* ctx)
 {
     const int cap = racacit_fps_cap();
-    if (cap <= 0 || cap == 60) return 0;
+    const int loading = s_loading_frame;
+    s_loading_frame = 0;
     const uint32_t disp = vm_read32(vm_read32((uint32_t)ctx->gpr[2] - 0x5120u) - 0x7FF8u);
     const uint64_t tb_hz = 79800000ull;
+    if (loading) {
+        /* At most 500 loading frames a second, so it doesn't spin the GPU. The
+         * deadline then reads as late, so the next normal frame restarts its
+         * period from its own start, as the original limiter does after a
+         * late frame. */
+        const uint64_t step = tb_hz / 500u;
+        uint64_t now = ppu_timebase_now();
+        const uint64_t want = s_loading_last + step;
+        if (now < want && want - now <= step) {
+            const uint64_t left_us = (want - now) * 1000000ull / tb_hz;
+            if (left_us > 200) std::this_thread::sleep_for(std::chrono::microseconds(left_us - 100));
+            while ((now = ppu_timebase_now()) < want) {}
+        }
+        s_loading_last = now;
+        racacit_wr64(disp + 0x2E0u, 0);
+        racacit_wr64(disp + 0x2D8u, now);
+        return 1;
+    }
+    if (cap <= 0 || cap == 60) return 0;
     /* Above 60: f1 refresh periods of 1/cap. Under 60 (the steady-30 option for
      * PCs that cannot hold 60: an even 2 refreshes a frame on a 60 Hz screen
      * instead of 20-25 ms frames that judder between 1 and 2): at least 1/cap,
