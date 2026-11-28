@@ -1133,6 +1133,41 @@ fn patch_chunk(c: &mut Chunk) -> Result<()> {
         c.changed = true;
     }
 
+    // 30. Loading screens skip most of the frame limiter's wait (game/stubs.cpp
+    //     racacit_loading_frame): at the head of the level loader's screen frame
+    //     func_0032DCC0, which ends by calling the frame end func_0052BFE0. USA disc only.
+    let sp = if c.uses_usa() {
+        c.span("func_0032DCC0")?
+    } else {
+        None
+    };
+    if let Some(sp) = sp
+        && !c.fn_contains(sp, "racacit_loading_frame")
+    {
+        let fun = &c.src[sp.1..sp.2];
+        if !contains(fun, b"func_0052BFE0(ctx)")
+            || !contains(fun, b"ctx->gpr[29] + 0x29")
+            || !contains(fun, b"ppu_timebase_now()")
+        {
+            return Err(
+                "patch_lift #30: func_0032DCC0 is not the loading screen frame on this disc. \
+                            Stopping rather than hooking the wrong function."
+                    .into(),
+            );
+        }
+        c.src = splice(
+            &c.src,
+            sp.1,
+            sp.1,
+            b"        racacit_loading_frame();   /* racacit: fast loading screens */\n",
+        );
+        c.declare(
+            "void racacit_loading_frame",
+            "extern \"C\" void racacit_loading_frame(void);\n",
+        )?;
+        c.changed = true;
+    }
+
     if (c.has("racacit_jb_push(") || c.has("racacit_longjmp(")) && !c.has("racacit: guest setjmp") {
         // declarations after the first include
         c.src = insert_after_include(&c.src, DECLS.as_bytes())?;
