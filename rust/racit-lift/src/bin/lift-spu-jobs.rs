@@ -270,14 +270,31 @@ fn merge_starts(root: &Path, path: &Path) -> Result<()> {
 /// igPm clears local store 16 bytes a turn before each job: a plain loop, not two
 /// trampoline hops per turn (a large part of a busy lane's time).
 fn patch_igpm_clear(path: &Path) -> Result<()> {
-    let old = [
-        "void igpm_rt_spu_func_0003F90C(spu_context* SPU_RESTRICT ctx) {",
-        "        ctx->gpr[4] = spu_ai(ctx->gpr[4], -1);",
-        "        ctx->gpr[66] = spu_ceqi(ctx->gpr[4], -1);",
-        "        if (ctx->gpr[66]._u32[0] == 0) { ctx->pc = 0x3F904; g_spu_trampoline_fn = igpm_rt_spu_func_0003F904; return; }",
-    ];
+    let text = racit_lift::read(path)?;
+    let eol = if text.contains(&b'\r') { "\r\n" } else { "\n" };
+    // The lifter names the trampoline slot `g_spu_trampoline_fn`, or
+    // `SPU_TRAMP_OF(ctx)` where it keeps the slot in the context.
+    let old_for = |slot: &str| {
+        [
+            "void igpm_rt_spu_func_0003F90C(spu_context* SPU_RESTRICT ctx) {".to_string(),
+            "        ctx->gpr[4] = spu_ai(ctx->gpr[4], -1);".to_string(),
+            "        ctx->gpr[66] = spu_ceqi(ctx->gpr[4], -1);".to_string(),
+            format!("        if (ctx->gpr[66]._u32[0] == 0) {{ ctx->pc = 0x3F904; {slot} = igpm_rt_spu_func_0003F904; return; }}"),
+        ]
+        .join(eol)
+            + eol
+    };
+    let Some(a) = ["g_spu_trampoline_fn", "SPU_TRAMP_OF(ctx)"]
+        .into_iter()
+        .map(old_for)
+        .find(|a| racit_lift::contains(&text, a.as_bytes()))
+    else {
+        return Err(
+            "igpm_rt: the local store clear loop has changed: review patch_igpm_clear".into(),
+        );
+    };
     let new = [
-        old[0],
+        "void igpm_rt_spu_func_0003F90C(spu_context* SPU_RESTRICT ctx) {",
         "        /* The job launch clears local store, 16 bytes a turn: as a plain loop here",
         "         * (scripts/lift_spu_jobs.py), not two trampoline hops per turn. */",
         "        for (;;) {",
@@ -288,14 +305,7 @@ fn patch_igpm_clear(path: &Path) -> Result<()> {
         "            ctx->gpr[3] = spu_ai(ctx->gpr[3], 16);",
         "        }",
     ];
-    let text = racit_lift::read(path)?;
-    let eol = if text.contains(&b'\r') { "\r\n" } else { "\n" };
-    let (a, b) = (old.join(eol) + eol, new.join(eol) + eol);
-    if !racit_lift::contains(&text, a.as_bytes()) {
-        return Err(
-            "igpm_rt: the local store clear loop has changed: review patch_igpm_clear".into(),
-        );
-    }
+    let b = new.join(eol) + eol;
     racit_lift::write(
         path,
         &racit_lift::replace_first(&text, a.as_bytes(), b.as_bytes()),
