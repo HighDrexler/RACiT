@@ -2422,6 +2422,26 @@ index 4d916ac7..1dfee100 100644
      /* If creating, ensure parent directories exist */
      if (flags & CELL_FS_O_CREAT) {
          ensure_parent_dirs(host_path);
+diff --git a/libs/input/cellKb.c b/libs/input/cellKb.c
+index 6b4cdbc7..c5093c3b 100644
+--- a/libs/input/cellKb.c
++++ b/libs/input/cellKb.c
+@@ -120,9 +120,15 @@ static u16 kb_raw_to_ascii(u16 raw, u32 mkey)
+  * API implementations
+  * -----------------------------------------------------------------------*/
+ 
++/* Told of every cellKbInit call (A Crack in Time calls it at the main menu and
++ * again once a level is up): game/benchmark.cpp waits for the second. NULL
++ * unless a title sets it. */
++void (*g_kb_init_hook)(void) = 0;
++
+ s32 cellKbInit(u32 max_connect)
+ {
+     printf("[cellKb] Init(max_connect=%u)\n", max_connect);
++    { void (*hook)(void) = __atomic_load_n(&g_kb_init_hook, __ATOMIC_ACQUIRE); if (hook) hook(); }
+ 
+     if (s_kb_initialized)
+         return CELL_KB_ERROR_ALREADY_INITIALIZED;
 diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
 index 5f8a2fa2..1fb84208 100644
 --- a/libs/input/cellPad.c

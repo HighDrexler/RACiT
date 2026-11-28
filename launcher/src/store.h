@@ -209,7 +209,8 @@ public:
     // beside their exe (v65 and older) get them too.
     // prepare: the shader prepare instead (RACACIT_PREPARE=1: no window, no game, every
     // pipeline in data\cache\pipelinelist.bin built on all cores, then it exits; Windows only).
-    std::string launch(void** process, bool prepare = false);   // Windows: a process HANDLE; macOS: a ChildProcess*
+    std::string launch(void** process, bool prepare = false, bool benchmark = false);
+    fs::path benchmark_result() const { return data() / L"benchmark.txt"; }   // the game writes it beside settings.txt   // Windows: a process HANDLE; macOS: a ChildProcess*
 
     // Shaders (data\cache): pipelinelist.bin (the pipelines recorded), shaders.state (the game
     // writes it each start: the cache ok / empty / refused, the graphics driver), shaders.stamp

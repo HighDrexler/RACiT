@@ -771,6 +771,7 @@ extern "C" void racacit_front_end_cards(ppu_context* ctx)
     s_front_end_menu = (ok && skip_start) ? (uint32_t)c.gpr[27] : 0u;
 }
 
+extern "C" void racit_benchmark_menu_open(void);   /* benchmark.cpp */
 extern "C" void racacit_front_end_menu(ppu_context* ctx)
 {
     const uint32_t handle = s_front_end_menu;
@@ -789,6 +790,7 @@ extern "C" void racacit_front_end_menu(ppu_context* ctx)
     front_end_leave(ctx, c);
     fprintf(stderr, "[front-end] PRESS START skipped: main menu opens (RACACIT_SKIP_PRESS_START)%s\n",
             ok ? "" : " -- SetVariable said no");
+    racit_benchmark_menu_open();
 #ifdef __APPLE__
     { if (racacit_load_stats_on()) fprintf(stderr, "[load-stats] %8.0f ms: main menu (CreateOptions in 10 frames)%c", racacit_since_start_ms(), 10); }
 #endif

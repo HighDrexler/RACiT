@@ -1878,7 +1878,7 @@ bool Store::shader_progress(int out[5]) const
 // ---- launch -----------------------------------------------------------------------------
 static std::wstring fwd(const fs::path& p) { std::wstring s = p.wstring(); for (auto& c : s) if (c == L'\\') c = L'/'; return s; }
 
-std::string Store::launch(void** process, bool prepare)
+std::string Store::launch(void** process, bool prepare, bool benchmark)
 {
     *process = nullptr;
     reload();
@@ -1892,7 +1892,8 @@ std::string Store::launch(void** process, bool prepare)
     if (u120) { const std::string r = prepare_update_hdd(); if (!r.empty()) return "Could not set up update 1.20: " + r; }
     const fs::path eboot = u120 ? update_elf() : g.root / L"PS3_GAME" / L"USRDIR" / L"EBOOT.elf";
     seed_caches(b);   // a prepare too: a new build's shipped pipelines are then built as well
-    if (!prepare && ini.get("backup_on_play", "1") != "0") {
+    // A benchmark plays from a copy of the saves (game/benchmark.cpp): nothing to back up.
+    if (!prepare && !benchmark && ini.get("backup_on_play", "1") != "0") {
         /* A backup that cannot be made must not keep the game from starting
          * (GitHub #5: "backup save failed, game won't open"); the reason goes
          * to logs\backup_failed.txt. */
@@ -1936,6 +1937,7 @@ std::string Store::launch(void** process, bool prepare)
         fs::remove(cache() / L"shaders.progress", ec);
     }
     set[L"RACACIT_LAUNCHER"] = L"1";
+    if (benchmark) set[L"RACACIT_BENCHMARK"] = L"1";
     set[L"RACIT_GAME_VERSION"] = widen(g_launcher_version);   // code mods' racit_api.game_version
     std::wstring modlist;
     const auto all = mods();
