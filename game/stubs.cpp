@@ -720,6 +720,7 @@ static void front_end_continue_run(void)
         for (int i = 0; i < 20; i++) {
             std::this_thread::sleep_for(milliseconds(100));
             if (!racit_save_autopick_pending()) {
+                racit_pad_host_clear();
                 fprintf(stderr, "[front-end] continue at start: the Load list took the press (%lld ms after the menu)%c", ms(), 10);
                 return;
             }
