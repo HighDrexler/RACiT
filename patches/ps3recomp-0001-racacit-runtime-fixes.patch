@@ -40277,6 +40277,18 @@ index f3d4163a..3ef96645 100644
  #ifdef _WIN32
  /* Sub-millisecond timed-wait support for the lv2 sync primitives.
   * SleepConditionVariableCS / WaitForSingleObject floor a timed wait to 1 ms,
+diff --git a/tests/sync_stress/test_cellsync_mutex.c b/tests/sync_stress/test_cellsync_mutex.c
+index 7cf5b08f..99e9214b 100644
+--- a/tests/sync_stress/test_cellsync_mutex.c
++++ b/tests/sync_stress/test_cellsync_mutex.c
+@@ -19,6 +19,7 @@ void spu_lockline_lock(void) {}
+ void spu_lockline_unlock(void) {}
+ int  spu_coh_is_reserved(uint32_t ea) { (void)ea; return 0; }
+ void spu_coh_notify_write(uint32_t ea) { (void)ea; }
++void ps3_yield(void) {}                       /* runtime/platform/win32_compat.c; one thread here */
+ 
+ static int failures;
+ #define CHECK_RC(call, want) do { int32_t _rc = (int32_t)(call); \
 diff --git a/tools/extract_spu_images.py b/tools/extract_spu_images.py
 index 0c15cb73..11dd4030 100644
 --- a/tools/extract_spu_images.py
