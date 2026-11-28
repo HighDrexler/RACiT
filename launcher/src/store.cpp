@@ -1876,6 +1876,20 @@ bool Store::shader_progress(int out[5]) const
 }
 
 // ---- launch -----------------------------------------------------------------------------
+// Whether a game program has a feature: game/benchmark.cpp keeps a marker text in it.
+static bool program_has(const fs::path& exe, const std::string& marker)
+{
+    std::ifstream f(exe, std::ios::binary);
+    if (!f) return false;
+    std::string buf(1 << 20, 0), carry;
+    while (f) {
+        f.read(&buf[0], (std::streamsize)buf.size());
+        const std::string chunk = carry + buf.substr(0, (size_t)f.gcount());
+        if (chunk.find(marker) != std::string::npos) return true;
+        carry = chunk.size() >= marker.size() ? chunk.substr(chunk.size() - marker.size() + 1) : chunk;
+    }
+    return false;
+}
 static std::wstring fwd(const fs::path& p) { std::wstring s = p.wstring(); for (auto& c : s) if (c == L'\\') c = L'/'; return s; }
 
 std::string Store::launch(void** process, bool prepare, bool benchmark)
@@ -1986,6 +2000,12 @@ std::string Store::launch(void** process, bool prepare, bool benchmark)
               "Set Settings > Performance > Game build to Automatic or Standard."
             : "This PC's processor has no AVX2, and build v" + std::to_string(b.version) + " has no version for "
               "older processors (" + prog + "). Install a release that includes one.";
+    if (benchmark) {
+        if (!program_has(exe, "RACIT-FEATURE:benchmark-1"))
+            return "Build v" + std::to_string(b.version) + " has no benchmark mode, and would play from your own saves. "
+                   "Install the latest release to run the benchmark.";
+        fs::remove(benchmark_result(), ec);   // a result from an earlier run is never shown as this one
+    }
     std::wstring cl = L"\"" + exe.wstring() + L"\" \"" + eboot.wstring() + L"\"";
     // An older build writes log.txt beside itself: clear the last one so a stale
     // file is never taken for this session's.
@@ -2032,6 +2052,12 @@ std::string Store::launch_mac(const BuildInfo& b, const fs::path& eboot, std::ma
     for (auto& kv : set) env.push_back(narrow(kv.first) + "=" + narrow(kv.second));
 
     const fs::path exe = b.dir / RACIT_GAME_EXE;
+    if (set.count(L"RACACIT_BENCHMARK")) {   // as on Windows (launch)
+        if (!program_has(exe, "RACIT-FEATURE:benchmark-1"))
+            return "Build v" + std::to_string(b.version) + " has no benchmark mode, and would play from your own saves. "
+                   "Install the latest release to run the benchmark.";
+        fs::remove(benchmark_result(), ec);
+    }
     fs::remove(b.dir / L"log.txt", ec);
     launched_dir = b.dir;
     clear_quarantine(b.dir);

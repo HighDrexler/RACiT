@@ -142,6 +142,11 @@ void run()
 
 }  // namespace
 
+// The launcher looks for this text in the game program before it offers a benchmark run
+// (launcher/src/store.cpp): an older build would ignore RACACIT_BENCHMARK and play from
+// the real saves. racit_benchmark_setup reads it, so no linker drops it.
+extern "C" const char racit_feature_benchmark[] = "RACIT-FEATURE:benchmark-1";
+
 extern "C" int racit_benchmark_on(void)
 {
     int on = s_on.load(std::memory_order_relaxed);
@@ -166,13 +171,17 @@ extern "C" void racit_benchmark_menu_open(void)
 extern "C" void racit_benchmark_setup(void)
 {
     if (!racit_benchmark_on()) return;
+    if (!*(volatile const char*)racit_feature_benchmark) return;
     const char* settings = std::getenv("RACACIT_SETTINGS_FILE");
     s_dir = settings && *settings ? fs::path(settings).parent_path() : fs::current_path();
     s_pad = s_dir / "benchmark-pad.txt";
     s_frames = s_dir / "benchmark-frames.txt";
     s_result = s_dir / "benchmark.txt";
     std::error_code ec;
+    // Everything a run leaves, an interrupted one included: frame_times.cpp makes its
+    // files exclusively ("wx"), so a stale .meta.tmp would keep this run from finishing.
     for (const fs::path& p : { s_frames, fs::path(s_frames.string() + ".meta"),
+                               fs::path(s_frames.string() + ".meta.tmp"),
                                fs::path(s_frames.string() + ".request"), s_result })
         fs::remove(p, ec);
 
@@ -182,10 +191,17 @@ extern "C" void racit_benchmark_setup(void)
     const fs::path from = home && *home ? fs::path(home) : fs::path(hdd ? hdd : ".") / "home";
     const fs::path copy = s_dir / "benchmark-home";
     fs::remove_all(copy, ec);
-    fs::create_directories(copy, ec);
-    if (fs::is_directory(from, ec))
+    if (!ec) fs::create_directories(copy, ec);
+    if (!ec && fs::is_directory(from, ec))
         fs::copy(from, copy, fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
-    if (ec) std::fprintf(stderr, "[benchmark] copying the saves: %s\n", ec.message().c_str());
+    if (ec) {
+        // Without a full copy the run could reach the real saves: stop before the game starts.
+        const std::string text = "failed: could not copy the saves to " + copy.string() + " (" + ec.message() + ")\n";
+        std::ofstream(s_result, std::ios::binary | std::ios::trunc) << text;
+        std::fprintf(stderr, "[benchmark] %s", text.c_str());
+        std::fflush(stderr);
+        std::_Exit(1);
+    }
     put_env("PS3_HDD0_HOME_ROOT", copy.string());
 
     pad("");
