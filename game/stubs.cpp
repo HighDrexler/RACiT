@@ -684,6 +684,7 @@ extern "C" int racit_pad_player_active(void);
 extern "C" void racit_save_autopick_once(void);
 extern "C" void racit_save_autopick_cancel(void);
 extern "C" int racit_save_autopick_pending(void);
+extern "C" int racit_save_autopick_taken(void);
 extern "C" int racit_save_any(const char* prefix);
 static int front_end_auto_continue(void)
 {
@@ -702,13 +703,21 @@ static void front_end_continue_run(void)
     const auto ms = [&] { return (long long)duration_cast<milliseconds>(steady_clock::now() - t0).count(); };
     /* CreateOptions runs ten frames after Init; give the menu time to take input. */
     std::this_thread::sleep_for(milliseconds(1500));
+    /* Armed once: a retry only presses Cross again while that same request is
+     * still waiting, never after the Load list has taken it. */
+    const int taken = racit_save_autopick_taken();
+    racit_save_autopick_once();
     for (int tries = 0; tries < 8; tries++) {
         if (racit_pad_player_active()) {
             racit_save_autopick_cancel();
             fprintf(stderr, "[front-end] continue at start: a control was used, staying on the menu%c", 10);
             return;
         }
-        racit_save_autopick_once();
+        if (racit_save_autopick_taken() != taken || !racit_save_autopick_pending()) {
+            racit_pad_host_clear();
+            fprintf(stderr, "[front-end] continue at start: the Load list took the press (%lld ms after the menu)%c", ms(), 10);
+            return;
+        }
         racit_pad_host_press(0x4000u, 6);   /* Cross */
         if (racit_pad_player_active()) {   /* Settings or a control in between: undo it */
             racit_pad_host_cancel();
