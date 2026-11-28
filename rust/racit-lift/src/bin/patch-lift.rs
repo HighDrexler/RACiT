@@ -1139,10 +1139,29 @@ fn patch_chunk(c: &mut Chunk) -> Result<()> {
     //     just before it and cleared just after, so neither an early return nor a frame end
     //     that skips the limiter leaves the mark for a later frame. USA disc only.
     let sp = if c.uses_usa() {
-        c.span("func_0032DCC0")?
+        c.span("func_0032DCC0")? // one lift chunk holds it, the others don't
     } else {
         None
     };
+    // Already hooked: exactly one mark before the one frame end call and one clear after it.
+    if let Some(sp) = sp
+        && c.fn_contains(sp, "racacit_loading_frame")
+    {
+        let fun = &c.src[sp.1..sp.2];
+        let on = memchr::memmem::find_iter(fun, b"racacit_loading_frame(1);").collect::<Vec<_>>();
+        let off = memchr::memmem::find_iter(fun, b"racacit_loading_frame(0);").collect::<Vec<_>>();
+        let call = memchr::memmem::find_iter(fun, b"func_0052BFE0(ctx)").collect::<Vec<_>>();
+        if on.len() != 1
+            || off.len() != 1
+            || call.len() != 1
+            || !(on[0] < call[0] && call[0] < off[0])
+        {
+            return Err(
+                "patch_lift #30: func_0032DCC0's loading frame marks are not one pair around its frame end call"
+                    .into(),
+            );
+        }
+    }
     if let Some(sp) = sp
         && !c.fn_contains(sp, "racacit_loading_frame")
     {
