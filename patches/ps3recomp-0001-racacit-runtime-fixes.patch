@@ -37703,6 +37703,97 @@ index 275adfa6..a91d8918 100644
      /* Trace ONLY the stalled queue's own runs: wkl_data == the sync EA the PPU
       * barrier/ticket probes armed (ticket-pub arms it at first publish, before
       * the PM's first work pass). Idle re-runs of this wid matter as much as the
+diff --git a/runtime/spu/tests/test_adapter_main.c b/runtime/spu/tests/test_adapter_main.c
+index 3e68c445..0365dbcb 100644
+--- a/runtime/spu/tests/test_adapter_main.c
++++ b/runtime/spu/tests/test_adapter_main.c
+@@ -24,6 +24,8 @@ static uint32_t g_evt = 0; static int g_evt_wrote = 0;
+ 
+ u128 spu_rdch(spu_context* ctx, uint32_t ch) { (void)ctx; (void)ch; return spu_zero(); }
+ uint32_t spu_rchcnt(spu_context* ctx, uint32_t ch) { (void)ctx; (void)ch; return 1; }
++/* Lifted MFC parameter writes go through this spu_wrch, not inline into ctx. */
++int g_spu_chhist_wr = 1;
+ void spu_wrch(spu_context* ctx, uint32_t channel, u128 value) {
+     if (channel == SPU_WrOutIntrMbox) { g_evt = value._u32[0]; g_evt_wrote = 1; return; }
+     mfc_channel_write(&g_mfc, ctx, channel, value._u32[0]);
+diff --git a/runtime/spu/tests/test_bringup_main.c b/runtime/spu/tests/test_bringup_main.c
+index 2bce6584..9289051b 100644
+--- a/runtime/spu/tests/test_bringup_main.c
++++ b/runtime/spu/tests/test_bringup_main.c
+@@ -28,6 +28,8 @@ static int        g_mbox_wrote = 0;
+ u128 spu_rdch(spu_context* ctx, uint32_t ch) { (void)ctx; (void)ch; return spu_zero(); }
+ uint32_t spu_rchcnt(spu_context* ctx, uint32_t ch) { (void)ctx; (void)ch; return 1; }
+ 
++/* Lifted MFC parameter writes go through this spu_wrch, not inline into ctx. */
++int g_spu_chhist_wr = 1;
+ void spu_wrch(spu_context* ctx, uint32_t channel, u128 value) {
+     if (channel == SPU_WrOutMbox) {           /* SPU signals the PPU */
+         g_mbox = value._u32[0];
+diff --git a/runtime/spu/tests/test_brsl_return_main.c b/runtime/spu/tests/test_brsl_return_main.c
+index 2f12014c..c42391f2 100644
+--- a/runtime/spu/tests/test_brsl_return_main.c
++++ b/runtime/spu/tests/test_brsl_return_main.c
+@@ -9,6 +9,8 @@ static int g_wrote = 0;
+ 
+ u128 spu_rdch(spu_context* ctx, uint32_t ch) { (void)ctx; (void)ch; return spu_zero(); }
+ uint32_t spu_rchcnt(spu_context* ctx, uint32_t ch) { (void)ctx; (void)ch; return 1; }
++/* Lifted MFC parameter writes go through this spu_wrch, not inline into ctx. */
++int g_spu_chhist_wr = 1;
+ void spu_wrch(spu_context* ctx, uint32_t channel, u128 value) {
+     (void)ctx;
+     if (channel == SPU_WrOutMbox) { g_out = value._u32[0]; g_wrote = 1; }
+diff --git a/runtime/spu/tests/test_dma_main.c b/runtime/spu/tests/test_dma_main.c
+index 34043e85..e99adab5 100644
+--- a/runtime/spu/tests/test_dma_main.c
++++ b/runtime/spu/tests/test_dma_main.c
+@@ -17,6 +17,8 @@ static int g_wrote = 0;
+ 
+ u128 spu_rdch(spu_context* ctx, uint32_t ch) { (void)ctx; (void)ch; return spu_zero(); }
+ uint32_t spu_rchcnt(spu_context* ctx, uint32_t ch) { (void)ctx; (void)ch; return 1; }
++/* Lifted MFC parameter writes go through this spu_wrch, not inline into ctx. */
++int g_spu_chhist_wr = 1;
+ void spu_wrch(spu_context* ctx, uint32_t channel, u128 value) {
+     if (channel == SPU_WrOutMbox) { g_out = value._u32[0]; g_wrote = 1; return; }
+     /* All other MFC-bound channels go through the real DMA engine in
+diff --git a/runtime/spu/tests/test_event_main.c b/runtime/spu/tests/test_event_main.c
+index d7f94662..5899e1ac 100644
+--- a/runtime/spu/tests/test_event_main.c
++++ b/runtime/spu/tests/test_event_main.c
+@@ -50,6 +50,8 @@ static ev_queue g_spu_evq;   /* event queue connected to the SPU (group id 7) */
+ u128 spu_rdch(spu_context* ctx, uint32_t ch) { (void)ctx; (void)ch; return spu_zero(); }
+ uint32_t spu_rchcnt(spu_context* ctx, uint32_t ch) { (void)ctx; (void)ch; return 1; }
+ 
++/* Lifted MFC parameter writes go through this spu_wrch, not inline into ctx. */
++int g_spu_chhist_wr = 1;
+ void spu_wrch(spu_context* ctx, uint32_t channel, u128 value) {
+     if (channel == SPU_WrOutIntrMbox) {
+         /* SPU raised a completion interrupt -> deliver as a thread-group event
+diff --git a/runtime/spu/tests/test_lfqueue_main.c b/runtime/spu/tests/test_lfqueue_main.c
+index c864a3b4..f007e287 100644
+--- a/runtime/spu/tests/test_lfqueue_main.c
++++ b/runtime/spu/tests/test_lfqueue_main.c
+@@ -43,6 +43,8 @@ static ev_queue g_spu_evq;
+ 
+ u128 spu_rdch(spu_context* ctx, uint32_t ch) { (void)ctx; (void)ch; return spu_zero(); }
+ uint32_t spu_rchcnt(spu_context* ctx, uint32_t ch) { (void)ctx; (void)ch; return 1; }
++/* Lifted MFC parameter writes go through this spu_wrch, not inline into ctx. */
++int g_spu_chhist_wr = 1;
+ void spu_wrch(spu_context* ctx, uint32_t channel, u128 value) {
+     if (channel == SPU_WrOutIntrMbox) { evq_push(&g_spu_evq, EV_SOURCE_SPU_GROUP, value._u32[0]); return; }
+     mfc_channel_write(&g_mfc, ctx, channel, value._u32[0]);
+diff --git a/runtime/spu/tests/test_shufb_main.c b/runtime/spu/tests/test_shufb_main.c
+index 97e1778b..a9328978 100644
+--- a/runtime/spu/tests/test_shufb_main.c
++++ b/runtime/spu/tests/test_shufb_main.c
+@@ -9,6 +9,8 @@ static int g_wrote = 0;
+ 
+ u128 spu_rdch(spu_context* ctx, uint32_t ch) { (void)ctx; (void)ch; return spu_zero(); }
+ uint32_t spu_rchcnt(spu_context* ctx, uint32_t ch) { (void)ctx; (void)ch; return 1; }
++/* Lifted MFC parameter writes go through this spu_wrch, not inline into ctx. */
++int g_spu_chhist_wr = 1;
+ void spu_wrch(spu_context* ctx, uint32_t channel, u128 value) {
+     (void)ctx;
+     if (channel == SPU_WrOutMbox) { g_out = value._u32[0]; g_wrote = 1; }
 diff --git a/runtime/spu/tests/test_spu_numeric_semantics.c b/runtime/spu/tests/test_spu_numeric_semantics.c
 index 3f233b33..cab64db5 100644
 --- a/runtime/spu/tests/test_spu_numeric_semantics.c
@@ -37739,6 +37830,58 @@ index 195c75e3..3d3eed6c 100644
          }
          u128 x = spu_shufb(a, b, c), y = spu_shufb_ref(a, b, c);
          if (memcmp(&x, &y, 16)) {
+diff --git a/runtime/spu/tests/test_sum_main.c b/runtime/spu/tests/test_sum_main.c
+index 1023b76e..6f87eda0 100644
+--- a/runtime/spu/tests/test_sum_main.c
++++ b/runtime/spu/tests/test_sum_main.c
+@@ -39,6 +39,8 @@ u128 spu_rdch(spu_context* ctx, uint32_t channel) {
+ uint32_t spu_rchcnt(spu_context* ctx, uint32_t channel) {
+     (void)ctx; (void)channel; return 1;
+ }
++/* Lifted MFC parameter writes go through this spu_wrch, not inline into ctx. */
++int g_spu_chhist_wr = 1;
+ void spu_wrch(spu_context* ctx, uint32_t channel, u128 value) {
+     (void)ctx;
+     if (channel == SPU_WrOutMbox) { g_out = value._u32[0]; g_wrote = 1; }
+diff --git a/runtime/spu/tests/test_taskset_main.c b/runtime/spu/tests/test_taskset_main.c
+index 4ee94300..91794922 100644
+--- a/runtime/spu/tests/test_taskset_main.c
++++ b/runtime/spu/tests/test_taskset_main.c
+@@ -43,6 +43,8 @@ static ev_queue g_taskset_evq;     /* taskset completion event queue */
+ 
+ u128 spu_rdch(spu_context* ctx, uint32_t ch) { (void)ctx; (void)ch; return spu_zero(); }
+ uint32_t spu_rchcnt(spu_context* ctx, uint32_t ch) { (void)ctx; (void)ch; return 1; }
++/* Lifted MFC parameter writes go through this spu_wrch, not inline into ctx. */
++int g_spu_chhist_wr = 1;
+ void spu_wrch(spu_context* ctx, uint32_t channel, u128 value) {
+     if (channel == SPU_WrOutIntrMbox) { evq_push(&g_taskset_evq, EV_SOURCE_SPU_GROUP, value._u32[0]); return; }
+     mfc_channel_write(&g_mfc, ctx, channel, value._u32[0]);
+diff --git a/runtime/spu/tests/test_torture_main.c b/runtime/spu/tests/test_torture_main.c
+index 30485cc5..53fd4151 100644
+--- a/runtime/spu/tests/test_torture_main.c
++++ b/runtime/spu/tests/test_torture_main.c
+@@ -22,6 +22,8 @@ static int g_stopped = 0;
+ 
+ u128 spu_rdch(spu_context* ctx, uint32_t ch) { (void)ctx; (void)ch; return spu_zero(); }
+ uint32_t spu_rchcnt(spu_context* ctx, uint32_t ch) { (void)ctx; (void)ch; return 1; }
++/* Lifted MFC parameter writes go through this spu_wrch, not inline into ctx. */
++int g_spu_chhist_wr = 1;
+ void spu_wrch(spu_context* ctx, uint32_t channel, u128 value) {
+     (void)ctx;
+     if (channel == SPU_WrOutMbox && g_nmarks < 64)
+diff --git a/runtime/spu/tests/test_workload_main.c b/runtime/spu/tests/test_workload_main.c
+index 11ffd6f7..3775ff13 100644
+--- a/runtime/spu/tests/test_workload_main.c
++++ b/runtime/spu/tests/test_workload_main.c
+@@ -32,6 +32,8 @@ u128 spu_rdch(spu_context* ctx, uint32_t ch) {
+     return r;
+ }
+ uint32_t spu_rchcnt(spu_context* ctx, uint32_t ch) { (void)ctx; (void)ch; return 1; }
++/* Lifted MFC parameter writes go through this spu_wrch, not inline into ctx. */
++int g_spu_chhist_wr = 1;
+ void spu_wrch(spu_context* ctx, uint32_t channel, u128 value) {
+     mfc_channel_write(&g_mfc, ctx, channel, value._u32[0]);
+ }
 diff --git a/runtime/syscalls/lv2_register.c b/runtime/syscalls/lv2_register.c
 index e5be07d6..7d50d42e 100644
 --- a/runtime/syscalls/lv2_register.c
