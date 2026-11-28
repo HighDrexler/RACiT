@@ -1,5 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index a39405d6..d65ced14 100644
+index a39405d6..1af1b517 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -47,12 +47,9 @@ list(FILTER HLE_SOURCES EXCLUDE REGEX "/tests/")
@@ -166,7 +166,7 @@ index a39405d6..d65ced14 100644
  elseif(MSVC)
      # Real cl.exe -- clang-cl reports its id as Clang and is handled above.
      #
-@@ -488,12 +562,29 @@ if(PS3RECOMP_BUILD_TESTS)
+@@ -488,6 +562,14 @@ if(PS3RECOMP_BUILD_TESTS)
          add_test(NAME spu_lockline_wait COMMAND test_spu_lockline_wait)
          set_tests_properties(spu_lockline_wait PROPERTIES TIMEOUT 15)
  
@@ -181,22 +181,7 @@ index a39405d6..d65ced14 100644
      endif()
      add_executable(test_rsx_present_policy tests/test_rsx_present_policy.c)
      target_include_directories(test_rsx_present_policy PRIVATE
-         "${CMAKE_CURRENT_SOURCE_DIR}/libs/video")
-     add_test(NAME rsx_present_policy COMMAND test_rsx_present_policy)
- 
-+    # Touch controls without SDL: a stick or camera drag never presses a button it crosses.
-+    add_executable(test_touch_controls tests/test_touch_controls.c libs/input/touch_controls.c)
-+    target_include_directories(test_touch_controls PRIVATE include libs/input)
-+    target_compile_definitions(test_touch_controls PRIVATE TC_NO_SDL)
-+    if(NOT WIN32)
-+        target_link_libraries(test_touch_controls PRIVATE m)
-+    endif()
-+    add_test(NAME touch_controls COMMAND test_touch_controls)
-+
-     # vmx_fmaf (fused multiply-add without a libm call per lane) against fmaf.
-     # Without -mfma it takes the double-rounding path; with it, the builtin.
-     add_executable(test_vmx_fmaf tests/test_vmx_fmaf.c)
-@@ -568,7 +659,7 @@ endif()
+@@ -568,7 +650,7 @@ endif()
  # run. Builds on any POSIX host: it picks Metal on Apple and the null backend's
  # headless software path everywhere else, so Linux -- which has no real backend
  # yet -- can still run the whole guest command stream end to end in CI.
@@ -205,7 +190,7 @@ index a39405d6..d65ced14 100644
      add_executable(ps3recomp_host
          runtime/host/host_posix.c
          runtime/host/host_stubs.c
-@@ -716,7 +807,7 @@ endif()
+@@ -716,7 +798,7 @@ endif()
  #
  # The HLE NID table is generated exactly as a port generates it, so the smoke
  # title's firmware imports resolve through the same bridge a game's do.
@@ -2453,7 +2438,7 @@ index 4d916ac7..1dfee100 100644
      if (flags & CELL_FS_O_CREAT) {
          ensure_parent_dirs(host_path);
 diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
-index 5f8a2fa2..3201136c 100644
+index 5f8a2fa2..4c04678f 100644
 --- a/libs/input/cellPad.c
 +++ b/libs/input/cellPad.c
 @@ -13,11 +13,13 @@
@@ -2495,6 +2480,15 @@ index 5f8a2fa2..3201136c 100644
  static int s_sdl_inited = 0;
  #endif
  
+@@ -133,7 +134,7 @@ static void pad_host_release(PadHostState* hs)
+   #define pad_yield() Sleep(0)
+ #else
+   #include <sched.h>
+-  #define pad_yield() sched_yield()
++  #define pad_yield() ps3_yield()
+ #endif
+ static volatile char s_poll_lock;
+ static int  pad_lock_try(void) { return !__atomic_test_and_set(&s_poll_lock, __ATOMIC_ACQUIRE); }
 @@ -487,6 +488,7 @@ static void pad_poll_xinput(void)
          s_host_state[i].press_l1       = (btns & CELL_PAD_CTRL_L1)       ? 255 : 0;
          s_host_state[i].press_r1       = (btns & CELL_PAD_CTRL_R1)       ? 255 : 0;
@@ -3408,7 +3402,7 @@ index 5f8a2fa2..3201136c 100644
  
          s_host_state[i].buttons = btns;
  
-@@ -707,11 +1369,369 @@ static void pad_poll_sdl2(void)
+@@ -707,11 +1369,342 @@ static void pad_poll_sdl2(void)
          s_host_state[i].press_square   = (btns & CELL_PAD_CTRL_SQUARE)   ? 255 : 0;
          s_host_state[i].press_l1       = (btns & CELL_PAD_CTRL_L1)       ? 255 : 0;
          s_host_state[i].press_r1       = (btns & CELL_PAD_CTRL_R1)       ? 255 : 0;
@@ -3537,22 +3531,6 @@ index 5f8a2fa2..3201136c 100644
 +
 +/* After the controllers (and PAD_IGNORE_REAL, under which only the test
 + * hook's keys count: rsx_host_ui_test_key). */
-+/* Touch camera motion when keyboard and mouse are off (Settings > Controls, or
-+ * PAD_NO_KEYBOARD): the same feed pad_poll_kbm makes, with touch as the mouse. */
-+static void pad_touch_look(int dx, int dy, const rsx_host_options* opt)
-+{
-+    extern void racit_mouse_feed(uint64_t, int, int, int, float, int, int, float*);
-+    extern int racit_stick_byte(float, float);
-+    const uint64_t now_ns = (uint64_t)((double)SDL_GetPerformanceCounter() * 1000000000.0 / (double)SDL_GetPerformanceFrequency());
-+    float push[2] = { 0.0f, 0.0f };
-+    racit_mouse_feed(now_ns, dx, dy, 1, (float)opt->mouse_sens, opt->mouse_invert, 1, push);
-+    if (push[0] || push[1]) {
-+        PadHostState* hs = &s_host_state[0];
-+        hs->analog_rx = (u8)racit_stick_byte(0.0f, push[0]);
-+        hs->analog_ry = (u8)racit_stick_byte(0.0f, push[1]);
-     }
- }
- 
 +static void pad_poll_kbm(int ignore_real)
 +{
 +    kb_init(ignore_real);
@@ -3563,18 +3541,9 @@ index 5f8a2fa2..3201136c 100644
 +     * "hold" commands then reach the game without a window. */
 +    const int video = SDL_WasInit(SDL_INIT_VIDEO) != 0;
 +    if (!video && ignore_real) rsx_host_ui_poll_script();
-+    /* Camera swipes on the touch controls are mouse motion: they turn the
-+     * cameras directly through the same feed, and touch counts as a captured
-+     * mouse while the touch controls are up (touch_controls.c). */
-+    int tdx = 0, tdy = 0;
-+    const int touch_look = !ignore_real && touch_controls_look(&tdx, &tdy);
-+    if (!s_kbm_on || !opt.kbm || (!video && !ignore_real)) {
-+        if (touch_look) pad_touch_look(tdx, tdy, &opt);
-+        return;
-+    }
++    if (!s_kbm_on || !opt.kbm || (!video && !ignore_real)) return;
 +    int dx = 0, dy = 0, wheel = 0; unsigned mb = 0;
-+    int captured = rsx_host_ui_mouse_take(&dx, &dy, &wheel, &mb);
-+    if (touch_look) { dx += tdx; dy += tdy; captured = 1; }
++    const int captured = rsx_host_ui_mouse_take(&dx, &dy, &wheel, &mb);
 +    /* Keys only while the game window has the keyboard: typing elsewhere does
 +     * not play, and nothing stays held across an Alt+Tab. */
 +    const Uint8* ks = !ignore_real && SDL_GetKeyboardFocus() ? SDL_GetKeyboardState(NULL) : NULL;
@@ -3642,8 +3611,7 @@ index 5f8a2fa2..3201136c 100644
 +        if ((mb & 1u) || wh > 0) btns |= CELL_PAD_CTRL_L1;             /* left click / wheel up: previous ring */
 +        if ((mb & 4u) || wh < 0) btns |= CELL_PAD_CTRL_R1;             /* right click / wheel down: next ring */
 +    }
-+    /* A touch swipe is not the mouse: playing by touch keeps the pad prompts. */
-+    if (btns || dx != tdx || dy != tdy || wheel || mb ||
++    if (btns || dx || dy || wheel || mb ||
 +        held[KB_LS_UP] || held[KB_LS_DOWN] || held[KB_LS_LEFT] || held[KB_LS_RIGHT] ||
 +        held[KB_RS_UP] || held[KB_RS_DOWN] || held[KB_RS_LEFT] || held[KB_RS_RIGHT])
 +        SDL_AtomicSet(&s_racit_keyboard_prompts, 1);
@@ -3700,9 +3668,9 @@ index 5f8a2fa2..3201136c 100644
 +            hs->analog_rx = (u8)racit_stick_byte(kx, push[0]);
 +            hs->analog_ry = (u8)racit_stick_byte(ky, push[1]);
 +        }
-+    }
-+}
-+
+     }
+ }
+ 
 +static void pad_poll_sdl_fallbacks(void)
 +{
 +    /* On-screen touch controls drive port 0 while no gamepad is attached. */
@@ -3718,8 +3686,7 @@ index 5f8a2fa2..3201136c 100644
 +        }
 +        PadHostState* hs = &s_host_state[0];
 +        u16 b = 0; u8 lx = 128, ly = 128, rx = 128, ry = 128;
-+        /* A finger down shows the game's own controller prompts, not keycaps. */
-+        if (touch_controls_poll(s_aspect, &b, &lx, &ly, &rx, &ry)) SDL_AtomicSet(&s_racit_keyboard_prompts, 0);
++        touch_controls_poll(s_aspect, &b, &lx, &ly, &rx, &ry);
 +        hs->buttons = b;
 +        hs->analog_lx = lx; hs->analog_ly = ly; hs->analog_rx = rx; hs->analog_ry = ry;
 +        hs->trigger_l2 = (b & CELL_PAD_CTRL_L2) ? 255 : 0;
@@ -3778,7 +3745,7 @@ index 5f8a2fa2..3201136c 100644
      if (!s_sdl_inited) {
          if (SDL_WasInit(SDL_INIT_GAMECONTROLLER) == 0) {
              /* The game is not always the focused app: on macOS its window
-@@ -729,12 +1749,14 @@ static void pad_init_backend(void)
+@@ -729,12 +1722,12 @@ static void pad_init_backend(void)
              SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER);
          }
          s_sdl_inited = 1;
@@ -3790,13 +3757,11 @@ index 5f8a2fa2..3201136c 100644
 -    /* Open any controllers already connected */
 -    pad_sdl_hotplug(1);
 +    pad_sdl_attach();
-+    /* Keycaps to start with only when there is neither a controller nor the
-+     * touch controls: playing by touch is playing with a pad. */
-+    SDL_AtomicSet(&s_racit_keyboard_prompts, s_sdl_controllers[0] == NULL && !touch_controls_active());
++    SDL_AtomicSet(&s_racit_keyboard_prompts, s_sdl_controllers[0] == NULL);
  }
  
  static void pad_shutdown_backend(void)
-@@ -776,6 +1798,62 @@ static unsigned long long pad_now_ms(void)
+@@ -776,6 +1769,62 @@ static unsigned long long pad_now_ms(void)
  #endif
  }
  
@@ -3859,7 +3824,7 @@ index 5f8a2fa2..3201136c 100644
  static void pad_poll_backend(void)
  {
      static unsigned long long s_last_ms = 0;
-@@ -793,7 +1871,33 @@ static void pad_poll_backend(void)
+@@ -793,7 +1842,33 @@ static void pad_poll_backend(void)
  #elif PAD_BACKEND_SDL2
      pad_poll_sdl2();
  #endif
@@ -3893,7 +3858,7 @@ index 5f8a2fa2..3201136c 100644
      pad_track_assign();
      pad_unlock();
  }
-@@ -867,6 +1971,103 @@ void cellPad_poll(void)
+@@ -867,6 +1942,103 @@ void cellPad_poll(void)
   * were fixed.) These used to be redeclared here with a 64-bit address
   * parameter, which conflicts with the header now that it is included. */
  
@@ -3997,7 +3962,7 @@ index 5f8a2fa2..3201136c 100644
  s32 cellPadGetData(u32 port_no, CellPadData* data_guest)
  {
      { static int _once = 0;
-@@ -883,6 +2084,7 @@ s32 cellPadGetData(u32 port_no, CellPadData* data_guest)
+@@ -883,6 +2055,7 @@ s32 cellPadGetData(u32 port_no, CellPadData* data_guest)
  
      /* Poll fresh state */
      pad_poll_backend();
@@ -4005,7 +3970,7 @@ index 5f8a2fa2..3201136c 100644
  
      /* YDKJ_INJECT_PAD: the game's wait loop polls the pad (cellPadSetActDirect /
       * GetData) -- if it's parked on a "press button" prompt after loading, no
-@@ -977,7 +2179,7 @@ skip_inject: ;
+@@ -977,7 +2150,7 @@ skip_inject: ;
       * human at the pad. Env-gated test scaffolding, off by default. */
      { static int s_ap = -1; static unsigned s_apn = 0;
        if (s_ap < 0) s_ap = getenv("PAD_AUTOPRESS") ? 1 : 0;
@@ -4014,7 +3979,7 @@ index 5f8a2fa2..3201136c 100644
            unsigned ph = s_apn++ % 240;
            if (ph < 12)
                data->button[CELL_PAD_BTN_OFFSET_DIGITAL2] |= 0x40;   /* CROSS */
-@@ -1013,7 +2215,7 @@ skip_inject: ;
+@@ -1013,7 +2186,7 @@ skip_inject: ;
                       *p ? " -- TRUNCATED at 256, the rest are ignored" : "");
            }
        }
@@ -4023,7 +3988,7 @@ index 5f8a2fa2..3201136c 100644
            double now = pad_clock(t0);
            /* Latch, do not window. A fixed time window is missed whenever the
             * title stops polling the pad for longer than the window (it does
-@@ -1050,21 +2252,57 @@ skip_inject: ;
+@@ -1050,21 +2223,57 @@ skip_inject: ;
       */
      { static int s_pf = -1; static char pf_path[512];
        static unsigned held_mask = 0; static int held_n = 0;
@@ -4091,7 +4056,7 @@ index 5f8a2fa2..3201136c 100644
                    fclose(f);
                    if (held_n > 0) { FILE* w = fopen(pf_path, "wb"); if (w) fclose(w); }
                }
-@@ -1072,9 +2310,30 @@ skip_inject: ;
+@@ -1072,9 +2281,30 @@ skip_inject: ;
            if (held_n > 0) {
                if (data->len > 0) held_n--;
                data->button[CELL_PAD_BTN_OFFSET_DIGITAL1] |= (u16)(held_mask & 0xFF);
@@ -4123,7 +4088,7 @@ index 5f8a2fa2..3201136c 100644
      /* Analog sticks */
      /* PAD_STICK="lx,ly,rx,ry" (0-255, 128 = centred): hold the analog sticks at
       * fixed positions. Rubber Ducky drives its camera from the sticks and never
-@@ -1093,7 +2352,7 @@ skip_inject: ;
+@@ -1093,7 +2323,7 @@ skip_inject: ;
                   sscanf(e, "%d,%d,%d,%d,%lf,%lf", &a,&b,&c,&d,&s_from,&s_until);
                   s_v[0]=(unsigned char)a; s_v[1]=(unsigned char)b;
                   s_v[2]=(unsigned char)c; s_v[3]=(unsigned char)d; } }
@@ -4132,7 +4097,7 @@ index 5f8a2fa2..3201136c 100644
                    hs->analog_rx = s_v[2]; hs->analog_ry = s_v[3];
                    hs->connected = 1; }
        /* PAD_SWEEP=<seconds per step>: walk the sticks through a fixed set of
-@@ -1104,7 +2363,7 @@ skip_inject: ;
+@@ -1104,7 +2334,7 @@ skip_inject: ;
        { static int sw = -1; static clock_t t0 = 0;
          if (sw < 0) { const char* e = getenv("PAD_SWEEP");
                        sw = e ? atoi(e) : 0; if (sw < 0) sw = 0; }
@@ -4141,7 +4106,7 @@ index 5f8a2fa2..3201136c 100644
              static const unsigned char steps[9][4] = {
                  {128,128,128,128},
                  {128,  0,128,128}, {128,255,128,128},
-@@ -1172,10 +2431,40 @@ skip_inject: ;
+@@ -1172,10 +2402,40 @@ skip_inject: ;
          data->button[CELL_PAD_BTN_OFFSET_SENSOR_Y] = 399; /* gravity */
          data->button[CELL_PAD_BTN_OFFSET_SENSOR_Z] = 512;
          data->button[CELL_PAD_BTN_OFFSET_SENSOR_G] = 512;
@@ -4182,7 +4147,7 @@ index 5f8a2fa2..3201136c 100644
      /* A non-zero len means "here is a CHANGE packet" -- the constant is literally
       * named CELL_PAD_LEN_CHANGE_DEFAULT. Hardware reports len = 0 once the port
       * has nothing new, and titles DRAIN on that: The Simpsons Arcade Game's
-@@ -1496,9 +2785,64 @@ s32 cellPadSetActDirect(u32 port_no, CellPadActParam* param)
+@@ -1496,9 +2756,64 @@ s32 cellPadSetActDirect(u32 port_no, CellPadActParam* param)
  #endif
  
  #if PAD_BACKEND_SDL2
@@ -4252,10 +4217,10 @@ index 5f8a2fa2..3201136c 100644
      return CELL_OK;
 diff --git a/libs/input/touch_controls.c b/libs/input/touch_controls.c
 new file mode 100644
-index 00000000..78d49582
+index 00000000..b7624af0
 --- /dev/null
 +++ b/libs/input/touch_controls.c
-@@ -0,0 +1,252 @@
+@@ -0,0 +1,182 @@
 +/* ps3recomp - on-screen touch controls. See touch_controls.h. */
 +#include "touch_controls.h"
 +#include "cellPad.h"
@@ -4263,10 +4228,7 @@ index 00000000..78d49582
 +#include <string.h>
 +#include <math.h>
 +
-+#if defined(__APPLE__)
-+#include <TargetConditionals.h>
-+#endif
-+#if !defined(_WIN32) && !defined(TC_NO_SDL)   /* TC_NO_SDL: tests/test_touch_controls.c */
++#if !defined(_WIN32)
 +#include <SDL2/SDL.h>
 +#define TC_HAVE_SDL 1
 +#endif
@@ -4354,7 +4316,7 @@ index 00000000..78d49582
 +    static int en = -1;
 +    if (en < 0) {
 +        const char* e = getenv("RACACIT_TOUCH");
-+#if defined(__ANDROID__) || (defined(__APPLE__) && TARGET_OS_IPHONE)
++#ifdef __ANDROID__
 +        en = (e && e[0] == '0') ? 0 : 1;
 +#else
 +        en = (e && e[0] == '1') ? 1 : 0;
@@ -4374,123 +4336,51 @@ index 00000000..78d49582
 +    return (uint8_t)(b < 0 ? 0 : b > 255 ? 255 : b);
 +}
 +
-+/* How far a camera swipe turns, in mouse counts per frame height: it goes
-+ * through the mouse's own path (game/desktop_mouse.cpp, 0.003 rad a count at
-+ * 100%), so a swipe up the whole screen turns about 120 degrees and Settings >
-+ * Controls mouse speed and invert apply to it too. */
-+#define TC_LOOK_COUNTS 700.0f
-+
-+/* Each finger keeps the part it started on until it lifts. A stick or camera
-+ * drag that crosses a button never presses it (dragging the camera over
-+ * triangle opened the quick select ring), and a press that slides off its
-+ * button never turns into a stick. A button finger can still slide onto the
-+ * buttons next to it. */
-+enum { TC_ROLE_NONE, TC_ROLE_BUTTON, TC_ROLE_LSTICK, TC_ROLE_LOOK };
-+#define TC_FINGERS 10
-+typedef struct { int64_t id; int role, seen; float lx, ly; } tc_finger;
-+static tc_finger s_f[TC_FINGERS];
-+static int s_nf;
-+/* Camera motion not yet taken, in mouse counts. The pad poll thread only. */
-+static float s_look_x, s_look_y;
-+
-+static tc_finger* tc_finger_for(int64_t id)
-+{
-+    for (int i = 0; i < s_nf; i++) if (s_f[i].id == id) return &s_f[i];
-+    if (s_nf == TC_FINGERS) return NULL;
-+    tc_finger* f = &s_f[s_nf++];
-+    memset(f, 0, sizeof *f);
-+    f->id = id;
-+    return f;
-+}
-+
-+static int tc_role_taken(int role)
-+{
-+    for (int i = 0; i < s_nf; i++) if (s_f[i].role == role && s_f[i].seen) return 1;
-+    return 0;
-+}
-+
-+int touch_controls_look(int* dx, int* dy)
-+{
-+    *dx = *dy = 0;
-+    if (!touch_controls_active()) { s_look_x = s_look_y = 0.0f; return 0; }
-+    *dx = (int)s_look_x; *dy = (int)s_look_y;   /* whole counts; the rest waits for the next take */
-+    s_look_x -= (float)*dx; s_look_y -= (float)*dy;
-+    return 1;
-+}
-+
-+uint32_t touch_controls_apply(const tc_touch* t, int n, float aspect, uint16_t* buttons,
-+                              uint8_t* lx, uint8_t* ly)
-+{
-+    uint16_t b = 0; uint32_t pressed = 0;
-+    int lseen = 0;
-+    const tc_button* lay = tc_layout();
-+    for (int i = 0; i < s_nf; i++) s_f[i].seen = 0;
-+    for (int j = 0; j < n; j++) {
-+        const float x = t[j].x, y = t[j].y;
-+        tc_finger* f = tc_finger_for(t[j].id);
-+        if (!f) continue;
-+        const int fresh = f->role == TC_ROLE_NONE;
-+        f->seen = 1;
-+        if (fresh || f->role == TC_ROLE_BUTTON) {
-+            /* Distance in height units, with a generous hit area. */
-+            int hit = 0;
-+            for (int i = 0; i < TC_N; i++) {
-+                const tc_button* k = &lay[i];
-+                if (k->shape == TC_SHAPE_STICK) continue;
-+                const float dx = (x - k->x) * aspect, dy = y - k->y, rr = k->r * 1.25f;
-+                if (dx * dx + dy * dy <= rr * rr) { b |= k->mask; pressed |= 1u << i; hit = 1; }
-+            }
-+            if (fresh && hit) f->role = TC_ROLE_BUTTON;
-+        }
-+        if (fresh && f->role == TC_ROLE_NONE) {
-+            if (x < 0.40f && y > 0.33f && !tc_role_taken(TC_ROLE_LSTICK)) {
-+                f->role = TC_ROLE_LSTICK; s_ax = x; s_ay = y;
-+            } else if (x >= 0.40f) {
-+                f->role = TC_ROLE_LOOK;
-+            }
-+            f->lx = x; f->ly = y;
-+        }
-+        if (f->role == TC_ROLE_LSTICK) {
-+            s_tx = x; s_ty = y; lseen = 1;
-+            *lx = tc_axis((x - s_ax) * aspect);
-+            *ly = tc_axis(y - s_ay);
-+        } else if (f->role == TC_ROLE_LOOK) {
-+            s_look_x += (x - f->lx) * aspect * TC_LOOK_COUNTS;
-+            s_look_y += (y - f->ly) * TC_LOOK_COUNTS;
-+            f->lx = x; f->ly = y;
-+        }
-+    }
-+    /* Lifted fingers let go of their part. */
-+    for (int i = 0; i < s_nf; )
-+        if (!s_f[i].seen) s_f[i] = s_f[--s_nf]; else i++;
-+    s_stick_on = lseen;
-+    s_pressed = pressed;
-+    *buttons |= b;
-+    return pressed;
-+}
-+
 +int touch_controls_poll(float aspect, uint16_t* buttons,
 +                        uint8_t* lx, uint8_t* ly, uint8_t* rx, uint8_t* ry)
 +{
-+    (void)rx; (void)ry;   /* the camera goes through touch_controls_look, not the right stick */
 +#if TC_HAVE_SDL
-+    if (!touch_controls_active()) { s_pressed = 0; s_stick_on = 0; s_nf = 0; return 0; }
++    static SDL_FingerID s_lfinger = -1, s_rfinger = -1;
++    static float s_rlastx, s_rlasty;
++    if (!touch_controls_active()) { s_pressed = 0; s_stick_on = 0; return 0; }
++    uint16_t b = 0; uint32_t pressed = 0;
++    int any = 0, lseen = 0, rseen = 0;
 +    if (s_faspect > 0.0f) aspect = s_faspect;
 +    if (aspect <= 0.0f) aspect = 16.0f / 9.0f;
 +    const float fx0 = s_fx0, fy0 = s_fy0, fw = s_fx1 - s_fx0, fh = s_fy1 - s_fy0;
-+    tc_touch t[TC_FINGERS];
-+    int n = 0;
 +    for (int d = 0; d < SDL_GetNumTouchDevices(); d++) {
 +        SDL_TouchID tid = SDL_GetTouchDevice(d);
-+        for (int k = 0; k < SDL_GetNumTouchFingers(tid) && n < TC_FINGERS; k++) {
-+            SDL_Finger* fg = SDL_GetTouchFinger(tid, k);
++        for (int f = 0; f < SDL_GetNumTouchFingers(tid); f++) {
++            SDL_Finger* fg = SDL_GetTouchFinger(tid, f);
 +            if (!fg) continue;
-+            t[n].id = (int64_t)fg->id;   /* in the frame from here on */
-+            t[n].x = (fg->x - fx0) / fw; t[n].y = (fg->y - fy0) / fh;
-+            n++;
++            any = 1;
++            const float x = (fg->x - fx0) / fw, y = (fg->y - fy0) / fh;   /* in the frame */
++            /* Buttons first: distance in height units. */
++            int hit = 0;
++            const tc_button* lay = tc_layout();
++            for (int i = 0; i < TC_N; i++) {
++                const tc_button* k = &lay[i];
++                if (k->shape == TC_SHAPE_STICK) continue;
++                float dx = (x - k->x) * aspect, dy = y - k->y;
++                float rr = k->r * 1.25f;                    /* generous hit area */
++                if (dx * dx + dy * dy <= rr * rr) { b |= k->mask; pressed |= 1u << i; hit = 1; }
++            }
++            if (hit) continue;
++            if (fg->id == s_lfinger || (s_lfinger == -1 && x < 0.40f && y > 0.33f)) {
++                if (s_lfinger != fg->id) { s_lfinger = fg->id; s_ax = x; s_ay = y; }
++                s_tx = x; s_ty = y; lseen = 1;
++                *lx = tc_axis((x - s_ax) * aspect);
++                *ly = tc_axis(y - s_ay);
++            } else if (fg->id == s_rfinger || (s_rfinger == -1 && x >= 0.45f)) {
++                /* Right stick: deflection follows the drag speed (camera). */
++                if (s_rfinger != fg->id) { s_rfinger = fg->id; s_rlastx = x; s_rlasty = y; }
++                float dx = (x - s_rlastx) * aspect * 14.0f, dy = (y - s_rlasty) * 14.0f;
++                s_rlastx = x; s_rlasty = y; rseen = 1;
++                *rx = tc_axis(dx * TC_STICK_RANGE / 0.12f);
++                *ry = tc_axis(dy * TC_STICK_RANGE / 0.12f);
++            }
 +        }
 +    }
-+    const uint32_t pressed = touch_controls_apply(t, n, aspect, buttons, lx, ly);
 +    /* The menu button: a new press opens the settings menu, as F1 does on a
 +     * keyboard (pushed as a key event for the window thread to handle). */
 +    { static uint32_t s_was; const tc_button* lay = tc_layout();
@@ -4502,18 +4392,23 @@ index 00000000..78d49582
 +              ev.type = SDL_KEYUP; ev.key.state = SDL_RELEASED; SDL_PushEvent(&ev);
 +          }
 +      s_was = pressed; }
-+    return n > 0;
++    if (!lseen) s_lfinger = -1;
++    if (!rseen) s_rfinger = -1;
++    s_stick_on = lseen;
++    s_pressed = pressed;
++    *buttons |= b;
++    return any;
 +#else
-+    (void)aspect; (void)buttons; (void)lx; (void)ly;
++    (void)aspect; (void)buttons; (void)lx; (void)ly; (void)rx; (void)ry;
 +    return 0;
 +#endif
 +}
 diff --git a/libs/input/touch_controls.h b/libs/input/touch_controls.h
 new file mode 100644
-index 00000000..e9b9607b
+index 00000000..63ee883b
 --- /dev/null
 +++ b/libs/input/touch_controls.h
-@@ -0,0 +1,84 @@
+@@ -0,0 +1,66 @@
 +/*
 + * ps3recomp - on-screen touch controls (phones without a gamepad)
 + *
@@ -4523,7 +4418,7 @@ index 00000000..e9b9607b
 + * what is hit always agree.
 + *
 + *   left third, lower 2/3  floating left stick (anchors where the thumb lands)
-+ *   the rest of the right side  camera: a swipe turns it as the mouse does
++ *   right half, upper part right stick (drag; camera)
 + *   bottom-right           cross / circle / square / triangle
 + *   bottom-left of centre  d-pad
 + *   top corners            L1 L2 / R1 R2, L3 / R3 below
@@ -4532,12 +4427,8 @@ index 00000000..e9b9607b
 + * RACACIT_TOUCH_SIZE=<percent> scales the buttons (60-160), and
 + * RACACIT_TOUCH_OPACITY=<percent> fades the overlay (15-100).
 + *
-+ * A finger keeps the part it landed on until it lifts, so a stick or camera
-+ * drag never presses a button it crosses.
-+ *
-+ * Enabled by default on Android and iOS, elsewhere with RACACIT_TOUCH=1;
-+ * RACACIT_TOUCH=0 turns it off. It is also hidden while a real gamepad is
-+ * connected (a phone controller, or the built-in controls of a handheld).
++ * Enabled by default on Android, elsewhere with RACACIT_TOUCH=1; RACACIT_TOUCH=0
++ * turns it off. It is also hidden while a real gamepad is connected.
 + */
 +#ifndef PS3RECOMP_TOUCH_CONTROLS_H
 +#define PS3RECOMP_TOUCH_CONTROLS_H
@@ -4564,24 +4455,10 @@ index 00000000..e9b9607b
 +/* The layout; returns the count. Same array every call. */
 +int  touch_controls_layout(const tc_button** out);
 +/* Read the current touches. Fills buttons (CELL_PAD_CTRL_* mask) and the
-+ * left stick bytes (128 = centre) only for what touches are doing (rx and ry
-+ * are left alone: the camera is touch_controls_look); returns 1 when
++ * stick bytes (128 = centre) only for what touches are doing; returns 1 when
 + * any finger is down. `aspect` = frame width / height. */
 +int  touch_controls_poll(float aspect, uint16_t* buttons,
 +                         uint8_t* lx, uint8_t* ly, uint8_t* rx, uint8_t* ry);
-+/* One finger on the screen, in frame coordinates (0..1). */
-+typedef struct { int64_t id; float x, y; } tc_touch;
-+/* The part of touch_controls_poll that is not SDL: the fingers down now, each
-+ * keeping the part it landed on (a button, the left stick or the camera) until
-+ * it is no longer in the list. Fills buttons and the left stick as poll does,
-+ * adds camera drags to what touch_controls_look hands out, and returns the
-+ * pressed layout indices. Tests call it directly. */
-+uint32_t touch_controls_apply(const tc_touch* t, int n, float aspect, uint16_t* buttons,
-+                              uint8_t* lx, uint8_t* ly);
-+/* Camera motion since the last call, in mouse counts (cellPad feeds it to
-+ * the mouse camera path, game/desktop_mouse.cpp). Returns 1 while the touch
-+ * controls are up: touch is then the pointer, as a captured mouse is. */
-+int  touch_controls_look(int* dx, int* dy);
 +/* For the overlay: bitmask of layout indices currently pressed, and the left
 + * stick (anchor + thumb, normalised; valid when *active). */
 +uint32_t touch_controls_pressed(void);
@@ -6517,6 +6394,20 @@ index adfbf89c..9dee085c 100644
  
  s32 cellSpursEventFlagSet(CellSpursEventFlag* eventFlag, u16 bits);
  s32 cellSpursEventFlagWait(CellSpursEventFlag* eventFlag, u16* bits,
+diff --git a/libs/sync/cellSync.c b/libs/sync/cellSync.c
+index 0a0c8540..61d31d56 100644
+--- a/libs/sync/cellSync.c
++++ b/libs/sync/cellSync.c
+@@ -23,7 +23,8 @@
+ #define SYNC_YIELD() SwitchToThread()
+ #else
+ #include <sched.h>
+-#define SYNC_YIELD() sched_yield()
++void ps3_yield(void);   /* runtime/platform/win32_compat.c */
++#define SYNC_YIELD() ps3_yield()
+ #endif
+ 
+ /* CellSyncMutex is 4 bytes and must be 4-byte aligned: every entry point
 diff --git a/libs/system/cellGame.c b/libs/system/cellGame.c
 index 2d4a54d4..49dff976 100644
 --- a/libs/system/cellGame.c
@@ -7153,7 +7044,7 @@ index 4aeaee66..d8be6fbe 100644
   * Internal: Heap table
   * -----------------------------------------------------------------------*/
 diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
-index f073f327..e08ef642 100644
+index f073f327..7924f48b 100644
 --- a/libs/video/cellGcmSys.c
 +++ b/libs/video/cellGcmSys.c
 @@ -34,6 +34,7 @@ static u32 s_gcm_context_ea = 0;
@@ -7758,7 +7649,7 @@ index f073f327..e08ef642 100644
 +#ifdef _WIN32
 +        SwitchToThread();
 +#else
-+        sched_yield();
++        ps3_yield();
 +#endif
 +    }
 +    { static int n = 0;
@@ -22142,7 +22033,7 @@ index ba6c18eb..ce97e038 100644
          "    Out.t0=o[7];  Out.t1=o[8];  Out.t2=o[9];  Out.t3=o[10];\n"
          "    Out.t4=o[11]; Out.t5=o[12]; Out.t6=o[13]; Out.t7=o[14];\n"
 diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
-index f78c66f2..560aadb8 100644
+index f78c66f2..2b9c63ec 100644
 --- a/libs/video/rsx_vulkan_backend.c
 +++ b/libs/video/rsx_vulkan_backend.c
 @@ -38,10 +38,13 @@
@@ -25047,7 +24938,7 @@ index f78c66f2..560aadb8 100644
      VkImageMemoryBarrier b = {
          .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
          .srcAccessMask = 0, .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
-@@ -1953,134 +3742,415 @@ static void vk_present_window(void)
+@@ -1953,134 +3742,389 @@ static void vk_present_window(void)
          .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
          .image = s_vk.sc_images[idx], .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
      };
@@ -25254,9 +25145,7 @@ index f78c66f2..560aadb8 100644
 +    }
 +}
 +static void ov_ring(float cx, float cy, float rx, float ry, float t, const float c[4])
- {
--    if (__atomic_load_n(&s_vk.present_inflight, __ATOMIC_ACQUIRE) && s_vk.present_fence)
--        pvkWaitForFences(s_vk.device, 1, &s_vk.present_fence, VK_TRUE, UINT64_MAX);
++{
 +    const int N = 28;
 +    for (int i = 0; i < N; i++) {
 +        float a0 = 6.2831853f * i / N, a1 = 6.2831853f * (i + 1) / N;
@@ -25267,38 +25156,14 @@ index f78c66f2..560aadb8 100644
 +    }
 +}
 +static void ov_line(float x0, float y0, float x1, float y1, float w, const float c[4])
-+{
+ {
+-    if (__atomic_load_n(&s_vk.present_inflight, __ATOMIC_ACQUIRE) && s_vk.present_fence)
+-        pvkWaitForFences(s_vk.device, 1, &s_vk.present_fence, VK_TRUE, UINT64_MAX);
 +    /* Thickness in screen pixels: perpendicular computed in unsquashed space. */
 +    float dx = (x1 - x0) / s_ov.ax, dy = y1 - y0, l = sqrtf(dx * dx + dy * dy);
 +    if (l <= 0.0f) return;
 +    float nx = -dy / l * w * 0.5f * s_ov.ax, ny = dx / l * w * 0.5f;
 +    ov_quad(x0 + nx, y0 + ny, x1 + nx, y1 + ny, x1 - nx, y1 - ny, x0 - nx, y0 - ny, c);
-+}
-+
-+/* A shoulder or stick-click name (L1, R2, L3...) in strokes, centred at (cx, cy),
-+ * h pixels tall, as the controller prints it. Each glyph is polylines in a
-+ * 0.8 x 1 box, a run of points ending at -1, the glyph at -2. */
-+static const float k_ov_glyph_L[] = { 0, 0, 0, 1, .8f, 1, -1, -2 };
-+static const float k_ov_glyph_R[] = { 0, 1, 0, 0, .6f, 0, .8f, .15f, .8f, .35f, .6f, .5f, 0, .5f, -1, .35f, .5f, .8f, 1, -1, -2 };
-+static const float k_ov_glyph_1[] = { .15f, .2f, .45f, 0, .45f, 1, -1, -2 };
-+static const float k_ov_glyph_2[] = { 0, .2f, .15f, 0, .65f, 0, .8f, .15f, .8f, .4f, 0, 1, .8f, 1, -1, -2 };
-+static const float k_ov_glyph_3[] = { 0, 0, .8f, 0, .35f, .42f, .6f, .42f, .8f, .6f, .8f, .85f, .65f, 1, 0, 1, -1, -2 };
-+static void ov_label(float cx, float cy, float h, float lw, const char* s, const float c[4])
-+{
-+    const float adv = 1.2f * h * s_ov.ax, gw = .8f * h * s_ov.ax;
-+    const int n = (int)strlen(s);
-+    float x = cx - (adv * (float)(n - 1) + gw) * 0.5f;
-+    const float y = cy - h * 0.5f;
-+    for (int i = 0; i < n; i++, x += adv) {
-+        const float* g = s[i] == 'L' ? k_ov_glyph_L : s[i] == 'R' ? k_ov_glyph_R : s[i] == '1' ? k_ov_glyph_1
-+                       : s[i] == '2' ? k_ov_glyph_2 : s[i] == '3' ? k_ov_glyph_3 : NULL;
-+        if (!g) continue;
-+        while (g[0] != -2.0f) {
-+            for (; g[2] != -1.0f; g += 2)
-+                ov_line(x + g[0] * h * s_ov.ax, y + g[1] * h, x + g[2] * h * s_ov.ax, y + g[3] * h, lw, c);
-+            g += 3;
-+        }
-+    }
  }
  
 -/* present_mu held. */
@@ -25446,19 +25311,19 @@ index f78c66f2..560aadb8 100644
 +        case TC_SHAPE_LEFT:  ov_tri(cx - gx, cy, cx + gx * 0.6f, cy - g, cx + gx * 0.6f, cy + g, glyph); break;
 +        case TC_SHAPE_RIGHT: ov_tri(cx + gx, cy, cx - gx * 0.6f, cy + g, cx - gx * 0.6f, cy - g, glyph); break;
 +        case TC_SHAPE_PILL: {
-+            /* L1 L2 R1 R2 L3 R3 by name, 1 bar = SELECT, play triangle =
-+             * START, 3 short bars = the settings menu (mask 0: no pad button). */
++            /* 1 bar = L1/R1/SELECT, 2 bars = L2/R2, play triangle = START,
++             * a ring with a dot = L3/R3 (a stick click), 3 short bars = the
++             * settings menu (mask 0: no pad button). */
 +            if (k->mask == 0) {
 +                for (int j = -1; j <= 1; j++) ov_line(cx - gx * 0.9f, cy + g * 0.45f * j, cx + gx * 0.9f, cy + g * 0.45f * j, lw, glyph);
 +                break; }
++            if (k->mask == 0x0002u || k->mask == 0x0004u) {
++                ov_ring(cx, cy, gx * 0.95f, g * 0.95f, lw, glyph); ov_disc(cx, cy, gx * 0.35f, g * 0.35f, glyph); break; }
 +            if (k->mask == 0x0008u) { ov_tri(cx - gx * 0.6f, cy - g * 0.7f, cx + gx * 0.8f, cy, cx - gx * 0.6f, cy + g * 0.7f, glyph); break; }
-+            /* The shoulders and stick clicks by name, as on the controller. */
-+            /* CELL_PAD_CTRL_*: L1 0x0400, L2 0x0100, R1 0x0800, R2 0x0200, L3 0x0002, R3 0x0004 */
-+            const char* name = k->mask == 0x0400u ? "L1" : k->mask == 0x0100u ? "L2"
-+                             : k->mask == 0x0800u ? "R1" : k->mask == 0x0200u ? "R2"
-+                             : k->mask == 0x0002u ? "L3" : k->mask == 0x0004u ? "R3" : NULL;
-+            if (name) { ov_label(cx, cy, g * 1.5f, lw * 0.8f, name, glyph); break; }
-+            ov_line(cx - gx * 1.2f, cy, cx + gx * 1.2f, cy, lw, glyph);   /* SELECT */
++            const int two = (k->mask == 0x0100u || k->mask == 0x0200u);
++            if (two) { ov_line(cx - gx * 1.2f, cy - g * 0.3f, cx + gx * 1.2f, cy - g * 0.3f, lw, glyph);
++                       ov_line(cx - gx * 1.2f, cy + g * 0.3f, cx + gx * 1.2f, cy + g * 0.3f, lw, glyph); }
++            else ov_line(cx - gx * 1.2f, cy, cx + gx * 1.2f, cy, lw, glyph);
 +            break; }
 +        default: break;
 +        }
@@ -25550,7 +25415,7 @@ index f78c66f2..560aadb8 100644
                              s_vk.readback.buf, 1, &region);
      VkBufferMemoryBarrier host = {
          .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
-@@ -2088,30 +4158,19 @@ static void vk_present_record_end(VkCommandBuffer cb)
+@@ -2088,30 +4132,19 @@ static void vk_present_record_end(VkCommandBuffer cb)
          .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
          .buffer = s_vk.readback.buf, .offset = 0, .size = VK_WHOLE_SIZE,
      };
@@ -25590,7 +25455,7 @@ index f78c66f2..560aadb8 100644
  }
  
  /* ---------------------------------------------------------------------------
-@@ -2131,27 +4190,37 @@ static void vk_cb_present(void* ud, u32 buffer_id)
+@@ -2131,27 +4164,37 @@ static void vk_cb_present(void* ud, u32 buffer_id)
   * Pipelines, draws and textures are the next stages; until then
   * pipeline_create reports 0, which the engine caches as "cannot build".
   * -------------------------------------------------------------------------*/
@@ -25633,7 +25498,7 @@ index f78c66f2..560aadb8 100644
  static void vk_eng2_shutdown(void* user);
  
  static struct {
-@@ -2177,120 +4246,65 @@ static VkFormat vk_eng_format(rsx_be_format f, u32* bpp)
+@@ -2177,120 +4220,65 @@ static VkFormat vk_eng_format(rsx_be_format f, u32* bpp)
      }
  }
  
@@ -25644,7 +25509,8 @@ index f78c66f2..560aadb8 100644
 - * for the first two (see vk_eng_rt_blendable). */
 -#define VK_ENG_RT_FORMATS 4
 -static int vk_eng_rt_index(VkFormat f)
--{
++static u32 vk_eng_alloc(void)
+ {
 -    switch (f) {
 -    case VK_FORMAT_R8G8B8A8_UNORM:      return 0;
 -    case VK_FORMAT_R16G16B16A16_SFLOAT: return 1;
@@ -25668,8 +25534,8 @@ index f78c66f2..560aadb8 100644
 - * device is picked, the 4096 Vulkan guarantees before. */
 -static u32 vk_max_dim(void) { return s_vk.max_dim ? s_vk.max_dim : 4096u; }
 -
- static u32 vk_eng_alloc(void)
- {
+-static u32 vk_eng_alloc(void)
+-{
 -    /* Hand out slots round-robin rather than lowest-first, so a handle the
 -     * engine releases is not immediately reused: a late or duplicated release
 -     * of an old handle then finds a free slot instead of a live object. */
@@ -25699,11 +25565,8 @@ index f78c66f2..560aadb8 100644
      if (!handle || handle >= VK_ENG_MAX_OBJ) return NULL;
      vk_eng_obj* o = &s_eobj[handle];
 -    return (o->kind == kind) ? o : NULL;
-+    if (o->kind != kind) return NULL;
-+    if (o->lazy && vk_eng_color_back(o)) return NULL;
-+    return o;
- }
- 
+-}
+-
 -/* Host staging kept across readbacks and uploads. One buffer allocated,
 - * mapped and freed per call is three driver round trips, and on Windows
 - * those took from tens of milliseconds to seconds each under load. Each
@@ -25718,8 +25581,11 @@ index f78c66f2..560aadb8 100644
 -    while (cap < size) cap *= 2u;
 -    if (vk_create_host_buffer(b, cap, usage)) { vk_destroy_buffer(b); return NULL; }
 -    return b;
--}
--
++    if (o->kind != kind) return NULL;
++    if (o->lazy && vk_eng_color_back(o)) return NULL;
++    return o;
+ }
+ 
 -/* Copy `rows` rows of `w` texels from host memory into a w x h rectangle at
 - * (x, y) of one level / layer of an image that is in GENERAL. */
 -static int vk_eng_upload_region(VkImage img, u32 layer, u32 mip, u32 x, u32 y,
@@ -25793,7 +25659,7 @@ index f78c66f2..560aadb8 100644
  static int vk_eng_upload(VkImage img, u32 layer, u32 mip, u32 w, u32 h, u32 bpp,
                           const void* src, u32 row_bytes)
  {
-@@ -2320,8 +4334,8 @@ static VkComponentMapping vk_remap(u32 remap, u32 rsx_fmt)
+@@ -2320,8 +4308,8 @@ static VkComponentMapping vk_remap(u32 remap, u32 rsx_fmt)
                               vk_remap_sel(sel[3]), vk_remap_sel(sel[0]) };
      return m;
  }
@@ -25804,7 +25670,7 @@ index f78c66f2..560aadb8 100644
  {
      VkImageViewCreateInfo vci = {
          .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = img,
-@@ -2329,7 +4343,45 @@ static int vk_eng_make_view(VkImage img, VkFormat fmt, u32 levels, VkComponentMa
+@@ -2329,7 +4317,45 @@ static int vk_eng_make_view(VkImage img, VkFormat fmt, u32 levels, VkComponentMa
          .format = fmt, .components = map,
          .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, levels ? levels : 1, 0, cube ? 6u : 1u },
      };
@@ -25851,7 +25717,7 @@ index f78c66f2..560aadb8 100644
  }
  
  static int vk_eng_init(void* user, u32 width, u32 height)
-@@ -2340,145 +4392,196 @@ static int vk_eng_init(void* user, u32 width, u32 height)
+@@ -2340,145 +4366,196 @@ static int vk_eng_init(void* user, u32 width, u32 height)
      return s_vk.device ? 0 : -1;
  }
  
@@ -26133,7 +25999,7 @@ index f78c66f2..560aadb8 100644
      return hd;
  }
  
-@@ -2501,16 +4604,13 @@ static void vk_eng_clear_color(void* user, u32 surface, const float rgba[4])
+@@ -2501,16 +4578,13 @@ static void vk_eng_clear_color(void* user, u32 surface, const float rgba[4])
                        ((u32)(rgba[1] * 255.0f + 0.5f) <<  8) |
                         (u32)(rgba[2] * 255.0f + 0.5f);
      vk_eng_obj* o = vk_eng_get(surface, VK_ENG_COLOR);
@@ -26152,7 +26018,7 @@ index f78c66f2..560aadb8 100644
  }
  
  static void vk_eng_clear_depth_stencil(void* user, u32 depth, u32 flags,
-@@ -2518,18 +4618,16 @@ static void vk_eng_clear_depth_stencil(void* user, u32 depth, u32 flags,
+@@ -2518,18 +4592,16 @@ static void vk_eng_clear_depth_stencil(void* user, u32 depth, u32 flags,
  {
      (void)user;
      vk_eng_obj* o = vk_eng_get(depth, VK_ENG_DEPTH);
@@ -26179,7 +26045,7 @@ index f78c66f2..560aadb8 100644
  }
  
  /* The named surface becomes the frame: blit it onto the display image, then
-@@ -2537,125 +4635,167 @@ static void vk_eng_clear_depth_stencil(void* user, u32 depth, u32 flags,
+@@ -2537,125 +4609,167 @@ static void vk_eng_clear_depth_stencil(void* user, u32 depth, u32 flags,
  static void vk_eng_present(void* user, u32 surface)
  {
      (void)user;
@@ -26418,7 +26284,7 @@ index f78c66f2..560aadb8 100644
      return hd;
  fail:
      vk_destroy_image(&o->im);
-@@ -2668,7 +4808,7 @@ static void vk_eng_texture_upload(void* user, u32 texture, u32 face, u32 mip, u3
+@@ -2668,7 +4782,7 @@ static void vk_eng_texture_upload(void* user, u32 texture, u32 face, u32 mip, u3
  {
      (void)user;
      vk_eng_obj* o = vk_eng_get(texture, VK_ENG_TEXTURE);
@@ -26427,7 +26293,7 @@ index f78c66f2..560aadb8 100644
      /* A BC row is a row of 4x4 blocks; the engine's `rows` already counts them. */
      const size_t tight = o->block ? (size_t)((w + 3u) / 4u) * o->block : (size_t)w * o->bpp;
      vk_eng_upload_rows(o->im.img, face, mip, w, h, tight, rows, src, row_bytes);
-@@ -2678,105 +4818,26 @@ static void vk_eng_texture_upload(void* user, u32 texture, u32 face, u32 mip, u3
+@@ -2678,105 +4792,26 @@ static void vk_eng_texture_upload(void* user, u32 texture, u32 face, u32 mip, u3
   * image, cached by (surface, crossbar, format) and released with the target. */
  static u32 vk_eng_surface_view(void* user, u32 surface, u32 remap, u32 rsx_format)
  {
@@ -26541,7 +26407,7 @@ index f78c66f2..560aadb8 100644
  /* ---- E4: depth snapshots --------------------------------------------------
   * A depth target read as a texture, which the engine asks for only after a
   * depth-writing draw. Metal resolves it with a fullscreen pass into R32Float;
-@@ -2787,123 +4848,348 @@ static u32 vk_eng_color_snapshot(void* user, u32 surface)
+@@ -2787,123 +4822,348 @@ static u32 vk_eng_color_snapshot(void* user, u32 surface)
   * Each depth target keeps ONE snapshot texture (its handle in `surface`),
   * refilled on every request, so nothing accumulates however often the engine
   * invalidates and asks again; it goes when the depth target goes. */
@@ -26963,7 +26829,7 @@ index f78c66f2..560aadb8 100644
  /* ---- E2: pipelines and draws ---------------------------------------------
   * A pipeline handle carries the two translated modules and the render state
   * the engine keyed it on. Topology is not part of that key (Metal sets it on
-@@ -2915,38 +5201,85 @@ static int vk_eng_depth_readback(void* user, u32 depth, u32 x, u32 y, u32 w, u32
+@@ -2915,38 +5175,85 @@ static int vk_eng_depth_readback(void* user, u32 depth, u32 x, u32 y, u32 w, u32
   * vtable guest path already creates. Vertex inputs are the engine's compact
   * layout: slot n is a float4 at n*16, at location n, as Metal reads it.
   * Known gaps, stated rather than guessed: vertex-texture units (their
@@ -27060,7 +26926,7 @@ index f78c66f2..560aadb8 100644
      u32          tex[RSX_BE_MAX_TEXTURES];
      rsx_be_sampler_desc samp[RSX_BE_MAX_TEXTURES];
      u32          tex_mask;
-@@ -2954,49 +5287,131 @@ static struct {
+@@ -2954,49 +5261,131 @@ static struct {
      u32          sc[4];
      int          have_vp, have_sc;
      u32          stencil_ref;
@@ -27215,7 +27081,7 @@ index f78c66f2..560aadb8 100644
              .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_LOAD,
              .stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE,
              .initialLayout = VK_IMAGE_LAYOUT_GENERAL, .finalLayout = VK_IMAGE_LAYOUT_GENERAL };
-@@ -3009,10 +5424,23 @@ static VkRenderPass vk_eng_render_pass(VkFormat cf, u32 n)
+@@ -3009,10 +5398,23 @@ static VkRenderPass vk_eng_render_pass(VkFormat cf, u32 n)
      VkRenderPassCreateInfo rci = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
                                     .attachmentCount = n + 1, .pAttachments = att,
                                     .subpassCount = 1, .pSubpasses = &sub };
@@ -27241,7 +27107,7 @@ index f78c66f2..560aadb8 100644
  
  /* Tables carried from the Metal backend, itself copied from the D3D12 live
   * draw engine a title has shipped on. */
-@@ -3030,6 +5458,10 @@ static VkBlendFactor vk_gcm_blend_factor(u32 f)
+@@ -3030,6 +5432,10 @@ static VkBlendFactor vk_gcm_blend_factor(u32 f)
      case 0x0306: return VK_BLEND_FACTOR_DST_COLOR;
      case 0x0307: return VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR;
      case 0x0308: return VK_BLEND_FACTOR_SRC_ALPHA_SATURATE;
@@ -27252,7 +27118,7 @@ index f78c66f2..560aadb8 100644
      default:     return VK_BLEND_FACTOR_ONE;
      }
  }
-@@ -3071,85 +5503,210 @@ static VkStencilOpState vk_gcm_stencil_face(u32 func, u32 fail, u32 zfail, u32 z
+@@ -3071,85 +5477,210 @@ static VkStencilOpState vk_gcm_stencil_face(u32 func, u32 fail, u32 zfail, u32 z
      return s;
  }
  
@@ -27517,7 +27383,7 @@ index f78c66f2..560aadb8 100644
          if (!(s_e2.warned & 1u)) { VK_LOG("engine: colour format %d not supported yet\n", (int)rt_fmt); s_e2.warned |= 1u; }
          return 0;
      }
-@@ -3158,183 +5715,1254 @@ static u32 vk_eng_pipeline_create(void* user, const char* vs_hlsl, const char* p
+@@ -3158,183 +5689,1254 @@ static u32 vk_eng_pipeline_create(void* user, const char* vs_hlsl, const char* p
      u32 slot = VK_ENG_MAX_PIPE;
      for (u32 i = 0; i < VK_ENG_MAX_PIPE; i++) if (!s_epipe[i].used) { slot = i; break; }
      if (slot == VK_ENG_MAX_PIPE) {
@@ -28922,7 +28788,7 @@ index f78c66f2..560aadb8 100644
      }
      return P->variant[topo_idx];
  }
-@@ -3343,59 +6971,67 @@ static void vk_eng_bind_pipeline(void* user, u32 pipeline) { (void)user; s_e2.pi
+@@ -3343,59 +6945,67 @@ static void vk_eng_bind_pipeline(void* user, u32 pipeline) { (void)user; s_e2.pi
  
  static void vk_eng2_shutdown(void* user)
  {
@@ -29013,7 +28879,7 @@ index f78c66f2..560aadb8 100644
      }
      s_e2.tex_mask = mask;
  }
-@@ -3416,20 +7052,10 @@ static void vk_eng_set_scissor(void* user, u32 x, u32 y, u32 w, u32 h)
+@@ -3416,20 +7026,10 @@ static void vk_eng_set_scissor(void* user, u32 x, u32 y, u32 w, u32 h)
      s_e2.sc[0] = x; s_e2.sc[1] = y; s_e2.sc[2] = w; s_e2.sc[3] = h; s_e2.have_sc = 1;
  }
  static void vk_eng_set_stencil_ref(void* user, u32 ref) { (void)user; s_e2.stencil_ref = ref; }
@@ -29037,7 +28903,7 @@ index f78c66f2..560aadb8 100644
  }
  
  static VkFramebuffer vk_eng_framebuffer(VkRenderPass rp, const u32* rt, u32 n, VkImageView dview,
-@@ -3448,7 +7074,7 @@ static VkFramebuffer vk_eng_framebuffer(VkRenderPass rp, const u32* rt, u32 n, V
+@@ -3448,7 +7048,7 @@ static VkFramebuffer vk_eng_framebuffer(VkRenderPass rp, const u32* rt, u32 n, V
                                      .renderPass = rp, .attachmentCount = n + 1, .pAttachments = views,
                                      .width = w, .height = h, .layers = 1 };
      VkFramebuffer fb = VK_NULL_HANDLE;
@@ -29046,7 +28912,7 @@ index f78c66f2..560aadb8 100644
      memcpy(s_e2.fb[s_e2.fb_count].key, key, sizeof key);
      s_e2.fb[s_e2.fb_count++].fb = fb;
      return fb;
-@@ -3462,19 +7088,101 @@ static VkImageView vk_eng_scratch_depth(u32 w, u32 h)
+@@ -3462,19 +7062,101 @@ static VkImageView vk_eng_scratch_depth(u32 w, u32 h)
          return s_e2.scratch_depth.view;
      vk_eng_drop_framebuffers();
      vk_destroy_image(&s_e2.scratch_depth);
@@ -29152,7 +29018,7 @@ index f78c66f2..560aadb8 100644
  static int vk_eng_ensure_indices(VkDeviceSize bytes)
  {
      if (s_e2.indices.buf && s_e2.indices.size >= bytes) return 0;
-@@ -3495,383 +7203,600 @@ static VkSampler vk_eng_sampler(const rsx_be_sampler_desc* d)
+@@ -3495,383 +7177,600 @@ static VkSampler vk_eng_sampler(const rsx_be_sampler_desc* d)
                    | ((u64)d->mip_present << 3) | ((u64)(d->wrap_s & 0xF) << 4)
                    | ((u64)(d->wrap_t & 0xF) << 8) | ((u64)(d->wrap_r & 0xF) << 12)
                    | ((u64)(lo >> 16) << 16) | ((u64)(hi >> 16) << 32);
@@ -30050,7 +29916,7 @@ index f78c66f2..560aadb8 100644
  }
  
  static const rsx_draw_backend s_vk_engine_backend = {
-@@ -3881,14 +7806,20 @@ static const rsx_draw_backend s_vk_engine_backend = {
+@@ -3881,14 +7780,20 @@ static const rsx_draw_backend s_vk_engine_backend = {
      .submit_and_wait      = vk_eng_submit_and_wait,
      .texture_create       = vk_eng_texture_create,
      .texture_upload       = vk_eng_texture_upload,
@@ -30074,7 +29940,7 @@ index f78c66f2..560aadb8 100644
      .pipeline_create      = vk_eng_pipeline_create,
      .pipeline_release     = vk_eng_pipeline_release,
      .bind_targets         = vk_eng_bind_targets,
-@@ -3900,17 +7831,13 @@ static const rsx_draw_backend s_vk_engine_backend = {
+@@ -3900,17 +7805,13 @@ static const rsx_draw_backend s_vk_engine_backend = {
      .set_viewport         = vk_eng_set_viewport,
      .set_scissor          = vk_eng_set_scissor,
      .set_stencil_ref      = vk_eng_set_stencil_ref,
@@ -30094,7 +29960,7 @@ index f78c66f2..560aadb8 100644
  };
  
  static rsx_backend s_vulkan_backend = {
-@@ -3930,37 +7857,90 @@ static rsx_backend s_vulkan_backend = {
+@@ -3930,37 +7831,90 @@ static rsx_backend s_vulkan_backend = {
   * -------------------------------------------------------------------------*/
  static int vk_init_all(u32 width, u32 height, const char* title)
  {
@@ -30198,7 +30064,7 @@ index f78c66f2..560aadb8 100644
      if (vk_load_instance_functions()) return -1;
      if (s_vk.windowed) {
          if (vk_load_wsi_instance_functions()) {
-@@ -3971,45 +7951,108 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+@@ -3971,45 +7925,108 @@ static int vk_init_all(u32 width, u32 height, const char* title)
              vk_window_drop(why);
          }
      }
@@ -30324,7 +30190,7 @@ index f78c66f2..560aadb8 100644
      if (vk_load_device_functions()) return -1;
      if (s_vk.windowed && vk_load_wsi_device_functions())
          vk_window_drop("the driver has no swapchain functions");
-@@ -4026,24 +8069,23 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+@@ -4026,24 +8043,23 @@ static int vk_init_all(u32 width, u32 height, const char* title)
      VK_CHECK(pvkAllocateCommandBuffers(s_vk.device, &cai, &s_vk.cmd), "vkAllocateCommandBuffers");
      VkFenceCreateInfo fci = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
      VK_CHECK(pvkCreateFence(s_vk.device, &fci, NULL, &s_vk.fence), "vkCreateFence");
@@ -30356,7 +30222,7 @@ index f78c66f2..560aadb8 100644
      if (vk_guest_init()) {
          VK_LOG("guest programs: setup failed, fixed-function path only\n");
          vk_guest_shutdown();
-@@ -4056,31 +8098,77 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+@@ -4056,31 +8072,77 @@ static int vk_init_all(u32 width, u32 height, const char* title)
       * null backend makes the same choice). */
      if (vk_begin()) return -1;
      vk_barrier_image(s_vk.color.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED);
@@ -30439,7 +30305,7 @@ index f78c66f2..560aadb8 100644
      /* One path at a time: the FIFO walker feeds both the rsx_state vtable
       * and the register-file engine, so registering both would record every
       * draw twice (the rule the Metal backend's init follows).
-@@ -4090,13 +8178,14 @@ int rsx_vulkan_backend_init(u32 width, u32 height, const char* title)
+@@ -4090,13 +8152,14 @@ int rsx_vulkan_backend_init(u32 width, u32 height, const char* title)
       * pipeline from the guest's programs, so without them it has nothing to
       * draw with, and the vtable's fixed-function path stays the default.
       * Either way PS3RECOMP_RSX_ENGINE=dispatch|vtable overrides. */
@@ -30456,7 +30322,7 @@ index f78c66f2..560aadb8 100644
      VK_LOG("offscreen target %ux%u ready, depth format %d (%s)\n",
             s_vk.width, s_vk.height, (int)s_vk.depth_format, title ? title : "");
      return 0;
-@@ -4104,7 +8193,7 @@ int rsx_vulkan_backend_init(u32 width, u32 height, const char* title)
+@@ -4104,7 +8167,7 @@ int rsx_vulkan_backend_init(u32 width, u32 height, const char* title)
  
  void rsx_vulkan_backend_shutdown(void)
  {
@@ -30465,7 +30331,7 @@ index f78c66f2..560aadb8 100644
      if (rsx_get_backend() == &s_vulkan_backend) rsx_set_backend(NULL);
      if (s_vk.eng_active) { rsx_draw_engine_shutdown(); s_vk.eng_active = 0; }
      rsx_draw_engine_set_backend(NULL);
-@@ -4118,8 +8207,14 @@ void rsx_vulkan_backend_shutdown(void)
+@@ -4118,8 +8181,14 @@ void rsx_vulkan_backend_shutdown(void)
          }
      }
      if (s_vk.windowed || s_vk.window) vk_window_drop(NULL);
@@ -30481,7 +30347,7 @@ index f78c66f2..560aadb8 100644
          vk_guest_shutdown();
          for (int i = 0; i < VK_PIPELINE_SLOTS; i++)
              if (s_vk.pipelines[i]) pvkDestroyPipeline(s_vk.device, s_vk.pipelines[i], NULL);
-@@ -4139,72 +8234,38 @@ void rsx_vulkan_backend_shutdown(void)
+@@ -4139,72 +8208,38 @@ void rsx_vulkan_backend_shutdown(void)
          vk_destroy_image(&s_vk.color);
          vk_destroy_buffer(&s_vk.vertices);
          vk_destroy_buffer(&s_vk.readback);
@@ -30561,7 +30427,7 @@ index f78c66f2..560aadb8 100644
  }
  
  u32 rsx_vulkan_backend_debug_color(void) { return s_vk.clear_argb; }
-@@ -4220,9 +8281,14 @@ u32 rsx_vulkan_backend_guest_draws(void)
+@@ -4220,9 +8255,14 @@ u32 rsx_vulkan_backend_guest_draws(void)
      return s_vk.eng_active ? rsx_draw_engine_guest_draws() : s_g.last_draws;
  }
  
@@ -31952,7 +31818,7 @@ index 00000000..d3e4aa2d
 +typedef int ps3_setjmp_win64_unused;
 +#endif
 diff --git a/runtime/platform/win32_compat.c b/runtime/platform/win32_compat.c
-index 11a74804..2251ce0b 100644
+index 11a74804..007feae7 100644
 --- a/runtime/platform/win32_compat.c
 +++ b/runtime/platform/win32_compat.c
 @@ -453,7 +453,14 @@ static void apply_priority(pthread_t pt, DWORD tid, int level, int is_self)
@@ -31971,8 +31837,40 @@ index 11a74804..2251ce0b 100644
      cpu_set_t set; CPU_ZERO(&set);
      for (unsigned i = 0; i < 8 * sizeof mask && i < CPU_SETSIZE; i++)
          if (mask & ((DWORD_PTR)1 << i)) CPU_SET(i, &set);
+@@ -2012,3 +2019,31 @@ LPTOP_LEVEL_EXCEPTION_FILTER SetUnhandledExceptionFilter(LPTOP_LEVEL_EXCEPTION_F
+ /* Nothing to build: the header is a passthrough to <windows.h> there. */
+ typedef int ps3_win32_compat_not_needed_on_windows;
+ #endif
++
++#ifndef _WIN32
++/* The runtime's yield (Sleep(0), SwitchToThread, the SPU lock-line spins, the
++ * event queues, cellSync, cellPad's poll lock, cellGcm's FIFO sync). On macOS
++ * sched_yield is swtch_pri(0), which also depresses the caller's priority for a
++ * scheduler quantum: with more runnable threads than cores (main, RSX walker,
++ * SPU lanes) a lane that yielded while waiting for the lock-line lock sat out
++ * ~10 ms, and the main thread's collision request waited with it, once or more
++ * a second. thread_switch with no option hands the CPU over without the
++ * depression. PS3_YIELD=sched restores sched_yield. */
++#include <sched.h>
++#ifdef __APPLE__
++#include <mach/mach.h>
++#include <mach/thread_switch.h>
++#endif
++void ps3_yield(void)
++{
++#ifdef __APPLE__
++    /* Every thread reads it. A racing first call only sets the same value,
++     * so relaxed loads and stores are enough. */
++    static int plain = -1;
++    int p = __atomic_load_n(&plain, __ATOMIC_RELAXED);
++    if (p < 0) { const char* e = getenv("PS3_YIELD"); p = e && !strcmp(e, "sched"); __atomic_store_n(&plain, p, __ATOMIC_RELAXED); }
++    if (!p) { thread_switch(MACH_PORT_NULL, SWITCH_OPTION_NONE, 0); return; }
++#endif
++    sched_yield();
++}
++#endif
 diff --git a/runtime/platform/win32_compat.h b/runtime/platform/win32_compat.h
-index 30538f14..7cf95490 100644
+index 30538f14..996552df 100644
 --- a/runtime/platform/win32_compat.h
 +++ b/runtime/platform/win32_compat.h
 @@ -467,6 +467,13 @@ static inline void InitializeSRWLock(SRWLOCK* l)          { *l = NULL; }
@@ -32010,6 +31908,27 @@ index 30538f14..7cf95490 100644
  static inline void WakeAllConditionVariable(CONDITION_VARIABLE* c)
  {
      ps3_condvar* cv = ps3_cv(c);
+@@ -709,14 +730,18 @@ static inline void GetSystemTimeAsFileTime(FILETIME* ft)
+ }
+ static inline void GetSystemTimePreciseAsFileTime(FILETIME* ft) { GetSystemTimeAsFileTime(ft); }
+ 
++/* ps3_yield (win32_compat.c): the yield Sleep(0), SwitchToThread and the
++ * runtime's spin loops use. On macOS sched_yield also depresses the caller's
++ * priority for a scheduler quantum (~10 ms) when the machine is busy. */
++void ps3_yield(void);
+ static inline void Sleep(DWORD ms)
+ {
+-    if (ms == 0) { sched_yield(); return; }      /* Sleep(0) yields, as on Windows */
++    if (ms == 0) { ps3_yield(); return; }        /* Sleep(0) yields, as on Windows */
+     struct timespec d = { (time_t)(ms / 1000u), (long)(ms % 1000u) * 1000000L };
+     nanosleep(&d, NULL);
+ }
+ static inline DWORD SleepEx(DWORD ms, BOOL alertable) { (void)alertable; Sleep(ms); return 0; }
+-static inline BOOL  SwitchToThread(void)              { sched_yield(); return TRUE; }
++static inline BOOL  SwitchToThread(void)              { ps3_yield(); return TRUE; }
+ static inline UINT  timeBeginPeriod(UINT period)      { (void)period; return TIMERR_NOERROR; }
+ static inline UINT  timeEndPeriod(UINT period)        { (void)period; return TIMERR_NOERROR; }
+ 
 diff --git a/runtime/ppu/ppu_context.h b/runtime/ppu/ppu_context.h
 index 4199c58b..b9676016 100644
 --- a/runtime/ppu/ppu_context.h
@@ -34443,7 +34362,7 @@ index fd2c2078..9c89ac12 100644
  }
  
 diff --git a/runtime/ppu/ppu_vmx.h b/runtime/ppu/ppu_vmx.h
-index f1646788..47fedd67 100644
+index f1646788..8fd86a55 100644
 --- a/runtime/ppu/ppu_vmx.h
 +++ b/runtime/ppu/ppu_vmx.h
 @@ -270,8 +270,8 @@ VMX_INL float vmx_minf(float x, float y) {
@@ -34457,6 +34376,17 @@ index f1646788..47fedd67 100644
  VMX_FBIN(vmx_vmaxfp, vmx_maxf(vmx_f(x), vmx_f(y)), 0)
  VMX_FBIN(vmx_vminfp, vmx_minf(vmx_f(x), vmx_f(y)), 0)
  
+@@ -285,8 +285,8 @@ VMX_FBIN(vmx_vminfp, vmx_minf(vmx_f(x), vmx_f(y)), 0)
+  * ASSUMPTION: the host rounding mode is round-to-nearest (nothing in the
+  * runtime changes MXCSR). */
+ VMX_INL float vmx_fmaf(float x, float z, float y) {
+-#if defined(__FMA__)
+-    return fmaf(x, z, y);   /* one instruction with -mfma */
++#if defined(__FMA__) || defined(__ARM_FEATURE_FMA)
++    return fmaf(x, z, y);   /* one instruction: -mfma on x86-64, always on arm64 (fmadd) */
+ #else
+     const double s = (double)x * (double)z + (double)y;
+     uint64_t u; memcpy(&u, &s, sizeof u);
 @@ -296,17 +296,69 @@ VMX_INL float vmx_fmaf(float x, float z, float y) {
      return fmaf(x, z, y);
  #endif
@@ -34592,7 +34522,7 @@ index 00000000..61e1a1c3
 +#endif
 +}
 diff --git a/runtime/spu/spu_channels.c b/runtime/spu/spu_channels.c
-index 84b7ac96..2d49f118 100644
+index 84b7ac96..3521087b 100644
 --- a/runtime/spu/spu_channels.c
 +++ b/runtime/spu/spu_channels.c
 @@ -23,7 +23,7 @@
@@ -34872,7 +34802,7 @@ index 84b7ac96..2d49f118 100644
 +#ifdef _WIN32
 +        SwitchToThread();
 +#else
-+        sched_yield();
++        ps3_yield();
 +#endif
 +        return;
 +    }
@@ -39067,6 +38997,56 @@ index 9041b409..f2628c56 100644
  #endif
      if (timeout > ((1ull << 48) - 1)) timeout = (1ull << 48) - 1;
  #ifdef _WIN32
+diff --git a/runtime/syscalls/sys_event.c b/runtime/syscalls/sys_event.c
+index 6f72c1e8..609280c8 100644
+--- a/runtime/syscalls/sys_event.c
++++ b/runtime/syscalls/sys_event.c
+@@ -11,6 +11,9 @@
+ #include <string.h>
+ #include <stdlib.h>               /* getenv */
+ #include "ps3emu/log_first.h"
++#ifndef _WIN32
++void ps3_yield(void);   /* runtime/platform/win32_compat.c */
++#endif
+ 
+ /* Recorded by sys_spu_thread_initialize (lv2_register.c): the SPURS kernel
+  * context EA the title's SPU task runtime is dispatched against. */
+@@ -281,7 +284,7 @@ int64_t sys_event_queue_destroy(ppu_context* ctx)
+     pthread_cond_broadcast(&q->not_empty);
+     while (q->waiters > 0) {
+         pthread_mutex_unlock(&q->lock);
+-        sched_yield();
++        ps3_yield();
+         pthread_mutex_lock(&q->lock);
+     }
+     pthread_mutex_unlock(&q->lock);
+@@ -388,7 +391,7 @@ int64_t sys_event_queue_receive(ppu_context* ctx)
+ #ifdef _WIN32
+         SwitchToThread();
+ #else
+-        sched_yield();
++        ps3_yield();
+ #endif
+     /* WAITBT_EVERY=<n>: the same dump, but every nth wait per (tid,queue)
+      * instead of once. The one-shot above names where a thread FIRST parks,
+@@ -418,7 +421,7 @@ int64_t sys_event_queue_receive(ppu_context* ctx)
+ #ifdef _WIN32
+         SwitchToThread();
+ #else
+-        sched_yield();
++        ps3_yield();
+ #endif
+         return (int64_t)(int32_t)CELL_ESRCH;
+     }
+@@ -1338,7 +1341,7 @@ int64_t sys_event_flag_wait(ppu_context* ctx)
+ #ifdef _WIN32
+         SwitchToThread();
+ #else
+-        sched_yield();
++        ps3_yield();
+ #endif
+         return (int64_t)(int32_t)CELL_ESRCH;
+     }
 diff --git a/runtime/syscalls/sys_fs.c b/runtime/syscalls/sys_fs.c
 index e435555a..62c5e04e 100644
 --- a/runtime/syscalls/sys_fs.c
@@ -39219,7 +39199,7 @@ index f394a033..b3dd696f 100644
  int64_t sys_mmapper_search_map_address(uint32_t start, uint32_t size, uint32_t* out);
  int64_t sys_mmapper_free_address(ppu_context* ctx);
 diff --git a/runtime/syscalls/sys_ppu_thread.c b/runtime/syscalls/sys_ppu_thread.c
-index b997931b..3d048c2f 100644
+index b997931b..24f37f74 100644
 --- a/runtime/syscalls/sys_ppu_thread.c
 +++ b/runtime/syscalls/sys_ppu_thread.c
 @@ -2,7 +2,7 @@
@@ -39431,6 +39411,15 @@ index b997931b..3d048c2f 100644
          SetThreadPriority(t->host_thread, THREAD_PRIORITY_ABOVE_NORMAL);
  #else
      /* Same reservation, for the same reason. This is the HOST stack the
+@@ -1253,7 +1370,7 @@ int64_t sys_ppu_thread_yield(ppu_context* ctx)
+ #ifdef _WIN32
+     SwitchToThread();
+ #else
+-    sched_yield();
++    ps3_yield();
+ #endif
+     return CELL_OK;
+ }
 @@ -1271,7 +1388,10 @@ int64_t sys_ppu_thread_get_priority(ppu_context* ctx)
  
      table_lock();
@@ -40288,96 +40277,18 @@ index f3d4163a..3ef96645 100644
  #ifdef _WIN32
  /* Sub-millisecond timed-wait support for the lv2 sync primitives.
   * SleepConditionVariableCS / WaitForSingleObject floor a timed wait to 1 ms,
-diff --git a/tests/test_touch_controls.c b/tests/test_touch_controls.c
-new file mode 100644
-index 00000000..5a0317fd
---- /dev/null
-+++ b/tests/test_touch_controls.c
-@@ -0,0 +1,84 @@
-+/* touch_controls_apply without SDL or a GPU: each finger keeps the part it
-+ * landed on. A camera or stick drag that crosses a button must not press it
-+ * (dragging the camera over triangle kept opening the quick select ring). */
-+#include "touch_controls.h"
-+#include "cellPad.h"
-+
-+#include <stdio.h>
-+#include <stdlib.h>
-+
-+int rsx_host_ui_capturing(void) { return 0; }
-+
-+static int failures;
-+static void check(int condition, const char* name)
-+{
-+    if (!condition) { fprintf(stderr, "FAIL: %s\n", name); failures++; }
-+}
-+
-+static const float kAspect = 16.0f / 9.0f;
-+static uint16_t b; static uint8_t lx, ly;
-+static void step(const tc_touch* t, int n)
-+{
-+    b = 0; lx = ly = 128;
-+    touch_controls_apply(t, n, kAspect, &b, &lx, &ly);
-+}
-+
-+int main(void)
-+{
-+#ifdef _WIN32
-+    _putenv_s("RACACIT_TOUCH", "1");
-+#else
-+    setenv("RACACIT_TOUCH", "1", 1);
-+#endif
-+    int dx, dy;
-+    check(touch_controls_active(), "the touch controls are on");
-+
-+    /* A camera drag from open space onto triangle. */
-+    tc_touch cam = { 1, 0.70f, 0.30f };
-+    step(&cam, 1);
-+    check(b == 0, "a camera finger in open space presses nothing");
-+    touch_controls_look(&dx, &dy);
-+    cam.x = 0.885f; cam.y = 0.55f;   /* triangle's centre */
-+    step(&cam, 1);
-+    check(!(b & CELL_PAD_CTRL_TRIANGLE), "a camera drag over triangle does not press it");
-+    touch_controls_look(&dx, &dy);
-+    check(dx > 0 && dy > 0, "the drag turns the camera right and down");
-+    check(abs(dy - 175) <= 1, "a quarter-height drag is 175 counts");
-+    step(NULL, 0);
-+
-+    /* A left stick drag onto the d-pad's right arrow. */
-+    tc_touch stick = { 2, 0.15f, 0.70f };
-+    step(&stick, 1);
-+    check(b == 0 && lx == 128, "the stick lands centred");
-+    stick.x = 0.375f; stick.y = 0.82f;
-+    step(&stick, 1);
-+    check(!(b & CELL_PAD_CTRL_RIGHT), "a stick drag over the d-pad does not press it");
-+    check(lx > 200, "the stick is pushed right");
-+    touch_controls_look(&dx, &dy);
-+    check(dx == 0 && dy == 0, "the stick does not turn the camera");
-+
-+    /* A button press slides to the next button, and the stick works beside it. */
-+    tc_touch two[2] = { { 3, 0.885f, 0.83f }, { 2, 0.375f, 0.82f } };
-+    step(two, 2);
-+    check((b & CELL_PAD_CTRL_CROSS) && !(b & CELL_PAD_CTRL_RIGHT), "cross with the stick held over the d-pad");
-+    check(lx > 200, "the stick keeps its finger");
-+    two[0].x = 0.950f; two[0].y = 0.69f;
-+    step(two, 2);
-+    check((b & CELL_PAD_CTRL_CIRCLE) && !(b & CELL_PAD_CTRL_CROSS), "a press slides from cross to circle");
-+
-+    /* A finger that started on a button never becomes the stick or the camera. */
-+    two[0].x = 0.60f; two[0].y = 0.40f;
-+    step(two, 2);
-+    touch_controls_look(&dx, &dy);
-+    check(b == 0 && dx == 0 && dy == 0, "a press slid off its buttons does nothing");
-+
-+    /* Everything lifted: a new touch on triangle presses it. */
-+    step(NULL, 0);
-+    tc_touch tri = { 4, 0.885f, 0.55f };
-+    step(&tri, 1);
-+    check(b & CELL_PAD_CTRL_TRIANGLE, "a tap on triangle presses it");
-+
-+    if (failures) { fprintf(stderr, "%d failure(s)\n", failures); return 1; }
-+    puts("touch controls: ok");
-+    return 0;
-+}
+diff --git a/tests/sync_stress/test_cellsync_mutex.c b/tests/sync_stress/test_cellsync_mutex.c
+index 7cf5b08f..99e9214b 100644
+--- a/tests/sync_stress/test_cellsync_mutex.c
++++ b/tests/sync_stress/test_cellsync_mutex.c
+@@ -19,6 +19,7 @@ void spu_lockline_lock(void) {}
+ void spu_lockline_unlock(void) {}
+ int  spu_coh_is_reserved(uint32_t ea) { (void)ea; return 0; }
+ void spu_coh_notify_write(uint32_t ea) { (void)ea; }
++void ps3_yield(void) {}                       /* runtime/platform/win32_compat.c; one thread here */
+ 
+ static int failures;
+ #define CHECK_RC(call, want) do { int32_t _rc = (int32_t)(call); \
 diff --git a/tools/extract_spu_images.py b/tools/extract_spu_images.py
 index 0c15cb73..11dd4030 100644
 --- a/tools/extract_spu_images.py
