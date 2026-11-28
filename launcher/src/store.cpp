@@ -1969,7 +1969,7 @@ std::string Store::launch(void** process, bool prepare, bool benchmark)
 
 #ifdef __APPLE__
     if (prepare) return "Preparing shaders is not available on this system yet.";
-    return launch_mac(b, eboot, set, process);
+    return launch_mac(b, eboot, set, process, benchmark);
 #else
     std::wstring env;
     if (wchar_t* cur = GetEnvironmentStringsW()) {
@@ -2031,7 +2031,7 @@ std::string Store::launch(void** process, bool prepare, bool benchmark)
 // same environment as on Windows, the game folder named outright (PS3_VFS_ROOT), the
 // Vulkan loader and MoltenVK beside the build (builds/vNN/lib, unless settings.txt names
 // others), and stdout + stderr into data/log.txt.
-std::string Store::launch_mac(const BuildInfo& b, const fs::path& eboot, std::map<std::wstring, std::wstring>& set, void** process)
+std::string Store::launch_mac(const BuildInfo& b, const fs::path& eboot, std::map<std::wstring, std::wstring>& set, void** process, bool benchmark)
 {
     std::error_code ec;
     auto ours = [&](const wchar_t* k) { for (auto& kv : set) if (_wcsicmp(kv.first.c_str(), k) == 0) return true; return false; };
@@ -2052,7 +2052,7 @@ std::string Store::launch_mac(const BuildInfo& b, const fs::path& eboot, std::ma
     for (auto& kv : set) env.push_back(narrow(kv.first) + "=" + narrow(kv.second));
 
     const fs::path exe = b.dir / RACIT_GAME_EXE;
-    if (set.count(L"RACACIT_BENCHMARK")) {   // as on Windows (launch)
+    if (benchmark) {   // as on Windows (launch)
         if (!program_has(exe, "RACIT-FEATURE:benchmark-1"))
             return "Build v" + std::to_string(b.version) + " has no benchmark mode, and would play from your own saves. "
                    "Install the latest release to run the benchmark.";

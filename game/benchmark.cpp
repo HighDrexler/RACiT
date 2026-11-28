@@ -38,13 +38,23 @@ std::atomic<unsigned> s_kb_inits{ 0 };
 std::atomic<bool> s_done{ false };
 fs::path s_dir, s_pad, s_frames, s_result;
 
-void put_env(const char* key, const std::string& value)
+bool put_env(const char* key, const std::string& value)
 {
 #ifdef _WIN32
-    _putenv_s(key, value.c_str());
+    return _putenv_s(key, value.c_str()) == 0;
 #else
-    setenv(key, value.c_str(), 1);
+    return setenv(key, value.c_str(), 1) == 0;
 #endif
+}
+
+// Before the game starts: write the failed result and leave.
+[[noreturn]] void fail_setup(const std::string& why)
+{
+    const std::string text = "failed: " + why + "\n";
+    std::ofstream(s_result, std::ios::binary | std::ios::trunc) << text;
+    std::fprintf(stderr, "[benchmark] %s", text.c_str());
+    std::fflush(stderr);
+    std::_Exit(1);
 }
 
 void on_kb_init(void) { s_kb_inits.fetch_add(1, std::memory_order_release); }
@@ -132,10 +142,18 @@ void run()
     }
     pad("0 1 128 128 128 128");
 
+    // frame_times.cpp marks a recording it couldn't write whole complete:false.
+    std::string m;
+    { std::ifstream f(meta, std::ios::binary); m.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>()); }
+    if (m.find("\"complete\":true") == std::string::npos) finish("failed: the frame timing was cut short\n");
+    size_t lines = 0;
     std::vector<uint64_t> intervals;
     std::ifstream in(s_frames);
-    for (uint64_t ns; in >> ns;)
+    for (uint64_t ns; in >> ns; ++lines)
         if (ns) intervals.push_back(ns);
+    const size_t at = m.find("\"interval_count\":");
+    if (at == std::string::npos || std::strtoull(m.c_str() + at + 17, nullptr, 10) != lines)
+        finish("failed: the frame timing file doesn't match its record\n");
     if (intervals.size() < 100) finish("failed: too few frames were timed\n");
     finish(report(intervals));
 }
@@ -194,19 +212,14 @@ extern "C" void racit_benchmark_setup(void)
     if (!ec) fs::create_directories(copy, ec);
     if (!ec && fs::is_directory(from, ec))
         fs::copy(from, copy, fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
-    if (ec) {
-        // Without a full copy the run could reach the real saves: stop before the game starts.
-        const std::string text = "failed: could not copy the saves to " + copy.string() + " (" + ec.message() + ")\n";
-        std::ofstream(s_result, std::ios::binary | std::ios::trunc) << text;
-        std::fprintf(stderr, "[benchmark] %s", text.c_str());
-        std::fflush(stderr);
-        std::_Exit(1);
-    }
-    put_env("PS3_HDD0_HOME_ROOT", copy.string());
+    // Without a full copy, or if the game would not read it, the run could reach the real
+    // saves: stop before the game starts.
+    if (ec) fail_setup("could not copy the saves to " + copy.string() + " (" + ec.message() + ")");
+    if (!put_env("PS3_HDD0_HOME_ROOT", copy.string())) fail_setup("could not point the game at the copy of the saves");
 
     pad("");
     put_env("PAD_FILE", s_pad.string());
-    put_env("PAD_IGNORE_REAL", "1");
+    if (!put_env("PAD_IGNORE_REAL", "1")) fail_setup("could not turn off the real controllers");
     put_env("RACIT_FRAME_INTERVALS", s_frames.string());
     put_env("RACACIT_SKIP_INTRO", "1");
     put_env("RACACIT_SKIP_PRESS_START", "1");
