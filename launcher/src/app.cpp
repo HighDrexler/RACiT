@@ -254,6 +254,7 @@ static const std::vector<Opt>& opts()
         { "Image", "RACACIT_UPSCALE", "Upscaling", "bilinear", { { "bilinear", "Bilinear" }, { "sharp", "Sharp (bicubic + sharpen)" }, { "nearest", "Nearest (pixelated)" } } },
         { "Image", "RACACIT_SHARPNESS", "Sharpness", "5", { { "0", "0%" }, { "1", "10%" }, { "2", "20%" }, { "3", "30%" }, { "4", "40%" }, { "5", "50%" }, { "6", "60%" }, { "7", "70%" }, { "8", "80%" }, { "9", "90%" }, { "10", "100%" } } },
         { "Image", "RACACIT_BRIGHTNESS", "Brightness", "0", { { "-5", "-5" }, { "-4", "-4" }, { "-3", "-3" }, { "-2", "-2" }, { "-1", "-1" }, { "0", "Default" }, { "1", "+1" }, { "2", "+2" }, { "3", "+3" }, { "4", "+4" }, { "5", "+5" } } },
+        { "Image", "RACACIT_BLOOM", "Bloom", "on", { { "on", "On" }, { "off", "Off" } } },
         { "Image", "RACACIT_ANISO", "Anisotropic filtering", "0", { { "0", "Off" }, { "2", "2x" }, { "4", "4x" }, { "8", "8x" }, { "16", "16x" } } },
         { "Image", "RACACIT_TRILINEAR", "Trilinear filtering", "0", { { "0", "Off" }, { "1", "On" } } },
         { "Image", "RACACIT_TEX_QUALITY", "Texture quality", "high", { { "high", "High (original)" }, { "medium", "Medium" }, { "low", "Low" } } },

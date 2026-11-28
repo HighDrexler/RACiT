@@ -68,6 +68,7 @@ The launcher's Settings screen and the in-game menu have the same settings, exce
 | Upscaling | `RACACIT_UPSCALE` | Bilinear | How the image is scaled to the window: bilinear, sharp (bicubic plus sharpening) or nearest (pixelated). |
 | Sharpness | `RACACIT_SHARPNESS` | 50% | Sharpening strength, 0 to 10 (0% to 100%). |
 | Brightness | `RACACIT_BRIGHTNESS` | Default (0) | -5 to +5. |
+| Bloom | `RACACIT_BLOOM` | On | The glow around bright things, `on` or `off`. Changes right away from the F1 menu. |
 | Texture quality | `RACACIT_TEX_QUALITY` | High (original) | Medium and low use smaller textures, for GPUs low on memory. Takes effect after a restart. |
 | Anisotropic filtering | `RACACIT_ANISO` | Off | 2x to 16x, sharper textures at an angle. |
 | Trilinear filtering | `RACACIT_TRILINEAR` | Off | Smoother blending between texture sizes. |

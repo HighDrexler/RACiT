@@ -190,6 +190,17 @@ static const char* kIniTemplate =
     "# With update 1.20 added: which version Play runs, 1.20 or 1.00\r\n"
     "play_version=1.20\r\n";
 
+// launcher\mods\dualsense_plus\mod.json, for a game folder that has no copy (Store::Store).
+static const char kDsPlusModJson[] =
+    "{\r\n"
+    "  \"id\": \"dualsense_plus\",\r\n"
+    "  \"name\": \"DualSense Plus\",\r\n"
+    "  \"version\": \"1.0\",\r\n"
+    "  \"author\": \"RACiT\",\r\n"
+    "  \"description\": \"PS5 DualSense extras: game sounds on the controller speaker, haptic feedback, adaptive triggers, the light bar, motion, and Fire on R2 (Rift Apart layout) with prompts to match. Off: every controller, a DualSense too, plays as a plain pad with the game's own layout and prompts. Your choices in Settings > Controls are kept while it is off.\",\r\n"
+    "  \"settings\": { \"RACACIT_DUALSENSE_PLUS\": \"1\" }\r\n"
+    "}\r\n";
+
 Store::Store(fs::path r, const GameProfile* p) : root(std::move(r)), prof(p)
 {
     std::error_code ec;
@@ -202,6 +213,19 @@ Store::Store(fs::path r, const GameProfile* p) : root(std::move(r)), prof(p)
         settings.load();
     }
     if (!ini.load()) { write_text_atomic(ini.path, kIniTemplate); ini.load(); }
+    // Into the Nexus's copy of the stock DualSense Plus mod (A Crack in Time's comes in the zip's
+    // mods\): the 1.2 zip had none in nexus\mods, and an update installs builds, not mods, so a
+    // player could not get it at all. Once per install (a marker in data\, not launcher.ini: the
+    // other game's Store saves its own copy of that later), so removing the mod keeps it removed.
+    if (prof->folder && *prof->folder && !fs::exists(data() / L"ds_plus_seeded.txt", ec)) {
+        const fs::path d = mods_dir() / L"dualsense_plus";
+        if (!fs::exists(d / L"mod.json", ec)) {
+            fs::create_directories(d, ec);
+            write_text_atomic(d / L"mod.json", kDsPlusModJson);
+        }
+        write_text_atomic(data() / L"ds_plus_seeded.txt",
+                          "The launcher added mods\\dualsense_plus here once (Store::Store).\r\n");
+    }
 }
 
 void Store::reload() { settings.load(); ini.load(); }
