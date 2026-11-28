@@ -38293,20 +38293,22 @@ index b997931b..3d048c2f 100644
           * it is gone (ESRCH). */
          table_unlock();
 diff --git a/runtime/syscalls/sys_timer.c b/runtime/syscalls/sys_timer.c
-index 3a022815..0ba953ea 100644
+index 3a022815..20a759a6 100644
 --- a/runtime/syscalls/sys_timer.c
 +++ b/runtime/syscalls/sys_timer.c
-@@ -11,6 +11,9 @@
+@@ -11,6 +11,11 @@
  #include "sys_event.h"
  #include "../memory/vm.h"
  #include <stdlib.h>   /* getenv -- an implicit decl returns int, truncating the pointer */
++#include <stdatomic.h>   /* the cached usleep spin and CPU-count decisions */
 +#ifndef _WIN32
 +#include "../platform/win32_compat.h"   /* Interlocked*, Sleep (the timeline ring) */
++#include <sched.h>
 +#endif
  #include <string.h>
  #include <stdlib.h>
  #include "ps3emu/log_first.h"
-@@ -53,6 +56,56 @@ int lv2_deadline_passed(int64_t deadline)
+@@ -53,6 +58,56 @@ int lv2_deadline_passed(int64_t deadline)
  }
  #endif
  
@@ -38363,7 +38365,7 @@ index 3a022815..0ba953ea 100644
  /* ---------------------------------------------------------------------------
   * PPU timebase (mftb/mftbu) -- THE guest clock.
   *
-@@ -64,19 +117,101 @@ int lv2_deadline_passed(int64_t deadline)
+@@ -64,19 +119,101 @@ int lv2_deadline_passed(int64_t deadline)
   * polled. Overflow-safe split multiply (rem < qpf, so
   * rem * 79.8e6 < ~8e14 << 2^63).
   * -----------------------------------------------------------------------*/
@@ -38471,7 +38473,7 @@ index 3a022815..0ba953ea 100644
      return (ns / 1000000000ull) * PS3_TIMEBASE_FREQ +
             (ns % 1000000000ull) * PS3_TIMEBASE_FREQ / 1000000000ull;
  #endif
-@@ -86,14 +221,21 @@ uint64_t ppu_timebase_now(void)
+@@ -86,14 +223,21 @@ uint64_t ppu_timebase_now(void)
  uint64_t host_monotonic_ns(void)
  {
  #ifdef __APPLE__
@@ -38497,7 +38499,7 @@ index 3a022815..0ba953ea 100644
      return (t / denom) * numer + (t % denom) * numer / denom;
  #else
      struct timespec ts;
-@@ -101,6 +243,14 @@ uint64_t host_monotonic_ns(void)
+@@ -101,6 +245,14 @@ uint64_t host_monotonic_ns(void)
      return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
  #endif
  }
@@ -38512,7 +38514,7 @@ index 3a022815..0ba953ea 100644
  #endif
  
  static void write_be32(uint32_t addr, uint32_t val)
-@@ -129,6 +279,451 @@ static void write_be64(uint32_t addr, uint64_t val)
+@@ -129,6 +281,470 @@ static void write_be64(uint32_t addr, uint64_t val)
      *p = val;
  }
  
@@ -38620,17 +38622,38 @@ index 3a022815..0ba953ea 100644
 +#include <unistd.h>
 +int racacit_few_cpus(void)
 +{
-+    static int few = -1;
-+    if (few < 0) {
-+        long count = sysconf(_SC_NPROCESSORS_ONLN);
-+        few = count > 0 && count < 16;
++    /* Several threads can ask first at once: an atomic, each computes the same value. */
++    static atomic_int few = -1;
++    int v = atomic_load_explicit(&few, memory_order_relaxed);
++    if (v < 0) {
++        const long count = sysconf(_SC_NPROCESSORS_ONLN);
++        v = count > 0 && count < 16;
++        atomic_store_explicit(&few, v, memory_order_relaxed);
 +    }
-+    return few;
++    return v;
 +}
 +/* The Windows build's core-class rules (see there); unchanged here. */
 +int racacit_short_spins(void) { return 0; }
 +unsigned racacit_spin_count(unsigned legacy, unsigned ns) { (void)ns; return legacy; }
 +#endif
++
++/* How long a run of short usleep polls from one place spins before it really
++ * sleeps, in us: RACACIT_USLEEP_SPIN_US, else 100 under 16 CPU threads; a
++ * negative value always spins. Several PPU threads can make their first short
++ * sleep at once, so the value is an atomic (each computes the same one). */
++int racacit_few_cpus(void);
++static long usleep_spin_us(void)
++{
++    static atomic_long s_spin = -2;
++    long v = atomic_load_explicit(&s_spin, memory_order_relaxed);
++    if (v == -2) {
++        const char* e = getenv("RACACIT_USLEEP_SPIN_US");
++        v = e ? atol(e) : (racacit_few_cpus() ? 100 : -1);
++        if (v == -2) v = -1;
++        atomic_store_explicit(&s_spin, v, memory_order_relaxed);
++    }
++    return v;
++}
 +#ifdef _WIN32
 +/* ---- CPU topology and the wait style ---------------------------------------
 + * The runtime's waits come in two styles. With CPUs to spare a thread waiting
@@ -38944,9 +38967,7 @@ index 3a022815..0ba953ea 100644
 +/* A run of short polls from one place: 1 if this one really slept. */
 +static int usleep_real_sleep(uint32_t lr, uint64_t usec, int64_t now)
 +{
-+    static long s_spin = -2;
-+    if (s_spin == -2) { const char* e = getenv("RACACIT_USLEEP_SPIN_US");
-+                        s_spin = e ? atol(e) : (racacit_few_cpus() ? 100 : -1); }
++    const long s_spin = usleep_spin_us();
 +    if (s_spin < 0) return 0;
 +    static __thread uint32_t t_lr; static __thread int64_t t_first, t_last; static __thread HANDLE t_tm; static __thread int t_tried;
 +    const int64_t per_us = s_qpc_freq.QuadPart / 1000000;
@@ -38964,7 +38985,7 @@ index 3a022815..0ba953ea 100644
  /* ---------------------------------------------------------------------------
   * sys_timer_usleep
   *
-@@ -138,10 +733,43 @@ int64_t sys_timer_usleep(ppu_context* ctx)
+@@ -138,10 +754,43 @@ int64_t sys_timer_usleep(ppu_context* ctx)
  {
      uint64_t usec = LV2_ARG_U64(ctx, 0);
      ppu_thread_note_block(ctx->thread_id);   /* PS3_PRIO_START */
@@ -39008,7 +39029,7 @@ index 3a022815..0ba953ea 100644
      /* PS3_POLLTOP=<seconds>: name the usleep poll sites.
       *
       * A title that is "hung" is usually not blocked on anything -- every thread
-@@ -243,6 +871,17 @@ int64_t sys_timer_usleep(ppu_context* ctx)
+@@ -243,6 +892,17 @@ int64_t sys_timer_usleep(ppu_context* ctx)
          extern void ppu_log_host_chain(const char*);
          ppu_log_host_chain("usleep1ms"); } }
  
@@ -39026,7 +39047,7 @@ index 3a022815..0ba953ea 100644
  #ifdef _WIN32
      /* Use high-resolution sleep via waitable timer for better precision */
      if (usec >= 1000) {
-@@ -264,10 +903,19 @@ int64_t sys_timer_usleep(ppu_context* ctx)
+@@ -264,10 +924,19 @@ int64_t sys_timer_usleep(ppu_context* ctx)
           * and busy-spins at full speed (so the wait is effectively a no-op).
           * Busy-wait to a precise QPC deadline, yielding inside the spin
           * (SwitchToThread) so a sibling host thread the guest may be waiting on
@@ -39047,6 +39068,35 @@ index 3a022815..0ba953ea 100644
          const int64_t qpc_deadline = qpc_start.QuadPart +
              (int64_t)((usec * (uint64_t)s_qpc_freq.QuadPart) / 1000000ULL);
          do {
+@@ -276,6 +945,28 @@ int64_t sys_timer_usleep(ppu_context* ctx)
+         } while (qpc_now.QuadPart < qpc_deadline);
+     }
+ #else
++    /* The same rule as Windows above: a run of short polls from one place
++     * spins to its deadline for the first RACACIT_USLEEP_SPIN_US (100 under 16
++     * CPU threads), then really sleeps. nanosleep here oversleeps short waits
++     * by half again (30 us takes ~47, 50 us ~79 on an M1 Pro), and the main
++     * thread polls its SPU jobs this way (func_00696400, usleep 30-50 us), so
++     * every poll whose job lands early added that to the frame. */
++    if (usec > 0 && usec < 1000) {
++        const long s_spin = usleep_spin_us();
++        static _Thread_local uint32_t t_lr; static _Thread_local uint64_t t_first, t_last;
++        const uint64_t now = host_monotonic_ns(), lr = (uint32_t)ctx->lr;
++        if (lr != t_lr || now > t_last + 200000u) { t_lr = (uint32_t)lr; t_first = now; }
++        if (s_spin < 0 || now - t_first < (uint64_t)s_spin * 1000u) {
++            const uint64_t deadline = now + usec * 1000u;
++            t_last = deadline;
++            while (host_monotonic_ns() < deadline) sched_yield();
++            return CELL_OK;
++        }
++        struct timespec ts = { 0, (long)(usec * 1000) };
++        nanosleep(&ts, NULL);
++        t_last = host_monotonic_ns();
++        return CELL_OK;
++    }
+     if (usec > 0) {
+         struct timespec ts;
+         ts.tv_sec  = (time_t)(usec / 1000000);
 diff --git a/runtime/syscalls/sys_timer.h b/runtime/syscalls/sys_timer.h
 index f3d4163a..3ef96645 100644
 --- a/runtime/syscalls/sys_timer.h
