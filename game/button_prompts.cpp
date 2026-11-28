@@ -106,14 +106,45 @@ int s_nfont;
 
 uint32_t be32(const uint8_t* p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
 
+/* The runtime's committed-page cache (runtime/spu/spu_vm_pagemap.c): one bit per 64 KB guest
+ * page, set once the page is seen committed. Guest memory is never decommitted or protected while
+ * the game runs, so a set bit stays true.
+ * readable() and readable_end() run for every glyph record every 50 ms (desktop_prompts,
+ * font_page_at) and for every pixel a HUD picture is matched by. With a VirtualQuery each time
+ * the thread spent ~45% of a core in VirtualQuery, which takes the process's address-space lock
+ * (the render thread's write-watch poll, GetWriteWatch, needs it too: see readable_end), and
+ * frames missed their slot -- Zolar Forest, 6 cores, keyboard prompts: 42 fps, 60 with the
+ * prompts off. A page the cache knows now takes two bit tests: 59.9 fps with the prompts on,
+ * every frame on time, the thread under 1% of a core. */
+extern "C" unsigned char g_vm_page_bitmap[65536 / 8];
+bool page_known(uint64_t pg) { return (g_vm_page_bitmap[pg >> 3] >> (pg & 7)) & 1; }
+/* Remember guest page `pg` if all of it is committed and readable (as the SPU DMA guard,
+ * mfc_ea_range_committed, does on a miss). */
+void page_remember(uint64_t pg)
+{
+    MEMORY_BASIC_INFORMATION mbi;
+    uint8_t* const p = vm_base + (pg << 16);
+    if (VirtualQuery(p, &mbi, sizeof mbi) && mbi.State == MEM_COMMIT &&
+        !(mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) && (uint8_t*)mbi.BaseAddress + mbi.RegionSize >= p + 0x10000)
+        __atomic_fetch_or(&g_vm_page_bitmap[pg >> 3], (unsigned char)(1u << (pg & 7)), __ATOMIC_RELAXED);
+}
+
 /* Whether guest [ea, ea + n) is committed and readable. */
 bool readable(uint32_t ea, uint32_t n)
 {
-    for (uint64_t a = ea; a < (uint64_t)ea + n; ) {
-        MEMORY_BASIC_INFORMATION mbi;
-        if (!VirtualQuery(vm_base + a, &mbi, sizeof mbi) || mbi.State != MEM_COMMIT ||
-            (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD))) return false;
-        a = (uint64_t)((uint8_t*)mbi.BaseAddress + mbi.RegionSize - vm_base);
+    if (!n) return true;
+    const uint64_t end = (uint64_t)ea + n;
+    if (end > 0x100000000ull) return false;
+    for (uint64_t pg = ea >> 16; pg <= (end - 1) >> 16; pg++) {
+        if (page_known(pg)) continue;
+        const uint64_t lo = std::max<uint64_t>(ea, pg << 16), hi = std::min<uint64_t>(end, (pg + 1) << 16);
+        for (uint64_t a = lo; a < hi; ) {
+            MEMORY_BASIC_INFORMATION mbi;
+            if (!VirtualQuery(vm_base + a, &mbi, sizeof mbi) || mbi.State != MEM_COMMIT ||
+                (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD))) return false;
+            a = (uint64_t)((uint8_t*)mbi.BaseAddress + mbi.RegionSize - vm_base);
+        }
+        page_remember(pg);
     }
     return true;
 }
@@ -122,15 +153,22 @@ bool readable(uint32_t ea, uint32_t n)
  * VirtualQuery per region, not one per address: the scans' per-16-byte
  * readable() calls (v73) took the process's address-space lock ~100,000
  * times a scan, and the write-watch poll (GetWriteWatch, rsx_writewatch.c)
- * waited on it -- the game froze up to 9 s (owner, v75). */
+ * waited on it -- the game froze up to 9 s (owner, v75). Known pages are
+ * stepped over whole, without a VirtualQuery. */
 uint32_t readable_end(uint32_t ea)
 {
     uint64_t a = ea;
     for (;;) {
-        MEMORY_BASIC_INFORMATION mbi;
-        if (!VirtualQuery(vm_base + a, &mbi, sizeof mbi) || mbi.State != MEM_COMMIT ||
-            (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD))) return a == ea ? 0u : (uint32_t)a;
-        a = (uint64_t)((uint8_t*)mbi.BaseAddress + mbi.RegionSize - vm_base);
+        const uint64_t pg = a >> 16;
+        if (page_known(pg)) {
+            a = (pg + 1) << 16;
+        } else {
+            MEMORY_BASIC_INFORMATION mbi;
+            if (!VirtualQuery(vm_base + a, &mbi, sizeof mbi) || mbi.State != MEM_COMMIT ||
+                (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD))) return a == ea ? 0u : (uint32_t)a;
+            a = (uint64_t)((uint8_t*)mbi.BaseAddress + mbi.RegionSize - vm_base);
+            page_remember(pg);
+        }
         if (a >= 0x100000000ull) return 0xFFFFFFFFu;
         if (a - ea >= 0x20000u) return (uint32_t)a;   /* far enough for every caller */
     }
