@@ -678,6 +678,7 @@ extern "C" PPU_THREAD_LOCAL void (*g_trampoline_fn)(void*);
 #include <chrono>
 #include <thread>
 extern "C" void racit_pad_host_press(unsigned mask, int reports);
+extern "C" void racit_pad_host_cancel(void);
 extern "C" int racit_pad_player_active(void);
 extern "C" void racit_save_autopick_once(void);
 extern "C" void racit_save_autopick_cancel(void);
@@ -708,6 +709,12 @@ static void front_end_continue_run(void)
         }
         racit_save_autopick_once();
         racit_pad_host_press(0x4000u, 6);   /* Cross */
+        if (racit_pad_player_active()) {   /* Settings or a control in between: undo it */
+            racit_pad_host_cancel();
+            racit_save_autopick_cancel();
+            fprintf(stderr, "[front-end] continue at start: a control was used, staying on the menu%c", 10);
+            return;
+        }
         fprintf(stderr, "[front-end] continue at start: Cross on LOAD at %lld ms%c", ms(), 10);
         for (int i = 0; i < 20; i++) {
             std::this_thread::sleep_for(milliseconds(100));
