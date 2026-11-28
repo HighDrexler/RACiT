@@ -204,14 +204,30 @@ extern "C" void racit_benchmark_setup(void)
         fs::remove(p, ec);
 
     // Play from a copy of the saves, so nothing the run does reaches the player's own.
+    // Where the saves are, in the runtime's order (cellSaveData.c save_root):
+    // PS3_HDD0_HOME_ROOT, then PS3_HDD0_ROOT/home, then PS3_GAMEDATA_ROOT (or ./gamedata)
+    // /dev_hdd0/home.
     const char* home = std::getenv("PS3_HDD0_HOME_ROOT");
     const char* hdd = std::getenv("PS3_HDD0_ROOT");
-    const fs::path from = home && *home ? fs::path(home) : fs::path(hdd ? hdd : ".") / "home";
-    const fs::path copy = s_dir / "benchmark-home";
-    fs::remove_all(copy, ec);
-    if (!ec) fs::create_directories(copy, ec);
+    const char* gamedata = std::getenv("PS3_GAMEDATA_ROOT");
+    const fs::path from = home && *home ? fs::path(home)
+                        : hdd && *hdd   ? fs::path(hdd) / "home"
+                                        : fs::path(gamedata && *gamedata ? gamedata : "./gamedata") / "dev_hdd0" / "home";
+    // Each run copies into a new folder. A save home that is one of these folders, or
+    // inside one, is refused: clearing the old copies would delete it.
+    const fs::path real = fs::weakly_canonical(fs::absolute(from, ec), ec);
+    const std::string stem = (fs::weakly_canonical(fs::absolute(s_dir, ec), ec) / "benchmark-home").string();
+    if (real.string().rfind(stem, 0) == 0)
+        fail_setup("the saves are in " + real.string() + ", a benchmark copy; set the real save folder");
+    for (const auto& d : fs::directory_iterator(s_dir, ec))
+        if (d.is_directory(ec) && d.path().filename().string().rfind("benchmark-home", 0) == 0)
+            fs::remove_all(d.path(), ec);   // earlier runs' copies (never the save home, checked above)
+    ec.clear();
+    const fs::path copy = s_dir / ("benchmark-home-" + std::to_string((unsigned long long)
+        std::chrono::system_clock::now().time_since_epoch().count()));
+    fs::create_directories(copy, ec);
     if (!ec && fs::is_directory(from, ec))
-        fs::copy(from, copy, fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
+        fs::copy(from, copy, fs::copy_options::recursive, ec);
     // Without a full copy, or if the game would not read it, the run could reach the real
     // saves: stop before the game starts.
     if (ec) fail_setup("could not copy the saves to " + copy.string() + " (" + ec.message() + ")");
