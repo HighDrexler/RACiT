@@ -36,7 +36,7 @@ std::atomic<int> s_on{ -1 };
 std::atomic<bool> s_menu{ false };
 std::atomic<unsigned> s_kb_inits{ 0 };
 std::atomic<bool> s_done{ false };
-fs::path s_dir, s_pad, s_frames, s_result;
+fs::path s_dir, s_run, s_pad, s_frames, s_result;
 
 bool put_env(const char* key, const std::string& value)
 {
@@ -84,6 +84,7 @@ bool wait_for(Pred done, std::chrono::seconds limit)
 void finish(const std::string& text)
 {
     std::ofstream(s_result, std::ios::binary | std::ios::trunc) << text;
+    std::ofstream(s_run / ".racit-benchmark-done", std::ios::binary) << text;   // the next run may remove this one
     std::fprintf(stderr, "[benchmark] %s", text.c_str());
     std::fflush(stderr);
     // main() leaves the way it does when the window is closed. If its loop is not
@@ -192,18 +193,9 @@ extern "C" void racit_benchmark_setup(void)
     if (!*(volatile const char*)racit_feature_benchmark) return;
     const char* settings = std::getenv("RACACIT_SETTINGS_FILE");
     s_dir = settings && *settings ? fs::path(settings).parent_path() : fs::current_path();
-    s_pad = s_dir / "benchmark-pad.txt";
-    s_frames = s_dir / "benchmark-frames.txt";
-    s_result = s_dir / "benchmark.txt";
+    s_result = s_dir / "benchmark.txt";   // the launcher clears it before a run and reads it after
     std::error_code ec;
-    // Everything a run leaves, an interrupted one included: frame_times.cpp makes its
-    // files exclusively ("wx"), so a stale .meta.tmp would keep this run from finishing.
-    for (const fs::path& p : { s_frames, fs::path(s_frames.string() + ".meta"),
-                               fs::path(s_frames.string() + ".meta.tmp"),
-                               fs::path(s_frames.string() + ".request"), s_result })
-        fs::remove(p, ec);
 
-    // Play from a copy of the saves, so nothing the run does reaches the player's own.
     // Where the saves are, in the runtime's order (cellSaveData.c save_root):
     // PS3_HDD0_HOME_ROOT, then PS3_HDD0_ROOT/home, then PS3_GAMEDATA_ROOT (or ./gamedata)
     // /dev_hdd0/home.
@@ -213,24 +205,34 @@ extern "C" void racit_benchmark_setup(void)
     const fs::path from = home && *home ? fs::path(home)
                         : hdd && *hdd   ? fs::path(hdd) / "home"
                                         : fs::path(gamedata && *gamedata ? gamedata : "./gamedata") / "dev_hdd0" / "home";
-    // Each run copies into a new folder. A save home that is one of these folders, or
-    // inside one, is refused: clearing the old copies would delete it.
+    // Each run works in a new folder of its own: the scripted pad, the frame timing and
+    // the copy of the saves it plays from. A save home inside one of these is refused.
     const fs::path real = fs::weakly_canonical(fs::absolute(from, ec), ec);
-    const std::string stem = (fs::weakly_canonical(fs::absolute(s_dir, ec), ec) / "benchmark-home").string();
+    const std::string stem = (fs::weakly_canonical(fs::absolute(s_dir, ec), ec) / "benchmark-run-").string();
     if (real.string().rfind(stem, 0) == 0)
-        fail_setup("the saves are in " + real.string() + ", a benchmark copy; set the real save folder");
-    // Copies this mode made carry a marker file, and only those are removed: a folder
-    // that only shares the name (a player's own backup, say) is left alone.
-    for (const auto& d : fs::directory_iterator(s_dir, ec))
-        if (d.is_directory(ec) && d.path().filename().string().rfind("benchmark-home-", 0) == 0 &&
-            fs::exists(d.path() / ".racit-benchmark-copy", ec))
-            fs::remove_all(d.path(), ec);   // an earlier run's copy (never the save home, checked above)
+        fail_setup("the saves are in " + real.string() + ", a benchmark run's copy; set the real save folder");
+    // Earlier runs' folders are removed only when this mode made them (the marker) and
+    // they finished, or were left over a day ago by a run that never did: a run still
+    // going in another game window keeps its files.
+    const auto day_ago = fs::file_time_type::clock::now() - std::chrono::hours(24);
+    for (const auto& d : fs::directory_iterator(s_dir, ec)) {
+        const fs::path p = d.path();
+        if (!d.is_directory(ec) || p.filename().string().rfind("benchmark-run-", 0) != 0) continue;
+        if (!fs::exists(p / ".racit-benchmark-run", ec)) continue;
+        if (fs::exists(p / ".racit-benchmark-done", ec) || fs::last_write_time(p / ".racit-benchmark-run", ec) < day_ago)
+            fs::remove_all(p, ec);
+    }
     ec.clear();
-    const fs::path copy = s_dir / ("benchmark-home-" + std::to_string((unsigned long long)
+    s_run = s_dir / ("benchmark-run-" + std::to_string((unsigned long long)
         std::chrono::system_clock::now().time_since_epoch().count()));
-    fs::create_directory(copy, ec);   // new: fails rather than reuse a folder that exists
-    if (!ec) std::ofstream(copy / ".racit-benchmark-copy", std::ios::binary) << "made by RACACIT_BENCHMARK\n";
-    if (!ec && fs::is_directory(from, ec))
+    if (!fs::create_directory(s_run, ec) || ec)   // false with no error when it already exists
+        fail_setup("could not make a new folder for the run at " + s_run.string());
+    std::ofstream(s_run / ".racit-benchmark-run", std::ios::binary) << "made by RACACIT_BENCHMARK\n";
+    s_pad = s_run / "pad.txt";
+    s_frames = s_run / "frames.txt";
+    const fs::path copy = s_run / "home";
+    if (!fs::create_directory(copy, ec) || ec) fail_setup("could not make " + copy.string());
+    if (fs::is_directory(from, ec))
         fs::copy(from, copy, fs::copy_options::recursive, ec);
     // Without a full copy, or if the game would not read it, the run could reach the real
     // saves: stop before the game starts.
