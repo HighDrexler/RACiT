@@ -625,7 +625,8 @@ extern "C" uint32_t racacit_movie_update_hook(uint32_t slot, uint32_t playing)
 }
 
 /* ---------------------------------------------------------------------------
- * Boot straight to PRESS START (RACACIT_SKIP_INTRO=1; off by default)
+ * Boot without the logos (RACACIT_SKIP_INTRO=1) and without PRESS START
+ * (RACACIT_SKIP_PRESS_START=1); both off by default, both in the Settings menu
  *
  * The title's cards (the Insomniac Games and Sony logos, the autosave notice
  * and the seizure warning) are the Scaleform main menu's own ActionScript
@@ -633,58 +634,157 @@ extern "C" uint32_t racacit_movie_update_hook(uint32_t slot, uint32_t playing)
  * <startMode>Cards one by one -- regularCards = insomLogo, sonyPresents,
  * autosaveCard, seizureCard; afterInstallCards = the two logos -- and calls
  * CreateMenu (the PRESS START screen) once cardIndex reaches the list's length
- * or the list is empty. func_004C8898 tells the movie its startMode through
- * the movie's SetVariable (vtable +0x30: r3 movie, r4 name, r5 a GFxValue --
- * type at +0, value at +8 -- r6 1), before Init runs. patch_lift.py calls this
- * right after that call returns: for "regular" and "afterInstall" the same
- * SetVariable sets that mode's card list to "" (an AS2 string: length 0), so
- * the menu's first CardController goes straight to CreateMenu. The install
- * mode's cards (the HDD install and subtitle choice) are left alone.
+ * or the list is empty. func_004C8898 (update 1.20: func_004C9018) tells the
+ * movie its startMode through the movie's SetVariable (vtable +0x30: r3 movie,
+ * r4 name, r5 a GFxValue -- type at +0, value at +8 -- r6 1), then invokes the
+ * movie's Init (func_0094EF08: r3 movie, r4 method, r5 argument format).
+ *
+ * racacit_front_end_cards runs right after the startMode SetVariable: for
+ * "regular" and "afterInstall" the same SetVariable sets that mode's card list
+ * to "" (an AS2 string: length 0), so the menu's first CardController goes
+ * straight to CreateMenu. The install mode's cards (the HDD install and
+ * subtitle choice) are left alone.
+ *
+ * racacit_front_end_menu runs right after Init and, with RACACIT_SKIP_PRESS_START=1
+ * as well, skips PRESS START. It does what the movie itself does: it
+ * calls CreateMenu (as CardController would), with introPause 0 so the
+ * CardController never runs, then what the movie's onKeyDown does for START
+ * on that screen -- RemoveTitle, RemoveStartPrompt, tempTimer 10 and tempFunc
+ * "CreateOptions", which MenuController runs ten frames later. No input is
+ * injected, so nothing else sees a START press; the save, profile and options
+ * values the game sets before Init are read by the menu as usual. With the
+ * logos shown, PRESS START stays: the menu would have to be opened after the
+ * CardController's last card, which no hook here sees.
  * -----------------------------------------------------------------------*/
 void func_004C64C8(ppu_context* ctx);
+void func_0094EF08(ppu_context* ctx);
 extern "C" void ps3_indirect_call(ppu_context* ctx);
 extern "C" void vm_write8(uint64_t a, uint8_t v);
 extern "C" PPU_THREAD_LOCAL void (*g_trampoline_fn)(void*);
-extern "C" void racacit_front_end_cards(ppu_context* ctx)
+
+static int front_end_skip_intro(void)
 {
     static int on = -1;
     if (on < 0) { const char* e = getenv("RACACIT_SKIP_INTRO"); on = (e && *e == '1') ? 1 : 0; }   /* off unless chosen: the seizure warning shows */
-    if (!on) return;
-    const uint32_t sp = (uint32_t)ctx->gpr[1], val = sp + 0x90u;
+    return on;
+}
+static uint32_t s_front_end_menu;   /* movie handle whose PRESS START is skipped after Init */
+
+/* The guest context around a call into the movie, and scratch memory for
+ * strings and GFxValues below the guest stack pointer. */
+struct FrontEndCall {
+    uint64_t gpr[32], lr, ctr; double fpr[32]; u128 vr[32]; uint32_t cr, xer, fpscr, vscr;
+    uint32_t buf, used;
+};
+static void front_end_enter(ppu_context* ctx, FrontEndCall& c)
+{
+    memcpy(c.gpr, ctx->gpr, sizeof c.gpr); memcpy(c.fpr, ctx->fpr, sizeof c.fpr); memcpy(c.vr, ctx->vr, sizeof c.vr);
+    c.cr = ctx->cr; c.lr = ctx->lr; c.ctr = ctx->ctr; c.xer = ctx->xer; c.fpscr = ctx->fpscr; c.vscr = ctx->vscr;
+    const uint32_t sp = (uint32_t)ctx->gpr[1];
+    c.buf = (sp - 0x200u) & ~15u; c.used = 0;
+    const uint32_t nsp = (sp - 0x400u) & ~15u;                /* a new frame below the scratch */
+    vm_write32(nsp, 0); vm_write32(nsp + 4, sp);              /* back chain */
+    ctx->gpr[1] = nsp;
+}
+static void front_end_leave(ppu_context* ctx, const FrontEndCall& c)
+{
+    memcpy(ctx->gpr, c.gpr, sizeof c.gpr); memcpy(ctx->fpr, c.fpr, sizeof c.fpr); memcpy(ctx->vr, c.vr, sizeof c.vr);
+    ctx->cr = c.cr; ctx->lr = c.lr; ctx->ctr = c.ctr; ctx->xer = c.xer; ctx->fpscr = c.fpscr; ctx->vscr = c.vscr;
+}
+static uint32_t front_end_str(FrontEndCall& c, const char* s)
+{
+    const uint32_t n = (uint32_t)strlen(s) + 1u, at = c.buf + c.used;
+    memcpy(vm_base + at, s, n);
+    c.used = (c.used + n + 15u) & ~15u;
+    return at;
+}
+static void front_end_drain(ppu_context* ctx)
+{
+    while (g_trampoline_fn) { void (*tf)(void*) = g_trampoline_fn; g_trampoline_fn = 0; tf(ctx); }
+}
+static uint32_t front_end_movie(ppu_context* ctx, uint32_t handle)
+{
+    ctx->gpr[3] = handle;                                     /* as func_004C8898: the movie from its handle */
+    func_004C64C8(ctx);
+    front_end_drain(ctx);
+    return (uint32_t)ctx->gpr[3];
+}
+/* The movie's SetVariable with a GFxValue built from `like` (0x18 bytes, or zero). */
+static int front_end_set(ppu_context* ctx, FrontEndCall& c, uint32_t movie, const char* name,
+                         uint32_t type, uint64_t value, uint32_t like)
+{
+    const uint32_t nm = front_end_str(c, name), val = c.buf + c.used;
+    c.used += 0x20u;
+    for (uint32_t k = 0; k < 0x18u; k += 4) vm_write32(val + k, like ? vm_read32(like + k) : 0u);
+    vm_write32(val, type);
+    if (type == 3u) { vm_write32(val + 8u, (uint32_t)(value >> 32)); vm_write32(val + 12u, (uint32_t)value); }   /* big-endian double */
+    else vm_write32(val + 8u, (uint32_t)value);
+    const uint32_t opd = vm_read32(vm_read32(movie) + 0x30u);  /* SetVariable */
+    ctx->gpr[3] = movie; ctx->gpr[4] = nm; ctx->gpr[5] = val; ctx->gpr[6] = 1;
+    ctx->gpr[2] = vm_read32(opd + 4u);
+    ctx->ctr = vm_read32(opd); ctx->lr = (uint32_t)c.lr;
+    ps3_indirect_call(ctx);
+    front_end_drain(ctx);
+    ctx->gpr[2] = c.gpr[2];
+    return (int)(uint8_t)ctx->gpr[3];
+}
+static int front_end_set_number(ppu_context* ctx, FrontEndCall& c, uint32_t movie, const char* name, double v)
+{
+    uint64_t bits; memcpy(&bits, &v, 8);
+    return front_end_set(ctx, c, movie, name, 3u, bits, 0);   /* GFxValue number */
+}
+/* The movie's Invoke(method, "") through the game's own helper, as Init is called. */
+static void front_end_invoke(ppu_context* ctx, FrontEndCall& c, uint32_t movie, const char* method)
+{
+    const uint32_t m = front_end_str(c, method), fmt = front_end_str(c, "");
+    ctx->gpr[3] = movie; ctx->gpr[4] = m; ctx->gpr[5] = fmt; ctx->lr = (uint32_t)c.lr;
+    func_0094EF08(ctx);
+    front_end_drain(ctx);
+    ctx->gpr[2] = c.gpr[2];
+}
+
+extern "C" void racacit_front_end_cards(ppu_context* ctx)
+{
+    if (!front_end_skip_intro()) return;
+    const uint32_t val = (uint32_t)ctx->gpr[1] + 0x90u;
     if (vm_read32(val) != 4u) return;                         /* not a string: leave it */
     const uint32_t mode_ea = vm_read32(val + 8u);
     char mode[16] = {0};
     for (unsigned i = 0; mode_ea && i + 1 < sizeof mode; i++) { mode[i] = (char)vm_read8(mode_ea + i); if (!mode[i]) break; }
     if (strcmp(mode, "regular") && strcmp(mode, "afterInstall")) return;
 
-    static uint64_t gpr[32], lr, ctr; static double fpr[32]; static u128 vr[32]; static uint32_t cr, xer, fpscr, vscr;
-    memcpy(gpr, ctx->gpr, sizeof gpr); memcpy(fpr, ctx->fpr, sizeof fpr); memcpy(vr, ctx->vr, sizeof vr);
-    cr = ctx->cr; lr = ctx->lr; ctr = ctx->ctr; xer = ctx->xer; fpscr = ctx->fpscr; vscr = ctx->vscr;
-    /* name, empty string and GFxValue below the guest stack pointer, then a new frame below them */
-    const uint32_t buf = (sp - 0x200u) & ~15u, nsp = (sp - 0x400u) & ~15u;
-    const uint32_t name = buf, empty = buf + 0x40u, nval = buf + 0x80u;
+    static FrontEndCall c;
+    front_end_enter(ctx, c);
     char nm[32]; snprintf(nm, sizeof nm, "%sCards", mode);
-    memcpy(vm_base + name, nm, strlen(nm) + 1);
-    vm_write8(empty, 0);
-    for (uint32_t k = 0; k < 0x18u; k += 4) vm_write32(nval + k, vm_read32(val + k));   /* the game's own string GFxValue */
-    vm_write32(nval + 8u, empty);
-    vm_write32(nsp, 0); vm_write32(nsp + 4, sp);              /* back chain */
-    ctx->gpr[1] = nsp;
-    ctx->gpr[3] = ctx->gpr[27];                               /* as func_004C8898: the movie from its handle */
-    func_004C64C8(ctx);
-    while (g_trampoline_fn) { void (*tf)(void*) = g_trampoline_fn; g_trampoline_fn = 0; tf(ctx); }
-    const uint32_t movie = (uint32_t)ctx->gpr[3];
-    const uint32_t opd = vm_read32(vm_read32(movie) + 0x30u);  /* SetVariable */
-    ctx->gpr[3] = movie; ctx->gpr[4] = name; ctx->gpr[5] = nval; ctx->gpr[6] = 1;
-    ctx->gpr[2] = vm_read32(opd + 4u);
-    ctx->ctr = vm_read32(opd); ctx->lr = (uint32_t)lr;
-    ps3_indirect_call(ctx);
-    while (g_trampoline_fn) { void (*tf)(void*) = g_trampoline_fn; g_trampoline_fn = 0; tf(ctx); }
-    const int ok = (int)(uint8_t)ctx->gpr[3];
-    memcpy(ctx->gpr, gpr, sizeof gpr); memcpy(ctx->fpr, fpr, sizeof fpr); memcpy(ctx->vr, vr, sizeof vr);
-    ctx->cr = cr; ctx->lr = lr; ctx->ctr = ctr; ctx->xer = xer; ctx->fpscr = fpscr; ctx->vscr = vscr;
+    const uint32_t empty = front_end_str(c, "");
+    const uint32_t movie = front_end_movie(ctx, (uint32_t)c.gpr[27]);
+    const int ok = front_end_set(ctx, c, movie, nm, 4u, empty, val);   /* the game's own string GFxValue */
+    front_end_leave(ctx, c);
     fprintf(stderr, "[front-end] startMode %s: %s = \"\" (intro cards skipped, RACACIT_SKIP_INTRO)%s\n",
             mode, nm, ok ? "" : " -- SetVariable said no");
+    static int skip_start = -1;
+    if (skip_start < 0) { const char* e = getenv("RACACIT_SKIP_PRESS_START"); skip_start = (e && *e == '1') ? 1 : 0; }
+    s_front_end_menu = (ok && skip_start) ? (uint32_t)c.gpr[27] : 0u;
+}
+
+extern "C" void racacit_front_end_menu(ppu_context* ctx)
+{
+    const uint32_t handle = s_front_end_menu;
+    if (!handle) return;
+    s_front_end_menu = 0;
+    static FrontEndCall c;
+    front_end_enter(ctx, c);
+    const uint32_t movie = front_end_movie(ctx, handle);
+    int ok = front_end_set_number(ctx, c, movie, "introPause", 0.0);   /* no CardController */
+    front_end_invoke(ctx, c, movie, "CreateMenu");
+    /* the movie's onKeyDown for START on the PRESS START screen */
+    front_end_invoke(ctx, c, movie, "RemoveTitle");
+    front_end_invoke(ctx, c, movie, "RemoveStartPrompt");
+    ok &= front_end_set_number(ctx, c, movie, "tempTimer", 10.0);
+    ok &= front_end_set(ctx, c, movie, "tempFunc", 4u, front_end_str(c, "CreateOptions"), 0);
+    front_end_leave(ctx, c);
+    fprintf(stderr, "[front-end] PRESS START skipped: main menu opens (RACACIT_SKIP_PRESS_START)%s\n",
+            ok ? "" : " -- SetVariable said no");
 }
 
 /* ---------------------------------------------------------------------------
@@ -1360,7 +1460,7 @@ extern "C" volatile int g_racacit_watch_img;
 extern "C" volatile unsigned long long g_racacit_watch_t;
 static thread_local uint32_t t_watch_obj;
 /* The wait the main thread is in (its key), 0 = none: PS3_SAMPLE_INWAIT. */
-#if defined(__ANDROID__) || defined(__APPLE__)
+#ifndef _WIN32
 /* Defined by the Windows sampler (ppu_loader.cpp); here only this file uses it. */
 extern "C" { volatile uint32_t g_racacit_main_wait_lr = 0; }
 #else
@@ -2603,13 +2703,60 @@ extern "C" void racacit_u120_space_bits(ppu_context* ctx)
  * <= 60, nothing changes. RACACIT_CLOCK_LOG=1 (or a cap) logs game time and
  * real time against wall time every 5 s: both must stay 1.000.
  * -------------------------------------------------------------------------*/
+/* Frame-rate unlock: a frame counter at 60 per second of unpaused time for
+ * the code that counts frames as time (docs/design/frame-unlock-audit.md
+ * section 2.A). clock+0xD0 counts ticks with dt != 0; v60 advances by the
+ * unscaled dt (clock+0x44) of each such tick in 1/60 s steps, seeded from
+ * clock+0xD0, so at 60 FPS the two move together. racacit_frame60_at(base)
+ * is that counter when `base` is the game clock and a cap above 60 is set,
+ * otherwise the plain load it replaces. */
+static uint32_t s_f60_clk, s_f60_last, s_f60_v; static float s_f60_acc; static int s_f60_seeded, s_f60_new = 1;
+static int racacit_fps_cap(void) { static int c = -1; if (c < 0) { const char* e = getenv("RACACIT_FPS_CAP"); c = e ? atoi(e) : 0; } return c; }
+static void racacit_frame60_tick(uint32_t clk)
+{
+    s_f60_clk = clk;
+    const uint32_t d0 = vm_read32(clk + 0xD0u);
+    if (!s_f60_seeded) { s_f60_v = s_f60_last = d0; s_f60_seeded = 1; return; }
+    if (d0 < s_f60_last) { s_f60_v = s_f60_last = d0; s_f60_acc = 0.0f; return; }   /* Clock_Init reset it (level load): follow */
+    if (d0 == s_f60_last) return;                 /* paused: the real counter did not move either */
+    s_f60_last = d0;
+    s_f60_acc += racacit_rdf(clk + 0x44u);        /* the previous tick's unscaled dt */
+    const uint32_t before = s_f60_v;
+    while (s_f60_acc >= 1.0f / 60.0f) { s_f60_v++; s_f60_acc -= 1.0f / 60.0f; }
+    s_f60_new = s_f60_v != before;
+}
+/* "Every N frames" gates (audit section 2.B): 1 on frames where the 60 Hz
+ * counter advanced, so a gate fires at most once per 1/60 s of game time;
+ * always 1 without a cap above 60. */
+static unsigned long long s_g60_calls, s_g60_pass;
+extern "C" int racacit_new60(void)
+{
+    const int r = racacit_fps_cap() <= 60 || s_f60_new;
+    s_g60_calls++; s_g60_pass += (unsigned)r;
+    return r;
+}
+extern "C" uint32_t racacit_frame60_at(uint32_t base)
+{
+    if (racacit_fps_cap() <= 60 || base != s_f60_clk || !s_f60_seeded) return vm_read32(base + 0xD0u);
+    static unsigned long long n; static unsigned long long t0;
+    if (getenv("RACACIT_CLOCK_LOG")) {
+        n++;
+        const unsigned long long w = (unsigned long long)std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        if (!t0) t0 = w;
+        if (w - t0 >= 5) { fprintf(stderr, "[frame60] v60 %u real %u, %llu reads, gates %llu due / %llu fired in 5 s%c", s_f60_v, vm_read32(base + 0xD0u), n, s_g60_calls, s_g60_pass, 10); t0 = w; n = 0; s_g60_calls = s_g60_pass = 0; }
+    }
+    return s_f60_v;
+}
+
 extern "C" void racacit_clock_tick(ppu_context* ctx)
 {
     static int cap = -1;
     if (cap < 0) { const char* e = getenv("RACACIT_FPS_CAP"); cap = e ? atoi(e) : 0; }
     static int log = -1;
-    if (log < 0) log = (cap > 60 || getenv("RACACIT_CLOCK_LOG")) ? 1 : 0;
+    if (log < 0) log = (cap > 60 || (cap > 0 && cap < 60) || getenv("RACACIT_CLOCK_LOG")) ? 1 : 0;
     const uint32_t clk = (uint32_t)ctx->gpr[3];
+    racacit_frame60_tick(clk);
     if (cap > 60) {
         const float want = 1.0f / (2.0f * (float)cap);
         if (racacit_rdf(clk + 0x04u) > want) racacit_wrf(clk + 0x04u, want);
@@ -2627,4 +2774,54 @@ extern "C" void racacit_clock_tick(ppu_context* ctx)
             (r - r0) / dw, (g - g0) / dw, (double)(n - n0) / dw, racacit_rdf(clk + 0x04u), racacit_rdf(clk + 0x08u),
             vm_read32(clk), 10);
     w0 = w; r0 = r; g0 = g; n0 = n;
+}
+
+/* ---------------------------------------------------------------------------
+ * Frame-rate unlock, step 3: the CPU frame limiter func_005C4C00 (1.20
+ * func_005C54A0). It waits until a timebase deadline at display+0x2D8
+ * (display = TOC-0x5120 -> -0x7FF8 on both versions), then advances it by
+ * f1 x display+0x20 (the refresh period, 1/59.94 s), or restarts it from now
+ * if the frame was late; display+0x2E0 keeps the slack. With RACACIT_FPS_CAP
+ * above 60 this replaces it at its head with the same logic at a 1/cap period
+ * (f1 keeps half-rate states at half rate) and a host sleep instead of the
+ * game's 50 us polls. A cap under 60 (RACACIT_FPS_CAP=30, the launcher's
+ * steady-30 option, 2026-11-23) runs the same logic with a period of at least
+ * 1/cap (game time is unaffected: the clock's max_dt is 0.08 s, RACACIT_CLOCK_LOG).
+ * Returns 0 (run the original) otherwise. On both the disc and update 1.20, like the rest of
+ * the unlock (1.20 gets this hook from versions/BCUS98124-1.20-hooks.json, func_005C54A0).
+ * -------------------------------------------------------------------------*/
+#include <thread>
+extern "C" uint64_t ppu_timebase_now(void);
+static uint64_t racacit_rd64(uint32_t ea) { return ((uint64_t)vm_read32(ea) << 32) | vm_read32(ea + 4u); }
+static void racacit_wr64(uint32_t ea, uint64_t v) { vm_write32(ea, (uint32_t)(v >> 32)); vm_write32(ea + 4u, (uint32_t)v); }
+extern "C" int racacit_frame_limit(ppu_context* ctx)
+{
+    const int cap = racacit_fps_cap();
+    if (cap <= 0 || cap == 60) return 0;
+    const uint32_t disp = vm_read32(vm_read32((uint32_t)ctx->gpr[2] - 0x5120u) - 0x7FF8u);
+    const uint64_t tb_hz = 79800000ull;
+    /* Above 60: f1 refresh periods of 1/cap. Under 60 (the steady-30 option for
+     * PCs that cannot hold 60: an even 2 refreshes a frame on a 60 Hz screen
+     * instead of 20-25 ms frames that judder between 1 and 2): at least 1/cap,
+     * and the game's own f1 refresh periods when those are longer. */
+    const double secs = cap > 60 ? ctx->fpr[1] / (double)cap
+                                 : (ctx->fpr[1] / 59.94 > 1.0 / (double)cap ? ctx->fpr[1] / 59.94 : 1.0 / (double)cap);
+    const uint64_t period = (uint64_t)(secs * (double)tb_hz);
+    uint64_t now = ppu_timebase_now();
+    uint64_t dl = racacit_rd64(disp + 0x2D8u);
+    if (now < dl) {
+        racacit_wr64(disp + 0x2E0u, dl - now);
+        while (now < dl) {
+            const uint64_t left_us = (dl - now) * 1000000ull / tb_hz;
+            if (left_us > 200)
+                std::this_thread::sleep_for(std::chrono::microseconds(left_us - 100));
+            now = ppu_timebase_now();
+        }
+        dl += period;
+    } else {
+        racacit_wr64(disp + 0x2E0u, 0);
+        dl = now + period;
+    }
+    racacit_wr64(disp + 0x2D8u, dl);
+    return 1;
 }

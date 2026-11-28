@@ -29,11 +29,20 @@ On Windows, with Git Bash, Python 3.12, and one folder holding `android-ndk-r29`
 
 ```bash
 bash scripts/setup_android.sh
-PY="$PWD/tools/venv/Scripts/python -I" SKIP_DESKTOP=1 bash scripts/pipeline.sh
+RACACIT_SPU_FXBLOCKS=0 RACACIT_SPU_STFUSE=0 PY="$PWD/tools/venv/Scripts/python -I" SKIP_DESKTOP=1 bash scripts/pipeline.sh
 tools/venv/Scripts/python -I scripts/android_spu_fast.py
+tools/venv/Scripts/python -I scripts/android_spu_fast2.py
 tools/venv/Scripts/python -I scripts/upgrade-vmx-permute.py
+tools/venv/Scripts/python -I scripts/ppu_nan_first.py
 powershell -File scripts/build-android.ps1 -ToolchainsRoot <toolchains folder> -PythonExecutable "$PWD/tools/venv/Scripts/python.exe"
 ```
+
+The two `RACACIT_SPU_*=0` switches lift the SPU code in the form the Android runtime is written for
+(the Windows lift's float blocks and store fusing are left out). `android_spu_fast.py`,
+`android_spu_fast2.py` and `ppu_nan_first.py` are the Android speed passes over the lifted code;
+each leaves a module it has already done alone. The released APKs' lifted code also carries a few
+profile-picked SPU register caches (`android_spu_fast.py --regcache`) and `ctx __restrict` on the
+PPU functions, which this recipe does not add: a build from it runs the same game.
 
 The APK lands in `artifacts/`. The first build makes its own signing key
 (`android/racit-independent.keystore`, never committed); an APK installs over another only when

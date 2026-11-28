@@ -244,6 +244,7 @@ extern "C" int  rsx_null_backend_pump_messages(void);
 #  endif
 #  if defined(RACACIT_HAVE_VULKAN)
 extern "C" int  rsx_vulkan_backend_init(uint32_t w, uint32_t h, const char* title);
+extern "C" int  rsx_vulkan_prepare_shaders(void);
 extern "C" void rsx_vulkan_backend_present(void);
 extern "C" int  rsx_host_ui_modal(void);
 extern "C" unsigned long long g_rt_drain_total_us, g_rt_present_total_us;
@@ -323,6 +324,7 @@ static unsigned long long s_rt_present_us;
 extern "C" void ps3_tl_at(unsigned long long t, char ev, uint32_t a, uint32_t b);
 extern "C" void ps3_tl(char ev, uint32_t a, uint32_t b);
 extern "C" unsigned long long ps3_qpc_us(void);
+extern "C" void racit_record_present(void);   /* frame_times.cpp */
 static void present_guest_frame(void)
 {
     unsigned long long _t = rt_now_us();
@@ -333,6 +335,7 @@ static void present_guest_frame(void)
     /* This thread increments and guest threads read, so interlocked rather
      * than a volatile ++, which on arm64 is neither atomic nor a fence. */
     InterlockedIncrement(&g_frames_presented);
+    racit_record_present();   /* RACIT_FRAME_INTERVALS benchmark recorder (public PR #134) */
 }
 
 /* The FIFO walker runs on frame_clock. A guest thread that has just moved
@@ -341,8 +344,12 @@ static void present_guest_frame(void)
  * (win32_compat's events): without it the walker slept a fixed 4 ms a pass,
  * and every RSX label the guest waited on cost up to 4 ms -- 52 fps in an
  * idle menu, ~40 in play, with every thread mostly waiting. */
-#if defined(_WIN32) || defined(__ANDROID__)
+#if defined(_WIN32) || defined(__ANDROID__) || defined(__APPLE__)
 extern "C" int racacit_few_cpus(void);   /* sys_timer.c */
+#if defined(_WIN32)
+extern "C" void racacit_cpu_setup(int allow_placement);   /* sys_timer.c */
+extern "C" void racacit_cpu_role(int role);               /* sys_timer.c: 0 = the FIFO walker's quiet core */
+#endif
 static HANDLE s_walker_wake;
 static void walker_wake(void) { if (s_walker_wake) SetEvent(s_walker_wake); }
 #endif
@@ -596,6 +603,16 @@ static DWORD WINAPI frame_clock(LPVOID)
 #if defined(_WIN32) || defined(__ANDROID__)
     s_walker_wake = CreateEventA(NULL, FALSE, FALSE, NULL);
     g_gcm_wake_walker = walker_wake;
+#elif defined(__APPLE__)
+    /* The same walker as Windows and Android: spin briefly, then the wake
+     * event with a 1 ms poll. The fixed 4 ms sleep a pass it replaces held the
+     * frame-end RSX wait (005CB084, its usleep(100) polls at lr 005CB170) at
+     * ~2.7 ms of every ~16 ms frame once the game ran unlocked: 62 -> 79 FPS
+     * in gameplay, game time still 1.000x wall. RACACIT_WALKER_WAKE=0 keeps
+     * the old fixed sleep. (Tried on 2026-11-14 at ~20 FPS, GPU-bound, where
+     * it could not show.) */
+    { const char* e = getenv("RACACIT_WALKER_WAKE");
+      if (!(e && *e == '0')) { s_walker_wake = CreateEventA(NULL, FALSE, FALSE, NULL); g_gcm_wake_walker = walker_wake; } }
 #endif
 #ifdef _WIN32
     /* PS3_SAMPLE_RSX=1: the sampler profiles this thread only. */
@@ -611,6 +628,10 @@ static DWORD WINAPI frame_clock(LPVOID)
     g_racacit_walker_tid = (long)gettid();   /* racacit_lend_top_begin */
 #endif
     { char _hb[160]; snprintf(_hb, sizeof _hb, "[hosttid] %lu rsx frame clock / FIFO walker%c", (unsigned long)GetCurrentThreadId(), 10); fputs(_hb, stderr); }
+#ifdef _WIN32
+    /* A physical core of its own on SMT CPUs with 6+ cores (sys_timer.c quiet cores). */
+    racacit_cpu_role(0);
+#endif
     int rsx_ok = (rsx_backend_init(WINDOW_WIDTH, WINDOW_HEIGHT, title) == 0);
     fprintf(stderr, "[rsx] %s backend init %s\n", RSX_BACKEND_NAME,
             rsx_ok ? "OK -- window open" : "FAILED");
@@ -646,10 +667,13 @@ static DWORD WINAPI frame_clock(LPVOID)
 #if defined(_WIN32) && !defined(__ANDROID__)
         racacit_memlog(rt_now_us());
 #endif
-#if defined(_WIN32) || defined(__ANDROID__)
+#if defined(_WIN32) || defined(__ANDROID__) || defined(__APPLE__)
         /* Spin (yielding) up to ~1 ms for new FIFO work before sleeping: the
          * guest waits on RSX labels every frame, so every ms between its kick
          * and the walker starting is a ms of its frame time. */
+#ifdef __APPLE__
+        if (!s_walker_wake) Sleep(4); else
+#endif
         if (!cellGcm_fifo_pending()) {
             /* RACACIT_WALKER_SPIN_US: how long (us) to spin before sleeping. */
             static LONGLONG s_spin_us = -1;
@@ -2043,8 +2067,16 @@ static void windows_setup(int* argc, char*** argv)
      * update made pipelinecache.bin useless (rsx_vulkan_backend.c). */
     snprintf(path, sizeof path, "%s\\pipelinelist.bin", dir);
     if (!getenv("RSX_PIPELINE_LIST")) _putenv_s("RSX_PIPELINE_LIST", path);
+    /* What each pipeline's shader text was made from, so the launcher's
+     * "Prepare shaders" can make it again when a new build changed the
+     * translator (rsx_vulkan_backend.c, programlist.bin). */
+    snprintf(path, sizeof path, "%s\\programlist.bin", dir);
+    if (!getenv("RSX_PROGRAM_LIST")) _putenv_s("RSX_PROGRAM_LIST", path);
 
     if (*argc >= 2) return;
+    /* The shader prepare (RACACIT_PREPARE=1) needs no game: no search, no
+     * "Could not find the game" box. */
+    if (getenv("RACACIT_PREPARE") && getenv("RACACIT_PREPARE")[0] == '1') return;
 
     const char* cands[4] = { NULL, NULL, NULL, NULL };
     char c0[MAX_PATH * 3], c1[MAX_PATH * 3], c2[MAX_PATH * 3];
@@ -2178,6 +2210,7 @@ int main(int argc, char** argv)
     setenv("MVK_CONFIG_FAST_MATH_ENABLED", "0", 0);
     setenv("RACACIT_ASYNC_PIPELINES", "0", 0);
     setenv("RACACIT_HLE_SPURS", "1", 0);
+    setenv("RACACIT_KBM", "1", 0);
     setenv("PS3RECOMP_VK_WINDOW", "1", 0);
 #endif
 #ifdef __ANDROID__
@@ -2186,10 +2219,18 @@ int main(int argc, char** argv)
 #if defined(_WIN32) && (defined(__x86_64__) || defined(_M_X64))
     if (!racacit_cpu_ok()) { racacit_cpu_refuse(); return 1; }
 #endif
+#if defined(_WIN32) && defined(RACACIT_HAVE_VULKAN)
+    /* RACACIT_PREPARE=1 (the launcher's "Prepare shaders"): no window -- the
+     * launcher draws the progress from shaders.progress. */
+    const int prepare_only = getenv("RACACIT_PREPARE") && getenv("RACACIT_PREPARE")[0] == '1';
+    if (prepare_only) _putenv_s("PS3RECOMP_VK_WINDOW", "0");
+#else
+    const int prepare_only = 0;
+#endif
 #if defined(_WIN32)
     windows_setup(&argc, &argv);
 #endif
-    if (argc < 2) {
+    if (argc < 2 && !prepare_only) {
         printf("usage: %s <PPU ELF>\n", argv[0]);
         return 2;
     }
@@ -2220,7 +2261,21 @@ int main(int argc, char** argv)
         const char* build = "standard build (RaCACiT.exe, AVX2)";
 #endif
         printf("[racacit] %s; CPU: %s, %lu logical processors\n", build, *b ? b : "unknown",
-               (unsigned long)si.dwNumberOfProcessors); }
+               (unsigned long)si.dwNumberOfProcessors);
+        /* The Windows build (RtlGetVersion: GetVersionEx answers 6.2 to an exe
+         * without a manifest entry): hybrid CPUs schedule very differently on
+         * Windows 10 and 11. */
+        {   typedef LONG (WINAPI* rgv_t)(OSVERSIONINFOW*);
+            OSVERSIONINFOW vi; memset(&vi, 0, sizeof vi); vi.dwOSVersionInfoSize = sizeof vi;
+            HMODULE nt = GetModuleHandleA("ntdll.dll");
+            rgv_t rgv = nt ? (rgv_t)(void*)GetProcAddress(nt, "RtlGetVersion") : NULL;
+            if (rgv && rgv(&vi) == 0)
+                printf("[racacit] Windows %lu.%lu build %lu%s\n", (unsigned long)vi.dwMajorVersion,
+                       (unsigned long)vi.dwMinorVersion, (unsigned long)vi.dwBuildNumber,
+                       vi.dwMajorVersion == 10 && vi.dwBuildNumber >= 22000 ? " (Windows 11)" : ""); }
+        /* Core classes and chiplets, the wait style, and on a hybrid CPU the
+         * game kept on its fast cores (sys_timer.c). Before any game thread. */
+        racacit_cpu_setup(!prepare_only); }
 #endif
 
     if (!alloc_guest_vm()) {

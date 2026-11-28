@@ -12,7 +12,9 @@ std::atomic<uint64_t> follow_time{0};
 extern "C" int racit_camera_follow_active(uint64_t now)
 {
     const uint64_t last = follow_time.load();
-    return last > 0 && (now < last || now - last < 1000000000ULL);
+    /* 250 ms (public PR #66): longer than a slow frame, short enough that motion made in a
+     * menu or another camera is dropped instead of turning the camera when play resumes. */
+    return last > 0 && (now < last || now - last < 250000000ULL);
 }
 extern "C" void racit_camera_feed(uint64_t now, int dx, int dy, int capture, float sensitivity, int invert)
 {

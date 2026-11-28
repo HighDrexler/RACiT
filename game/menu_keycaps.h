@@ -112,7 +112,8 @@ static void racit_publish_menu_keyboard(ppu_context* ctx, uint32_t movie_offset 
         if (report) fprintf(stderr, "[menu-keycaps] frame movie=%08X table=%08X descriptor=%08X procedure=%08X: receiver read failed\n", movie, table, descriptor, procedure);
         return;
     }
-    const bool keyboard = racit_keyboard_prompts_active() != 0;
+    const char* enabled = getenv("RACACIT_PROMPT_SWAP");
+    const bool keyboard = !(enabled && *enabled == '0') && racit_keyboard_prompts_active() != 0;
     /* Fallbacks: cellPad.c's default bindings (k_kb), first key shown. */
     struct Binding { const char* field; const char* binding; const char* fallback; };
     static const Binding bindings[] = {

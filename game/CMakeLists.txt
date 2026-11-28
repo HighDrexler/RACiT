@@ -210,9 +210,11 @@ if(PORT_ENABLE_SPU)
 endif()
 
 # Real libsre (cellSpurs) LLE -- present only after scripts/lift_libsre.py.
+set(PRX_DIR "${CMAKE_CURRENT_SOURCE_DIR}/prx" CACHE PATH
+    "Directory holding firmware-derived PPU sources for this game build")
 file(GLOB LIBSRE_SOURCES CONFIGURE_DEPENDS
-    "${CMAKE_CURRENT_SOURCE_DIR}/prx/libsre/*.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/prx/libsre_module.c")
+    "${PRX_DIR}/libsre/*.cpp"
+    "${PRX_DIR}/libsre_module.c")
 if(LIBSRE_SOURCES)
     message(STATUS "libsre LLE:      enabled")
 endif()
@@ -238,14 +240,17 @@ if(RACACIT_DISCORD_APP_ID)
     set_source_files_properties(discord_rpc.cpp PROPERTIES
         COMPILE_DEFINITIONS "RACACIT_DISCORD_APP_ID=${RACACIT_DISCORD_APP_ID}")
 endif()
+set(HOST_DIR "${CMAKE_CURRENT_SOURCE_DIR}" CACHE PATH
+    "Directory holding version-selected main.cpp and stubs.cpp")
 target_sources(${PROJECT_NAME} PRIVATE
-    main.cpp
+    "${HOST_DIR}/main.cpp"
     ${ZLIB_SOURCES}
-    stubs.cpp
+    "${HOST_DIR}/stubs.cpp"
     button_prompts.cpp
     menu_archive.cpp
     desktop_mouse.cpp
     discord_rpc.cpp
+    frame_times.cpp
     ${LIBSRE_SOURCES}
     ${PS3RECOMP_SCAFFOLD}
     ${HLE_NID_TABLE}
@@ -265,6 +270,9 @@ endif()
 #   SPU_LS_DIAG=0       -- local-store accesses without the runtime's watch and
 #                          probe hooks (diagnostics; each was a possible call on
 #                          every access, which spills the register file).
+#   SPU_LS_IN_CONTEXT=1 -- (Apple arm64) local-store accesses at ctx->ls_store, so
+#                          an SPU store is visibly not a register-file store
+#                          (spu_context.h); this title creates no raw SPUs.
 #   -O3                 -- the SPU job code is the main thread's critical path
 #                          (it waits on the job chain every frame).
 if(SPU_SOURCES)
@@ -279,6 +287,10 @@ if(SPU_SOURCES)
             set_source_files_properties(${SPU_SOURCES} PROPERTIES COMPILE_OPTIONS "-O3;-msse4.1;-ffp-contract=off;${RACACIT_SIMD_FLAGS};${RACACIT_LIFTED_FLAGS}")
         else()
             set_source_files_properties(${SPU_SOURCES} PROPERTIES COMPILE_OPTIONS "-O2")
+            if(APPLE)
+                set_source_files_properties(${SPU_SOURCES} PROPERTIES
+                    COMPILE_DEFINITIONS "SPU_USE_DISPATCH_MT;SPU_LS_DIAG=0;SPU_LS_IN_CONTEXT=1")
+            endif()
         endif()
     endif()
 endif()
@@ -428,7 +440,7 @@ endif()
 if(PS3RECOMP_RSX_VULKAN)
     # On main.cpp alone: a target-wide define would change the command line of
     # every lifted translation unit and rebuild hours of generated code.
-    set_property(SOURCE main.cpp APPEND PROPERTY COMPILE_DEFINITIONS RACACIT_HAVE_VULKAN=1)
+    set_property(SOURCE "${HOST_DIR}/main.cpp" APPEND PROPERTY COMPILE_DEFINITIONS RACACIT_HAVE_VULKAN=1)
 endif()
 
 # The lifted translation units are machine-generated and can run to hundreds of
@@ -449,6 +461,13 @@ endif()
 set(RACACIT_HOT_PPU "")
 if(RACACIT_HOT AND EXISTS "${CMAKE_CURRENT_LIST_DIR}/hot_ppu.h")
     set(RACACIT_HOT_PPU "-include;${RACACIT_HOT_DIR}/hot_ppu.h")
+endif()
+# macOS: the same idea through the linker. mac/macos.order lists the functions a
+# profile of the gameplay route sampled (lifted PPU and SPU code and the runtime
+# they call), hottest first; ld64 places them together. Names missing from a
+# build are skipped. Only where code sits changes.
+if(APPLE AND EXISTS "${CMAKE_CURRENT_LIST_DIR}/../mac/macos.order")
+    target_link_options(${PROJECT_NAME} PRIVATE "LINKER:-order_file,${CMAKE_CURRENT_LIST_DIR}/../mac/macos.order")
 endif()
 if(MSVC)
     set_source_files_properties(${RECOMP_SOURCES} PROPERTIES

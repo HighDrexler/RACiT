@@ -15,8 +15,8 @@ android {
         applicationId 'com.racit.android.independent'
         minSdk 29            // native thread-local storage (API 29); Vulkan, AAudio
         targetSdk 36
-        versionCode 12205
-        versionName '0.1.0'
+        versionCode 12302
+        versionName '0.2.0.2'
         ndk { abiFilters 'arm64-v8a' }
     }
 

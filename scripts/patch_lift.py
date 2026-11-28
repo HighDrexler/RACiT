@@ -33,33 +33,66 @@ Usage: scripts/patch_lift.py [game/src/recomp]
 import glob, os, re, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, 'scripts'))
+from game_version import identify_profile
 
 # An update of the same title can have a different code and data layout.
 # Check the decrypted executable before any generated source is touched.
-def check_game_profile(elf, selected='auto'):
-    import hashlib, json
-    with open(os.path.join(ROOT, 'versions', 'profiles.json'), encoding='utf-8') as f:
-        profiles = json.load(f)['profiles']
-    digest = hashlib.sha256()
-    with open(elf, 'rb') as f:
-        for block in iter(lambda: f.read(1024 * 1024), b''):
-            digest.update(block)
-    checksum = digest.hexdigest()
-    actual = next((p for p in profiles if p['elf_sha256'] == checksum), None)
-    if actual is None:
-        sys.exit('Unrecognized EBOOT.ELF (SHA-256 ' + checksum + '). No matching game profile; generation stopped.')
-    if selected != 'auto' and selected != actual['id']:
-        sys.exit('Selected ' + selected + ' but the executable is ' + actual['id'] + '. Generation stopped.')
-    if not actual['buildable']:
-        sys.exit('Recognized ' + actual['id'] + ', but this source tree cannot build it: ' + actual['status'])
-    print('Game profile: ' + actual['id'] + ' (SHA-256 ' + checksum + ')')
+def check_game_profile(elf, selected='auto', require_buildable=True, quiet=False):
+    try:
+        actual = identify_profile(elf, selected, require_buildable=require_buildable)
+    except ValueError as error:
+        sys.exit(str(error) + '. Generation stopped.')
+    if not quiet:
+        print('Game profile: ' + actual['id'] + ' (SHA-256 ' + actual['elf_sha256'] + ')')
+    return actual
 
 if len(sys.argv) > 1 and sys.argv[1] == '--check-profile':
     if len(sys.argv) not in (3, 4):
         sys.exit('usage: patch_lift.py --check-profile EBOOT.ELF [PROFILE_ID|auto]')
     check_game_profile(sys.argv[2], sys.argv[3] if len(sys.argv) == 4 else 'auto')
     sys.exit(0)
-RECOMP = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "game", "src", "recomp")
+
+if len(sys.argv) > 1 and sys.argv[1] == '--identify-profile':
+    if len(sys.argv) not in (3, 4):
+        sys.exit('usage: patch_lift.py --identify-profile EBOOT.ELF [PROFILE_ID|auto]')
+    profile = check_game_profile(sys.argv[2], sys.argv[3] if len(sys.argv) == 4 else 'auto',
+                                 require_buildable=False, quiet=True)
+    print(profile['id'])
+    sys.exit(0)
+
+# Existing callers may still patch the disc lift by directory alone. The
+# pipeline supplies the executable so updates select their own complete recipe.
+if len(sys.argv) > 1 and sys.argv[1] == '--apply-update-hooks':
+    if len(sys.argv) != 4:
+        sys.exit('usage: patch_lift.py --apply-update-hooks RECOMP EBOOT.ELF')
+    sys.path.insert(0, os.path.join(ROOT, 'scripts'))
+    from update120_hooks import apply_update120_hooks
+    apply_update120_hooks(sys.argv[2], sys.argv[3])
+    sys.exit(0)
+
+import argparse
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('recomp', nargs='?', default=os.path.join(ROOT, 'game', 'src', 'recomp'))
+parser.add_argument('--elf', help='decrypted executable used for this lift')
+parser.add_argument('--profile', default=os.environ.get('RACACIT_GAME_PROFILE', 'auto'))
+options = parser.parse_args()
+RECOMP = options.recomp
+if options.elf:
+    profile = check_game_profile(options.elf, options.profile, require_buildable=False)
+    if profile['id'] == 'BCUS98124-1.20':
+        sys.path.insert(0, os.path.join(ROOT, 'scripts'))
+        from update120_hooks import apply_update120_hooks
+        apply_update120_hooks(RECOMP, options.elf)
+        import subprocess
+        subprocess.run([sys.executable, os.path.join(ROOT, 'scripts', 'fix_vmx_alias.py'), RECOMP],
+                       check=True)
+        sys.exit(0)
+    # A disc 1.00: the USA one here, the European one in scripts/retarget.py's copy.
+    if profile['app_version'] != '1.00' or not profile.get('buildable'):
+        sys.exit('No PPU hook implementation for ' + profile['id'])
+elif options.profile != 'auto':
+    parser.error('--profile requires --elf to verify the selected executable')
 
 # The disc this tree builds: scripts/retarget.py marks its copy's profile buildable.
 import json
@@ -584,9 +617,11 @@ def patch_file(path):
             src = src[:i] + 'extern "C" int racacit_skillpoint_blocked(uint32_t id);\n' + src[i:]
         changed = True
 
-    # 21. Boot straight to PRESS START (game/stubs.cpp racacit_front_end_cards): right
-    #     after func_004C8898 hands the Scaleform main menu its startMode (the movie's
-    #     SetVariable, name from r30 - 0x7F28), the intro cards' list is emptied.
+    # 21. Boot straight to the main menu (game/stubs.cpp racacit_front_end_cards and
+    #     racacit_front_end_menu): right after func_004C8898 hands the Scaleform main
+    #     menu its startMode (the movie's SetVariable, name from r30 - 0x7F28), the
+    #     intro cards' list is emptied; right after it invokes the movie's Init (the
+    #     function's last call), PRESS START is skipped.
     sp = func_span(src, 'func_004C8898')
     if sp and 'racacit_front_end_cards' not in src[sp[0]:sp[2]]:
         a_, body_, end_ = sp
@@ -609,11 +644,30 @@ def patch_file(path):
             changed = True
         else:
             print('patch_lift #21: func_004C8898: startMode SetVariable not found once (%d)' % len(hits))
+    sp = func_span(src, 'func_004C8898')
+    if sp and 'racacit_front_end_menu' not in src[sp[0]:sp[2]]:
+        a_, body_, end_ = sp
+        fn = src[a_:end_]
+        # The Invoke of "Init" is the last call before the epilogue.
+        init = re.compile(r'        ctx->lr = 0x[0-9A-F]+; func_[0-9A-F]{8}\(ctx\); DRAIN_TRAMPOLINE\(ctx\);\n'
+                          r'        /\* nop \*/;\n'
+                          r'(?=loc_[0-9A-F]{8}:\n        ctx->gpr\[3\] = vm_read64\(ctx->gpr\[1\] \+ 0x140\);\n)')
+        hits = list(init.finditer(fn))
+        if len(hits) == 1:
+            cut = hits[0].end()
+            fn = fn[:cut] + '        racacit_front_end_menu(ctx);   /* racacit */\n' + fn[cut:]
+            src = src[:a_] + fn + src[end_:]
+            if 'void racacit_front_end_menu' not in src:
+                i = src.index('\n', src.index('#include')) + 1
+                src = src[:i] + 'extern "C" void racacit_front_end_menu(ppu_context* ctx);\n' + src[i:]
+            changed = True
+        else:
+            print('patch_lift #21: func_004C8898: Init call not found once (%d)' % len(hits))
 
     # 22. The mouse turns the follow camera directly (game/desktop_mouse.cpp; public PR #34,
     #     petralithic). In func_000459D4, f1 before func_00633C34 is the game's yaw step and
     #     f31 before the pitch subtraction its pitch target; while the mouse moved since the
-    #     last update, those come from the mouse instead, the pitch clamped to the game's own
+    #     last update, the mouse adds to them (public PR #66), the pitch clamped to the game's own
     #     limits ([r30-0x7F24], [r30-0x7F1C]). A still mouse returns 0, so a controller's
     #     right stick keeps turning the camera with the mouse captured.
     sp = func_span(src, 'func_000459D4')
@@ -626,13 +680,13 @@ def patch_file(path):
              '        double mouse_angles[2] = {};   /* racacit */\n'
              '        const int mouse_direct = racit_camera_take(mouse_angles, (uint64_t)((double)SDL_GetPerformanceCounter() * 1000000000.0 / (double)SDL_GetPerformanceFrequency()));\n'),
             ('        ctx->lr = 0x00045D6C; func_00633C34(ctx); DRAIN_TRAMPOLINE(ctx);\n',
-             '        if (mouse_direct) ctx->fpr[1] = -mouse_angles[0];   /* racacit */\n'
+             '        if (mouse_direct) ctx->fpr[1] -= mouse_angles[0];   /* racacit: added to the stick turn (PR #66) */\n'
              '        ctx->lr = 0x00045D6C; func_00633C34(ctx); DRAIN_TRAMPOLINE(ctx);\n'),
             ('        ctx->fpr[3] = ppu_fp_single(ppu_fsub(ctx->fpr[31], ctx->fpr[1]));\n',
              '        if (mouse_direct) {   /* racacit */\n'
              '            uint32_t lb = vm_read32(ctx->gpr[30] - 0x7F24), hb = vm_read32(ctx->gpr[30] - 0x7F1C);\n'
              '            float lo, hi; memcpy(&lo, &lb, 4); memcpy(&hi, &hb, 4);\n'
-             '            const double target = mouse_angles[1] - ctx->fpr[1];\n'
+             '            const double target = ctx->fpr[31] + mouse_angles[1] - ctx->fpr[1];\n'
              '            ctx->fpr[31] = fmin(fmax(target, lo), hi) + ctx->fpr[1];\n'
              '        }\n'
              '        ctx->fpr[3] = ppu_fp_single(ppu_fsub(ctx->fpr[31], ctx->fpr[1]));\n'),
@@ -788,6 +842,78 @@ def patch_file(path):
             src = src[:i] + 'extern "C" void racacit_clock_tick(ppu_context* ctx);\n' + src[i:]
         changed = True
 
+    # 28. Frame-rate unlock: code that counts frames as time (game/stubs.cpp
+    #     racacit_frame60_at / racacit_new60; docs: the stubs comment). In the
+    #     AI/behaviour family below every clock+0xD0 load reads a counter at
+    #     60 per second of unpaused time, and the "every N frames" gates fire
+    #     at most once per 1/60 s. Both are the original behaviour unless
+    #     RACACIT_FPS_CAP is above 60. Counts are the disc's; another lift
+    #     whose functions differ stops the build. Public PR #59 (petralithic); USA disc only.
+    F60_LOADS = {'func_000106FC': 1, 'func_000119A8': 1, 'func_00012F40': 2, 'func_00016B6C': 2,
+                 'func_00016F14': 1, 'func_00018E54': 1, 'func_000190C0': 1, 'func_00019160': 3,
+                 'func_0001BFD8': 15, 'func_0001F694': 1, 'func_0001FD68': 1, 'func_0001FE0C': 1,
+                 'func_0001FF64': 2, 'func_00020DCC': 2, 'func_00022798': 1, 'func_00023DE4': 2}
+    G60_GATES = {'func_00023DE4': 2, 'func_00022798': 1, 'func_00012F40': 2, 'func_00019160': 2,
+                 'func_00018E54': 1, 'func_00016B6C': 2, 'func_00016F14': 1, 'func_0001BFD8': 1,
+                 'func_000BC018': 1, 'func_00148DA4': 1, 'func_0010DDB8': 1, 'func_00169EDC': 1,
+                 'func_002B7828': 1, 'func_002B9B88': 1, 'func_002BF4F0': 1, 'func_00384858': 1,
+                 'func_00385E78': 1, 'func_004735E8': 1, 'func_0046DB90': 1}
+    f60_load = re.compile(r'vm_read32\(ctx->gpr\[(\d+)\] \+ 0xD0\)')
+    f60_any = re.compile(r'(?:vm_read32\(ctx->gpr\[\d+\] \+ 0xD0\)|racacit_frame60_at\(\(uint32_t\)ctx->gpr\[\d+\]\))')
+    f60_br = re.compile(r'^\s*if \(\(!\(\(ctx->cr >> \d+\) & 2\)\)\) goto loc_[0-9A-F]+;$')
+    for fname in (sorted(set(F60_LOADS) | set(G60_GATES)) if BUILD_TITLE == 'BCUS98124' else ()):
+        sp = func_span(src, fname)
+        if not sp or 'racacit_new60' in src[sp[0]:sp[2]] or 'racacit_frame60_at' in src[sp[0]:sp[2]]:
+            continue
+        a_, body_, end_ = sp
+        lines = src[a_:end_].split('\n')
+        gates = 0
+        if fname in G60_GATES:
+            for k, ln in enumerate(lines):
+                if not f60_any.search(ln):
+                    continue
+                for j in range(k + 1, min(k + 9, len(lines))):
+                    if not f60_br.match(lines[j]):
+                        continue
+                    between = '\n'.join(lines[k:j])
+                    if '/_b' in between or re.search(r'& 0x[0-9A-F]+\b|ppc_rlwinm', between):
+                        lines[j] = lines[j].replace(') goto ', ' || !racacit_new60()) goto ', 1)
+                        lines[k] = f60_load.sub(lambda m: 'racacit_frame60_at((uint32_t)ctx->gpr[%s])' % m.group(1), lines[k])
+                        gates += 1
+                    break
+            if gates != G60_GATES[fname]:
+                sys.exit('patch_lift #28: %s: %d frame gates, expected %d -- not the disc\'s function' % (fname, gates, G60_GATES[fname]))
+        fn = '\n'.join(lines)
+        if fname in F60_LOADS:
+            n = len(f60_load.findall(fn)) + fn.count('racacit_frame60_at(')
+            if n != F60_LOADS[fname]:
+                sys.exit('patch_lift #28: %s: %d frame-counter loads, expected %d -- not the disc\'s function' % (fname, n, F60_LOADS[fname]))
+            fn = f60_load.sub(lambda m: 'racacit_frame60_at((uint32_t)ctx->gpr[%s])' % m.group(1), fn)
+        src = src[:a_] + fn + src[end_:]
+        for decl in ('extern "C" uint32_t racacit_frame60_at(uint32_t base);', 'extern "C" int racacit_new60(void);'):
+            if decl not in src:
+                i = src.index('\n', src.index('#include')) + 1
+                src = src[:i] + decl + '\n' + src[i:]
+        changed = True
+
+    # 29. Frame-rate unlock, the CPU frame limiter (game/stubs.cpp
+    #     racacit_frame_limit): at the head of func_005C4C00, which waits for a
+    #     1/59.94 s deadline in the states that use it. Above a 60 FPS cap the
+    #     hook runs the same deadline logic at 1/cap and returns; otherwise it
+    #     returns 0 and the original runs.
+    sp = func_span(src, 'func_005C4C00') if BUILD_TITLE == 'BCUS98124' else None
+    if sp and 'racacit_frame_limit' not in src[sp[0]:sp[2]]:
+        a_, body_, end_ = sp
+        fn = src[body_:end_]
+        if 'ctx->gpr[2] + -0x5120' not in fn or 'ctx->gpr[30] + -0x7FF8' not in fn or '+ 0x2D8)' not in fn:
+            sys.exit('patch_lift #29: func_005C4C00 does not read the display deadline: not the frame limiter '
+                     'on this disc. Stopping rather than hooking the wrong function.')
+        src = src[:body_] + '        if (racacit_frame_limit(ctx)) return;   /* racacit: frame-rate unlock */\n' + src[body_:]
+        if 'int racacit_frame_limit' not in src:
+            i = src.index('\n', src.index('#include')) + 1
+            src = src[:i] + 'extern "C" int racacit_frame_limit(ppu_context* ctx);\n' + src[i:]
+        changed = True
+
     if (('racacit_jb_push(' in src or 'racacit_longjmp(' in src)
             and 'racacit: guest setjmp' not in src):
         # declarations after the first include
@@ -814,7 +940,7 @@ print(f'{n} file(s) patched')
 #     sounds out of its mix. The controller has its own player now
 #     (tools/ps3recomp/libs/audio/ds_player.c): an older patched lift has
 #     those hook calls removed.
-SPU_DIR = os.path.join(ROOT, 'game', 'spu')
+SPU_DIR = os.environ.get('RACACIT_SPU_DIR', os.path.join(ROOT, 'game', 'spu'))
 for lift in ('sub_BFD480_04000', 'spu_0001_at_00BED400'):
     p = os.path.join(SPU_DIR, lift, 'spu_recomp.c')
     if not os.path.exists(p):

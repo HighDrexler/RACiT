@@ -9,17 +9,19 @@ import os
 import struct
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+OUT_ROOT = os.environ.get('RACACIT_OUT', os.path.join(ROOT, 'out'))
+ELF_STEM = os.environ.get('RACACIT_ELF_STEM', 'EBOOT')
 
 
 class Image:
     def __init__(self, elf=None):
-        elf = elf or os.path.join(ROOT, "input", "EBOOT.ELF")
+        elf = elf or os.environ.get('RACACIT_ELF', os.path.join(ROOT, "input", "EBOOT.ELF"))
         self.data = open(elf, "rb").read()
         self.segs = []
-        for s in json.load(open(os.path.join(ROOT, "out", "EBOOT.image.json"))):
+        for s in json.load(open(os.path.join(OUT_ROOT, ELF_STEM + ".image.json"))):
             self.segs.append((int(s["vaddr"], 16), int(s["filesz"], 16),
                               int(s["file_offset"], 16)))
-        ld = json.load(open(os.path.join(ROOT, "out", "EBOOT.loader.json")))
+        ld = json.load(open(os.path.join(OUT_ROOT, ELF_STEM + ".loader.json")))
         self.toc = int(ld["module_toc"], 16)
 
     def read(self, va, n):
