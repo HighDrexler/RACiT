@@ -1,5 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index a39405d6..8b01952e 100644
+index a39405d6..1af1b517 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -47,12 +47,9 @@ list(FILTER HLE_SOURCES EXCLUDE REGEX "/tests/")
@@ -166,7 +166,22 @@ index a39405d6..8b01952e 100644
  elseif(MSVC)
      # Real cl.exe -- clang-cl reports its id as Clang and is handled above.
      #
-@@ -568,7 +642,7 @@ endif()
+@@ -488,6 +562,14 @@ if(PS3RECOMP_BUILD_TESTS)
+         add_test(NAME spu_lockline_wait COMMAND test_spu_lockline_wait)
+         set_tests_properties(spu_lockline_wait PROPERTIES TIMEOUT 15)
+ 
++        add_executable(test_spu_lockline_unregister
++            runtime/spu/tests/test_spu_lockline_unregister.c)
++        target_include_directories(test_spu_lockline_unregister PRIVATE include)
++        target_compile_options(test_spu_lockline_unregister PRIVATE -UNDEBUG)
++        target_link_libraries(test_spu_lockline_unregister PRIVATE Threads::Threads)
++        add_test(NAME spu_lockline_unregister COMMAND test_spu_lockline_unregister)
++        set_tests_properties(spu_lockline_unregister PROPERTIES TIMEOUT 60)
++
+     endif()
+     add_executable(test_rsx_present_policy tests/test_rsx_present_policy.c)
+     target_include_directories(test_rsx_present_policy PRIVATE
+@@ -568,7 +650,7 @@ endif()
  # run. Builds on any POSIX host: it picks Metal on Apple and the null backend's
  # headless software path everywhere else, so Linux -- which has no real backend
  # yet -- can still run the whole guest command stream end to end in CI.
@@ -175,7 +190,7 @@ index a39405d6..8b01952e 100644
      add_executable(ps3recomp_host
          runtime/host/host_posix.c
          runtime/host/host_stubs.c
-@@ -716,7 +790,7 @@ endif()
+@@ -716,7 +798,7 @@ endif()
  #
  # The HLE NID table is generated exactly as a port generates it, so the smoke
  # title's firmware imports resolve through the same bridge a game's do.
@@ -35550,10 +35565,18 @@ index 84b7ac96..34842462 100644
 +    }
 +}
 diff --git a/runtime/spu/spu_coherency.c b/runtime/spu/spu_coherency.c
-index 10a9f119..90ab186b 100644
+index 10a9f119..c4226500 100644
 --- a/runtime/spu/spu_coherency.c
 +++ b/runtime/spu/spu_coherency.c
-@@ -32,60 +32,155 @@ extern "C" {
+@@ -12,6 +12,7 @@
+  */
+ 
+ #include <stdlib.h>
++#include <string.h>
+ #include "spu_coherency.h"
+ #include "spu_coh_bitmap.h"
+ 
+@@ -32,60 +33,161 @@ extern "C" {
   * exclusion semantics, now shared. MSVC uses a bounded polite spin loop;
   * POSIX spins briefly and then parks on a mutex (see below).
   * ===========================================================================*/
@@ -35575,10 +35598,11 @@ index 10a9f119..90ab186b 100644
 +#define SPU_LL_WAKE_MAX 16
 +static spu_context* g_ll_wake[SPU_LL_WAKE_MAX];   /* guarded by g_lockline */
 +static unsigned g_ll_wake_n;                      /* guarded by g_lockline */
-+/* Wakes taken from the list and not yet run. The list holds contexts that can
-+ * live on a job's stack: spu_coh_unregister waits for this to drain after it
-+ * leaves the registry, so no wake runs on a context that is gone. */
-+static atomic_uint g_ll_waking;
++/* The list holds contexts that can live on a job's stack. Each one taken from it
++ * counts in that context's ll_wake_refs until its wake has run, and
++ * spu_coh_unregister waits for its own context's count after it leaves the
++ * registry, so no wake runs on a context that is gone, and an unregister never
++ * waits on other contexts' wakes. */
 +static _Atomic(uintptr_t) g_ll_owner;
 +#if defined(_WIN32)
 +static inline uintptr_t spu_ll_self(void);
@@ -35590,22 +35614,27 @@ index 10a9f119..90ab186b 100644
 +static inline unsigned spu_ll_take_wakes(spu_context** out)
 +{
 +    const unsigned n = g_ll_wake_n;
-+    for (unsigned i = 0; i < n; i++) out[i] = g_ll_wake[i];
++    for (unsigned i = 0; i < n; i++) {
++        out[i] = g_ll_wake[i];
++        __atomic_fetch_add(&out[i]->ll_wake_refs, 1u, __ATOMIC_RELAXED);   /* published by the unlock's release */
++    }
 +    g_ll_wake_n = 0;
-+    if (n) atomic_fetch_add_explicit(&g_ll_waking, 1, memory_order_relaxed);   /* published by the unlock's release */
 +    atomic_store_explicit(&g_ll_owner, 0, memory_order_relaxed);
 +    return n;
 +}
 +static inline void spu_ll_run_wakes(spu_context* const* w, unsigned n)
 +{
-+    if (!n) return;
-+    for (unsigned i = 0; i < n; i++) spu_ch_wake(w[i]);
-+    atomic_fetch_sub_explicit(&g_ll_waking, 1, memory_order_release);
++    for (unsigned i = 0; i < n; i++) {
++        spu_ch_wake(w[i]);
++        __atomic_fetch_sub(&w[i]->ll_wake_refs, 1u, __ATOMIC_RELEASE);   /* the last touch of w[i] */
++    }
 +}
 +static inline void spu_ll_pause(void);
-+static void spu_ll_wait_wakes(void)
++/* After ctx left the registry (lock-line lock released since), only wakes
++ * already taken can still name it. */
++static void spu_ll_wait_ctx(const spu_context* ctx)
 +{
-+    while (atomic_load_explicit(&g_ll_waking, memory_order_acquire)) spu_ll_pause();
++    while (__atomic_load_n(&ctx->ll_wake_refs, __ATOMIC_ACQUIRE)) spu_ll_pause();
 +}
 +static void spu_ll_wake_later(spu_context* c)
 +{
@@ -35752,7 +35781,7 @@ index 10a9f119..90ab186b 100644
  {
  #if defined(__APPLE__)
      return clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-@@ -95,26 +190,35 @@ static inline uint64_t spu_lockline_now_ns(void)
+@@ -95,26 +197,35 @@ static inline uint64_t spu_lockline_now_ns(void)
      return (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
  #endif
  }
@@ -35803,7 +35832,7 @@ index 10a9f119..90ab186b 100644
  #endif
  
  /* ===========================================================================
-@@ -132,14 +236,18 @@ void spu_lockline_unlock(void) { if (pthread_mutex_unlock(&g_lockline)) abort();
+@@ -132,14 +243,18 @@ void spu_lockline_unlock(void) { if (pthread_mutex_unlock(&g_lockline)) abort();
  #define SPU_COH_LINES       (1u << (32 - SPU_COH_LINE_SHIFT))   /* 2^25 lines */
  #define SPU_COH_BITMAP_SZ   (SPU_COH_LINES / 8)                 /* 4 MiB */
  
@@ -35824,7 +35853,7 @@ index 10a9f119..90ab186b 100644
  
  /* Every live virtual context may retain a reservation between scheduling
   * quanta; physical SPU count is not a bound on this set. All access is under
-@@ -160,6 +268,14 @@ static spu_coh_watch* s_coh_watches;
+@@ -160,6 +275,14 @@ static spu_coh_watch* s_coh_watches;
  
  unsigned long g_spu_lr_raise = 0;
  
@@ -35839,7 +35868,7 @@ index 10a9f119..90ab186b 100644
  void spu_coh_reserve(spu_context* ctx, uint32_t ea)
  {
      /* Read before writing. The kernel reserves the same few lines over and
-@@ -168,10 +284,14 @@ void spu_coh_reserve(spu_context* ctx, uint32_t ea)
+@@ -168,10 +291,14 @@ void spu_coh_reserve(spu_context* ctx, uint32_t ea)
       * the bitmap byte. */
      uint32_t line = ea >> SPU_COH_LINE_SHIFT;
      const unsigned char bit = (unsigned char)(1u << (line & 7));
@@ -35855,19 +35884,54 @@ index 10a9f119..90ab186b 100644
  
      if (!ctx) return;
      for (unsigned i = 0; i < s_coh_n; i++)
-@@ -246,6 +366,7 @@ void spu_coh_unregister(spu_context* ctx)
+@@ -246,6 +373,7 @@ void spu_coh_unregister(spu_context* ctx)
      }
      __atomic_store_n(&ctx->coh_listed, 0, __ATOMIC_RELAXED);
      spu_lockline_unlock();
-+    spu_ll_wait_wakes();   /* a wake taken before the removal may still hold ctx */
++    spu_ll_wait_ctx(ctx);   /* a wake taken before the removal may still hold ctx */
  }
  
  /* Drop every registered context that lies in [lo, hi) -- a host thread's
-@@ -270,13 +391,28 @@ void spu_coh_forget_range(uintptr_t lo, uintptr_t hi)
+@@ -256,27 +384,60 @@ void spu_coh_unregister(spu_context* ctx)
+  * spu_coh_unregister if it keeps firing. */
+ void spu_coh_forget_range(uintptr_t lo, uintptr_t hi)
+ {
++    /* Wait on each dropped context's own wakes after the unlock. A rare path,
++     * so the list is heap-allocated; with no memory, wait on each under the
++     * lock instead (the wakes run without it). */
++    spu_context* few[8];
++    spu_context** dropped = few;
++    unsigned nd = 0, cap = 8;
+     spu_lockline_lock();
+     for (unsigned i = 0; i < s_coh_n;) {
+-        uintptr_t c = (uintptr_t)s_coh_ctxs[i];
+-        if (c >= lo && c < hi) {
++        spu_context* c = s_coh_ctxs[i];
++        if ((uintptr_t)c >= lo && (uintptr_t)c < hi) {
+             static int _n = 0;
+             if (PS3_LOG_FIRST(_n, 16))
+                 fprintf(stderr, "[spu-coh] leaked ctx %p (img=%d) dropped at thread exit\n",
+-                        (void*)c, s_coh_ctxs[i]->image_id);
++                        (void*)c, c->image_id);
+             s_coh_ctxs[i] = s_coh_ctxs[--s_coh_n];   /* re-check slot i */
++            if (nd == cap) {
++                spu_context** grown = (spu_context**)malloc(cap * 2u * sizeof(*grown));
++                if (grown) {
++                    memcpy(grown, dropped, nd * sizeof(*grown));
++                    if (dropped != few) free(dropped);
++                    dropped = grown;
++                    cap *= 2u;
++                }
++            }
++            if (nd < cap) dropped[nd++] = c;
++            else spu_ll_wait_ctx(c);
+         } else {
+             i++;
          }
      }
      spu_lockline_unlock();
-+    spu_ll_wait_wakes();
++    for (unsigned i = 0; i < nd; i++) spu_ll_wait_ctx(dropped[i]);
++    if (dropped != few) free(dropped);
  }
  
 -int spu_coh_is_reserved(uint32_t addr)
@@ -35894,7 +35958,7 @@ index 10a9f119..90ab186b 100644
  /* A DMA PUT is issued BY an SPU, and hardware does not take that SPU's own
   * reservation away for its own MFC write -- the MFC is part of the same SPE.
   * Our notify had no way to say "everyone but me", so an SPU that reserved a
-@@ -380,13 +516,29 @@ void spu_coh_notify_write_except(uint32_t ea, const void* self)
+@@ -380,13 +541,29 @@ void spu_coh_notify_write_except(uint32_t ea, const void* self)
              SPU_EVENT_SET(c, SPU_EVENT_LR);
              __atomic_store_n(&c->resv_valid, 0, __ATOMIC_RELAXED);
              g_spu_lr_raise++;
@@ -35925,7 +35989,7 @@ index 10a9f119..90ab186b 100644
      uint32_t line = ea & ~127u;
      ppu_resv_break_line(ea);
      spu_coh_writer_fence();
-@@ -412,11 +564,44 @@ void spu_coh_notify_write(uint32_t ea)
+@@ -412,11 +589,44 @@ void spu_coh_notify_write(uint32_t ea)
              /* The event_status store has to be visible before the wake. The
               * waiter re-polls its predicate on a timeout as well, so a
               * straggling store costs latency and not the wakeup itself. */
@@ -35994,7 +36058,7 @@ index ea2e8351..0261d5e0 100644
  /* A store by the PPU landed on `ea`'s line. Raise SPU_EVENT_LR on every SPU
   * whose live reservation covers it, drop that reservation, and wake the host
 diff --git a/runtime/spu/spu_context.h b/runtime/spu/spu_context.h
-index 400b2ba5..9c9d24d2 100644
+index 400b2ba5..5b9c6f33 100644
 --- a/runtime/spu/spu_context.h
 +++ b/runtime/spu/spu_context.h
 @@ -14,6 +14,12 @@
@@ -36062,7 +36126,19 @@ index 400b2ba5..9c9d24d2 100644
  
      /* Set by another host thread to stop this SPU from outside: a raw SPU's
       * PPU writing SPU_RunCntl = 0 (spu_raw.c). Lifted code never looks at it;
-@@ -630,6 +665,25 @@ static SPU_NOINLINE_COLD void spu_ls_read_probe(const spu_context* ctx, uint32_t
+@@ -433,6 +468,11 @@ typedef struct spu_context {
+      * spu_coh_reserve_fast). Written under that lock, read by the context's
+      * own thread. */
+     int coh_listed;
++    /* Lock-line wakes for this context taken from spu_coherency.c's deferred
++     * list and not run yet: raised under the lock-line lock, lowered (release)
++     * after the wake. spu_coh_unregister waits for 0 (acquire), so no wake runs
++     * on a context that is gone. __atomic builtins, like coh_listed. */
++    unsigned ll_wake_refs;
+ } spu_context;
+ 
+ /* event_status is written from more than one host thread: the SPU's own
+@@ -630,6 +670,25 @@ static SPU_NOINLINE_COLD void spu_ls_read_probe(const spu_context* ctx, uint32_t
      }
  }
  
@@ -36088,7 +36164,7 @@ index 400b2ba5..9c9d24d2 100644
  /* The read diagnostics, then g_spu_ls_rdiag recomputed: it drops to 0 once
   * none is armed (the first call also settles g_spu_ls_watch_n). */
  static SPU_NOINLINE_COLD void spu_ls_read_diag(const spu_context* ctx, uint32_t lsa)
-@@ -644,10 +698,12 @@ static SPU_NOINLINE_COLD void spu_ls_read_diag(const spu_context* ctx, uint32_t
+@@ -644,10 +703,12 @@ static SPU_NOINLINE_COLD void spu_ls_read_diag(const spu_context* ctx, uint32_t
  static inline u128 spu_ls_read128(const spu_context* ctx, uint32_t lsa)
  {
      u128 v;
@@ -36102,7 +36178,7 @@ index 400b2ba5..9c9d24d2 100644
  #if defined(__ARM_NEON)
      vst1q_u8(v._u8, vrev32q_u8(vld1q_u8(p)));     /* ldr q; rev32 */
  #elif SPU_LS_VEC
-@@ -746,7 +802,16 @@ static SPU_NOINLINE_COLD void spu_ls_write_diag(spu_context* ctx, uint32_t lsa,
+@@ -746,7 +807,16 @@ static SPU_NOINLINE_COLD void spu_ls_write_diag(spu_context* ctx, uint32_t lsa,
  static inline void spu_ls_write128(spu_context* ctx, uint32_t lsa, u128 val)
  {
      lsa &= SPU_LS_MASK & ~0xFu;
@@ -36120,7 +36196,7 @@ index 400b2ba5..9c9d24d2 100644
  #if defined(__ARM_NEON)
      vst1q_u8(p, vrev32q_u8(vld1q_u8(val._u8)));   /* rev32; str q */
  #elif SPU_LS_VEC
-@@ -765,8 +830,10 @@ static inline void spu_ls_write128(spu_context* ctx, uint32_t lsa, u128 val)
+@@ -765,8 +835,10 @@ static inline void spu_ls_write128(spu_context* ctx, uint32_t lsa, u128 val)
          p[i*4 + 3] = (uint8_t)w;
      }
  #endif
@@ -36131,7 +36207,7 @@ index 400b2ba5..9c9d24d2 100644
  }
  
  /* ---------------------------------------------------------------------------
-@@ -824,7 +891,12 @@ static inline u128 spu_make_preferred_u32(uint32_t val)
+@@ -824,7 +896,12 @@ static inline u128 spu_make_preferred_u32(uint32_t val)
  #define SPU_CH_LOCK(ch)   while (_InterlockedExchange(&(ch)->lock, 1)) _mm_pause()
  #define SPU_CH_UNLOCK(ch) _InterlockedExchange(&(ch)->lock, 0)
  #else
@@ -37813,6 +37889,78 @@ index 275adfa6..a91d8918 100644
      /* Trace ONLY the stalled queue's own runs: wkl_data == the sync EA the PPU
       * barrier/ticket probes armed (ticket-pub arms it at first publish, before
       * the PM's first work pass). Idle re-runs of this wid matter as much as the
+diff --git a/runtime/spu/tests/test_spu_lockline_unregister.c b/runtime/spu/tests/test_spu_lockline_unregister.c
+new file mode 100644
+index 00000000..fd691251
+--- /dev/null
++++ b/runtime/spu/tests/test_spu_lockline_unregister.c
+@@ -0,0 +1,66 @@
++/* A lock-line wake deferred to the unlock can still be running on another
++ * thread when the context it names unregisters. spu_coh_unregister has to wait
++ * for that wake before the caller frees the context (job contexts live on the
++ * job's stack). Here the wake is slow, notifiers keep breaking the context's
++ * reservation, and each context is poisoned and freed right after unregister:
++ * a wake that outlived it sees the poison, or AddressSanitizer reports it. */
++#include <assert.h>
++#include <pthread.h>
++#include <sched.h>
++#include <stdatomic.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <time.h>
++#include "../spu_coherency.c"
++
++static atomic_int s_wakes;
++
++void spu_ch_wake(spu_context* ctx)
++{
++    const uint32_t id = __atomic_load_n(&ctx->spu_id, __ATOMIC_RELAXED);
++    struct timespec t = { 0, 20000 };   /* a slow wake: 20 us */
++    nanosleep(&t, NULL);
++    assert(__atomic_load_n(&ctx->spu_id, __ATOMIC_RELAXED) == id);   /* still the live context */
++    atomic_fetch_add_explicit(&s_wakes, 1, memory_order_relaxed);
++}
++
++#define LINE 0x10000u
++static atomic_int s_stop;
++
++static void* notifier(void* unused)
++{
++    (void)unused;
++    while (!atomic_load_explicit(&s_stop, memory_order_acquire)) {
++        spu_lockline_lock();
++        spu_coh_notify_write(LINE);
++        spu_lockline_unlock();
++    }
++    return NULL;
++}
++
++int main(void)
++{
++    pthread_t notifiers[2];
++    for (int i = 0; i < 2; ++i) assert(pthread_create(&notifiers[i], NULL, notifier, NULL) == 0);
++    for (unsigned i = 0; i < 2000; ++i) {
++        spu_context* c = (spu_context*)malloc(sizeof(spu_context));
++        assert(c);
++        spu_context_init(c, i + 1);
++        spu_lockline_lock();
++        spu_coh_reserve(c, LINE);
++        spu_lockline_unlock();
++        assert(spu_coh_reserve_fast(c, LINE));
++        for (int k = 0; k < 100 && __atomic_load_n(&c->resv_valid, __ATOMIC_RELAXED); ++k) sched_yield();
++        spu_coh_unregister(c);
++        assert(__atomic_load_n(&c->ll_wake_refs, __ATOMIC_ACQUIRE) == 0);
++        memset(c, 0xA5, sizeof(*c));
++        free(c);
++    }
++    atomic_store_explicit(&s_stop, 1, memory_order_release);
++    for (int i = 0; i < 2; ++i) assert(pthread_join(notifiers[i], NULL) == 0);
++    assert(atomic_load(&s_wakes) > 0);
++    printf("unregister waited for %d deferred wakes over 2000 contexts\n", atomic_load(&s_wakes));
++    return 0;
++}
 diff --git a/runtime/spu/tests/test_spu_numeric_semantics.c b/runtime/spu/tests/test_spu_numeric_semantics.c
 index 3f233b33..cab64db5 100644
 --- a/runtime/spu/tests/test_spu_numeric_semantics.c
