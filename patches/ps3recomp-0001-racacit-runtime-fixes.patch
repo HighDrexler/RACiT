@@ -9530,7 +9530,7 @@ index c4e4d849..0ed12868 100644
  /* ---- decoded state getters -------------------------------------------- */
  
 diff --git a/libs/video/rsx_draw_engine.c b/libs/video/rsx_draw_engine.c
-index 19548e0a..2e85f2e8 100644
+index 19548e0a..62792228 100644
 --- a/libs/video/rsx_draw_engine.c
 +++ b/libs/video/rsx_draw_engine.c
 @@ -11,6 +11,7 @@
@@ -14452,10 +14452,10 @@ index 19548e0a..2e85f2e8 100644
 +            b0.width * 4u == g.surfaces[target].w && b0.height * 4u == g.surfaces[target].h) {
 +            /* The fragment program samples unit 0 alone (other units may
 +             * still read as enabled from earlier draws), and the draw adds
-+             * itself over the scene (SRC_ALPHA, ONE): an ordinary quad of
-+             * that shape keeps drawing. */
++             * itself over the scene (SRC_ALPHA, ONE, FUNC_ADD): an ordinary
++             * quad of that shape, or one that subtracts, keeps drawing. */
 +            if (eng_fp_tex_mask() == 1u && rs.blend_enable &&
-+                rs.sf_rgb == 0x0302u && rs.df_rgb == 0x0001u) {
++                rs.sf_rgb == 0x0302u && rs.df_rgb == 0x0001u && rs.eq_rgb == 0x8006u) {
 +                static int said;
 +                if (!said) {
 +                    said = 1;
