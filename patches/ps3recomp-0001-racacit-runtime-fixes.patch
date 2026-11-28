@@ -34435,7 +34435,7 @@ index 00000000..61e1a1c3
 +#endif
 +}
 diff --git a/runtime/spu/spu_channels.c b/runtime/spu/spu_channels.c
-index 84b7ac96..6a986dfa 100644
+index 84b7ac96..2d49f118 100644
 --- a/runtime/spu/spu_channels.c
 +++ b/runtime/spu/spu_channels.c
 @@ -23,7 +23,7 @@
@@ -34911,7 +34911,28 @@ index 84b7ac96..6a986dfa 100644
          spu_lockline_unlock();
          spu_taskset_line_committed(ea & ~127u);
          if (g_spu_line_commit_hook) g_spu_line_commit_hook(ea & ~127u);
-@@ -1148,8 +1462,21 @@ static void spu_resv_lost_poll(spu_context* ctx)
+@@ -979,13 +1293,19 @@ static int channel_is_mfc(uint32_t ch)
+ /* ===========================================================================
+  * Channel write
+  * ===========================================================================*/
++/* SPU_CHHIST for writes, shared with lifted code: its inline parameter
++ * channel stores call spu_wrch while this isn't 0. -1 until the first
++ * write reads the environment. */
++int g_spu_chhist_wr = -1;
+ void spu_wrch(spu_context* ctx, uint32_t channel, u128 value)
+ {
+     /* SPU_CHHIST=1: which channels a job actually touches, and how often. A
+      * worker that never issues an MFC command is either not being handed its
+      * work descriptor or is waiting on a channel we never satisfy; the channel
+      * mix distinguishes those. */
+-    { static int s_c = -1; if (s_c < 0) { const char* e = getenv("SPU_CHHIST"); s_c = e ? (atoi(e) > 0 ? atoi(e) : 2000) : 0; }
++    { int s_c = __atomic_load_n(&g_spu_chhist_wr, __ATOMIC_RELAXED);
++      if (s_c < 0) { const char* e = getenv("SPU_CHHIST"); s_c = e ? (atoi(e) > 0 ? atoi(e) : 2000) : 0;
++                     __atomic_store_n(&g_spu_chhist_wr, s_c, __ATOMIC_RELAXED); }
+       if (s_c) { static unsigned long long w[128]; static unsigned long long n;
+           w[channel & 127]++;
+           if ((++n % (unsigned long long)s_c) == 0) { fprintf(stderr, "[chw] %llu writes:%c", n, 10);
+@@ -1148,8 +1468,21 @@ static void spu_resv_lost_poll(spu_context* ctx)
  {
      if (!(ctx->event_mask & 0x400u) || !ctx->resv_valid) return;
      if (!vm_base || ctx->resv_ea == 0) return;
@@ -34935,7 +34956,7 @@ index 84b7ac96..6a986dfa 100644
          SPU_EVENT_SET(ctx, 0x400u);
      }
  }
-@@ -1168,9 +1495,34 @@ static int spu_ch_ready(spu_context* ctx, uint32_t channel)
+@@ -1168,9 +1501,34 @@ static int spu_ch_ready(spu_context* ctx, uint32_t channel)
  
  /* Signal the per-SPU wait CV so a blocked spu_rdch re-checks its predicate.
   * MUST be called by every producer AFTER it makes a read predicate true. */
@@ -34970,7 +34991,7 @@ index 84b7ac96..6a986dfa 100644
      /* Pass through the waiter's lock first. spu_ch_wait tests its predicate and
       * goes to sleep under ch_wait_lock, but a producer makes the predicate true
       * outside it. A wake issued between the waiter's test and its sleep found
-@@ -1226,11 +1578,13 @@ static void spu_ch_wait(spu_context* ctx, uint32_t channel, const char* op)
+@@ -1226,11 +1584,13 @@ static void spu_ch_wait(spu_context* ctx, uint32_t channel, const char* op)
                  yz_lockstep_block_end(ctx);
                  spu_honour_stop_request(ctx);
              }
@@ -34984,7 +35005,7 @@ index 84b7ac96..6a986dfa 100644
              unsigned long long waited = GetTickCount64() - start;
              if (waited >= next_hb) {
                  fprintf(stderr, "[ch-wait] spu=%X pc=0x%05X ch=%u waited=%llums evstat=0x%X evmask=0x%X resv[valid=%d ea=0x%08X]\n",
-@@ -1247,6 +1601,240 @@ static void spu_ch_wait(spu_context* ctx, uint32_t channel, const char* op)
+@@ -1247,6 +1607,240 @@ static void spu_ch_wait(spu_context* ctx, uint32_t channel, const char* op)
      ctx->status = SPU_STATUS_RUNNING;
  }
  
@@ -35225,7 +35246,7 @@ index 84b7ac96..6a986dfa 100644
  /* ===========================================================================
   * Channel read (returns value in the preferred word slot)
   * ===========================================================================*/
-@@ -1266,8 +1854,10 @@ u128 spu_rdch(spu_context* ctx, uint32_t channel)
+@@ -1266,8 +1860,10 @@ u128 spu_rdch(spu_context* ctx, uint32_t channel)
       * park forever. RdInMbox/RdSigNotify park on their PPU producers. */
      if (channel == SPU_RdInMbox || channel == SPU_RdSigNotify1 || channel == SPU_RdSigNotify2)
          spu_ch_wait(ctx, channel, "rdch");
@@ -35238,7 +35259,7 @@ index 84b7ac96..6a986dfa 100644
  
      uint32_t v = 0;
  
-@@ -1380,7 +1970,7 @@ uint32_t spu_rchcnt(spu_context* ctx, uint32_t channel)
+@@ -1380,7 +1976,7 @@ uint32_t spu_rchcnt(spu_context* ctx, uint32_t channel)
            lastlsa[sp] = ctx->mfc_lsa & SPU_LS_MASK;
            lastr90[sp] = ctx->gpr[90]._u32[0];
            lastrd[sp] = (ctx->resv_valid && vm_base && ctx->resv_ea)
@@ -35247,7 +35268,7 @@ index 84b7ac96..6a986dfa 100644
                       : -1;
            { static int s_ld2 = -2; static uint32_t s_lo2;
              if (s_ld2 == -2) { const char* e5 = getenv("SPU_LSDUMP");
-@@ -1536,7 +2126,13 @@ uint32_t spu_rchcnt(spu_context* ctx, uint32_t channel)
+@@ -1536,7 +2132,13 @@ uint32_t spu_rchcnt(spu_context* ctx, uint32_t channel)
       * handler gates on this (rchcnt $ch25; brz IhcExit) -- returning the old
       * default of 1 made it enter on spurious interrupts with an empty stat,
       * running IhcLoop on a zero mask (clz(0) -> bogus tagId/ack). */
@@ -35262,7 +35283,7 @@ index 84b7ac96..6a986dfa 100644
      default:                 return 1;  /* default: channel ready */
      }
  }
-@@ -1550,8 +2146,28 @@ typedef struct {
+@@ -1550,8 +2152,28 @@ typedef struct {
      uint32_t addr;
      spu_fn   fn;
      int      image_id;   /* which recompiled image this function belongs to */
@@ -35291,7 +35312,7 @@ index 84b7ac96..6a986dfa 100644
  /* One entry per lifted SPU function across EVERY registered image, and a game
   * that lifts its whole SPU workload set has a lot of them: Yakuza: Dead Souls
   * registers ~170k (cri_audio alone is ~35k, gs_task ~9k, the job binaries ~11k).
-@@ -1563,6 +2179,19 @@ typedef struct {
+@@ -1563,6 +2185,19 @@ typedef struct {
  #define SPU_FN_REGISTRY_MAX 262144
  static spu_reg_entry s_registry[SPU_FN_REGISTRY_MAX];
  static uint32_t s_registry_count = 0;
@@ -35311,7 +35332,7 @@ index 84b7ac96..6a986dfa 100644
  
  /* Accessor for the sampling profiler in ppu_loader.cpp. Its address->function
   * map is built from the PPU table alone, which leaves the SPU-lifted bodies as
-@@ -1573,6 +2202,14 @@ static uint32_t s_registry_count = 0;
+@@ -1573,6 +2208,14 @@ static uint32_t s_registry_count = 0;
   * real entries and the extents mean something. */
  uint32_t spu_registry_size(void) { return s_registry_count; }
  
@@ -35326,7 +35347,7 @@ index 84b7ac96..6a986dfa 100644
  int spu_registry_entry(uint32_t i, void** host, uint32_t* ls_addr)
  {
      if (i >= s_registry_count) return 0;
-@@ -1687,6 +2324,7 @@ spu_fn spu_lookup(uint32_t addr, int image_id)   /* exported: clang-built fast-p
+@@ -1687,6 +2330,7 @@ spu_fn spu_lookup(uint32_t addr, int image_id)   /* exported: clang-built fast-p
       * any, for back-compat with single-image contexts. */
      for (uint32_t n = s_hash_head[spu_fn_hash(addr)]; n; n = s_hash_next[n - 1]) {
          const spu_reg_entry* e = &s_registry[n - 1];
@@ -35334,7 +35355,7 @@ index 84b7ac96..6a986dfa 100644
          if (e->addr == addr &&
              (image_id == 0 || e->image_id == 0 || e->image_id == image_id)) {
              /* One compare on the return path; the report itself is rare. */
-@@ -1713,7 +2351,7 @@ static spu_fn spu_lookup_memoized(uint32_t addr, int image_id)
+@@ -1713,7 +2357,7 @@ static spu_fn spu_lookup_memoized(uint32_t addr, int image_id)
  {
      spu_lookup_memo* m = &t_lookup_memo[((addr >> 2) ^ ((uint32_t)image_id * 0x9E3779B1u)) &
                                          (SPU_LOOKUP_MEMO_SIZE - 1)];
@@ -35343,7 +35364,7 @@ index 84b7ac96..6a986dfa 100644
      if (m->gen != gen || m->addr != addr || m->image != image_id) {
          m->fn = spu_lookup(addr, image_id);
          m->addr = addr; m->image = image_id; m->gen = gen;
-@@ -1721,6 +2359,341 @@ static spu_fn spu_lookup_memoized(uint32_t addr, int image_id)
+@@ -1721,6 +2365,341 @@ static spu_fn spu_lookup_memoized(uint32_t addr, int image_id)
      return m->fn;
  }
  
@@ -35685,7 +35706,7 @@ index 84b7ac96..6a986dfa 100644
  /* Which image registered a function at this LS address, or -1 if none did.
   *
   * Deliberately NOT spu_lookup(addr, 0): that call means "dispatch here in a
-@@ -1765,8 +2738,19 @@ static spu_lifted_fn spu_lifted_lookup_full(const spu_context* ctx, uint32_t lsa
+@@ -1765,8 +2744,19 @@ static spu_lifted_fn spu_lifted_lookup_full(const spu_context* ctx, uint32_t lsa
              if (ctx->resident_code[slot].verify_state &&
                  !spu_overlay_resident_verified((spu_context*)ctx, slot)) return NULL;
              const uint32_t canon = ctx->resident_code[slot].canon;
@@ -35707,7 +35728,7 @@ index 84b7ac96..6a986dfa 100644
              /* Relocatable code (spu_overlay_register_region_reloc): its lift sits at
               * canon + offset. The caller runs the function next, so set its delta now. */
              spu_fn f = spu_lookup_memoized(lsa - ctx->resident_code[slot].lsa + canon,
-@@ -1780,7 +2764,13 @@ static spu_lifted_fn spu_lifted_lookup_full(const spu_context* ctx, uint32_t lsa
+@@ -1780,7 +2770,13 @@ static spu_lifted_fn spu_lifted_lookup_full(const spu_context* ctx, uint32_t lsa
      spu_fn fn = NULL;
      if (ctx->resident_task) fn = spu_lookup_memoized(lsa, ctx->resident_task);
      if (!fn && ctx->resident_ovl) fn = spu_lookup_memoized(lsa, ctx->resident_ovl);
@@ -35722,7 +35743,7 @@ index 84b7ac96..6a986dfa 100644
      return (spu_lifted_fn)fn;
  }
  
-@@ -1850,7 +2840,7 @@ spu_lifted_fn spu_lifted_lookup(const spu_context* ctx, uint32_t lsa)
+@@ -1850,7 +2846,7 @@ spu_lifted_fn spu_lifted_lookup(const spu_context* ctx, uint32_t lsa)
      }
      /* Read before the resolver walks the registry: an entry is never keyed by
       * a count newer than the registry it saw. */
@@ -35731,7 +35752,7 @@ index 84b7ac96..6a986dfa 100644
      spu_dcache_ent* e = &t_dcache[((lsa >> 2) ^ (id * 0x9E3779B1u)) & (SPU_DCACHE_ENTRIES - 1)];
      if (e->fn && e->id == id && e->lsa == lsa && e->rgen == rgen &&
          e->residency == c->dcache_residency && e->image == c->image_id &&
-@@ -1877,7 +2867,7 @@ spu_lifted_fn spu_lifted_lookup(const spu_context* ctx, uint32_t lsa)
+@@ -1877,7 +2873,7 @@ spu_lifted_fn spu_lifted_lookup(const spu_context* ctx, uint32_t lsa)
      }
      int reloc = 0;
      const spu_lifted_fn fn = spu_lifted_lookup_full(ctx, lsa, &reloc);
@@ -35740,7 +35761,7 @@ index 84b7ac96..6a986dfa 100644
          /* The resolver may have verified a pending slot; the entry records the
           * residency it resolved against, read after it. */
          e->fn = fn; e->id = id; e->lsa = lsa; e->rgen = rgen;
-@@ -2208,6 +3198,15 @@ void spu_overlay_note_get(spu_context* ctx, uint32_t ea, const uint8_t* ls, uint
+@@ -2208,6 +3204,15 @@ void spu_overlay_note_get(spu_context* ctx, uint32_t ea, const uint8_t* ls, uint
  {
      uint32_t lsa = (uint32_t)(ls - ctx->ls);
      spu_ovl_dump(ctx, ea, lsa, ls, size);
@@ -35756,7 +35777,7 @@ index 84b7ac96..6a986dfa 100644
      for (unsigned slot = 0; slot < 4; ++slot) {
          if (!ctx->resident_code[slot].image_id) continue;
          uint32_t base = ctx->resident_code[slot].lsa;
-@@ -2640,6 +3639,19 @@ static int spu_smc_microstep(spu_context* ctx)
+@@ -2640,6 +3645,19 @@ static int spu_smc_microstep(spu_context* ctx)
           * corroboration gets for a decode bug. */
          if (op11 == 0x1AC || op7 == 0x08 || op7 == 0x09) { pc += 4; continue; } /* hbr/hbra/hbrr */
  
@@ -35776,7 +35797,7 @@ index 84b7ac96..6a986dfa 100644
          /* Hand off to the real interpreter rather than giving up.
           *
           * This microstepper knows a dozen opcodes -- enough for the
-@@ -2684,14 +3696,74 @@ static int spu_smc_microstep(spu_context* ctx)
+@@ -2684,14 +3702,74 @@ static int spu_smc_microstep(spu_context* ctx)
      return 0;
  }
  
@@ -35851,7 +35872,7 @@ index 84b7ac96..6a986dfa 100644
      /* Interrupt-return register restore (see spu_drain.c spu_irq_regs_save):
       * the WWS handler's save/restore shim lives at unlifted top-of-LS, so we
       * enforce the preserve-all-registers hardware contract here -- the first
-@@ -2903,11 +3975,13 @@ void spu_indirect_branch(spu_context* ctx)
+@@ -2903,11 +3981,13 @@ void spu_indirect_branch(spu_context* ctx)
              uint32_t w = ((uint32_t)ctx->ls[p0] << 24) | ((uint32_t)ctx->ls[p0+1] << 16) |
                           ((uint32_t)ctx->ls[p0+2] << 8) | ctx->ls[p0+3];
              if ((w >> 21) == 0u) {                 /* stop / stopd */
@@ -35865,7 +35886,7 @@ index 84b7ac96..6a986dfa 100644
                  spu_halt(ctx);
                  return;
              }
-@@ -3240,13 +4314,14 @@ void spu_indirect_branch(spu_context* ctx)
+@@ -3240,13 +4320,14 @@ void spu_indirect_branch(spu_context* ctx)
       * image (the FMOD mixer's overlay calls) exhaust it and silently hide
       * every other image's misses -- LBP's loading jobs skipped their command
       * handlers for a whole session without a single log line. */
@@ -35881,7 +35902,7 @@ index 84b7ac96..6a986dfa 100644
      /* One-shot: the FMOD null-handler DSP node carries a PPU descriptor EA at
       * node+0x14 (observed 0x93C3C0). Dump it to identify which plugin/unit
       * type never got its SPU code streamed (env SPU_DSPDESC=<hex ea>). */
-@@ -3406,4 +4481,44 @@ void spu_trace_rt(spu_context* ctx, uint32_t rt)
+@@ -3406,4 +4487,44 @@ void spu_trace_rt(spu_context* ctx, uint32_t rt)
  
  #ifdef __cplusplus
  }
@@ -38381,7 +38402,7 @@ index 275adfa6..a91d8918 100644
       * barrier/ticket probes armed (ticket-pub arms it at first publish, before
       * the PM's first work pass). Idle re-runs of this wid matter as much as the
 diff --git a/runtime/spu/tests/spu_interp_diff_test.c b/runtime/spu/tests/spu_interp_diff_test.c
-index 47488b29..e3b0e2c5 100644
+index 47488b29..09c18f5c 100644
 --- a/runtime/spu/tests/spu_interp_diff_test.c
 +++ b/runtime/spu/tests/spu_interp_diff_test.c
 @@ -32,6 +32,7 @@
@@ -38392,6 +38413,106 @@ index 47488b29..e3b0e2c5 100644
  #include "../spu_interp.c"   /* spu_step / spu_decode1 are static */
  #undef A
  #undef B
+@@ -50,6 +51,8 @@
+ /* ---- stubs for the runtime the interpreter links against ---- */
+ static uint32_t g_ch_n, g_ch_last; static u128 g_ch_val; static uint32_t g_ch_cnt;
+ u128 spu_rdch(spu_context* c, uint32_t ch) { (void)c; g_ch_last = ch; g_ch_n++; return g_ch_val; }
++/* Lifted MFC parameter writes go through this recorder, not inline into ctx. */
++int g_spu_chhist_wr = 1;
+ void spu_wrch(spu_context* c, uint32_t ch, u128 v) { (void)c; g_ch_last = ch; g_ch_n++; g_ch_val = v; }
+ uint32_t spu_rchcnt(spu_context* c, uint32_t ch) { (void)c; g_ch_last = ch; g_ch_n++; return g_ch_cnt; }
+ int g_spu_ls_watch_n, g_spu_ls_probe, g_wws_read_probe, g_wws_code_probe, g_spu_smc_watch, g_spu_ls_dbg;
+diff --git a/runtime/spu/tests/test_adapter_main.c b/runtime/spu/tests/test_adapter_main.c
+index 3e68c445..0365dbcb 100644
+--- a/runtime/spu/tests/test_adapter_main.c
++++ b/runtime/spu/tests/test_adapter_main.c
+@@ -24,6 +24,8 @@ static uint32_t g_evt = 0; static int g_evt_wrote = 0;
+ 
+ u128 spu_rdch(spu_context* ctx, uint32_t ch) { (void)ctx; (void)ch; return spu_zero(); }
+ uint32_t spu_rchcnt(spu_context* ctx, uint32_t ch) { (void)ctx; (void)ch; return 1; }
++/* Lifted MFC parameter writes go through this spu_wrch, not inline into ctx. */
++int g_spu_chhist_wr = 1;
+ void spu_wrch(spu_context* ctx, uint32_t channel, u128 value) {
+     if (channel == SPU_WrOutIntrMbox) { g_evt = value._u32[0]; g_evt_wrote = 1; return; }
+     mfc_channel_write(&g_mfc, ctx, channel, value._u32[0]);
+diff --git a/runtime/spu/tests/test_bringup_main.c b/runtime/spu/tests/test_bringup_main.c
+index 2bce6584..9289051b 100644
+--- a/runtime/spu/tests/test_bringup_main.c
++++ b/runtime/spu/tests/test_bringup_main.c
+@@ -28,6 +28,8 @@ static int        g_mbox_wrote = 0;
+ u128 spu_rdch(spu_context* ctx, uint32_t ch) { (void)ctx; (void)ch; return spu_zero(); }
+ uint32_t spu_rchcnt(spu_context* ctx, uint32_t ch) { (void)ctx; (void)ch; return 1; }
+ 
++/* Lifted MFC parameter writes go through this spu_wrch, not inline into ctx. */
++int g_spu_chhist_wr = 1;
+ void spu_wrch(spu_context* ctx, uint32_t channel, u128 value) {
+     if (channel == SPU_WrOutMbox) {           /* SPU signals the PPU */
+         g_mbox = value._u32[0];
+diff --git a/runtime/spu/tests/test_brsl_return_main.c b/runtime/spu/tests/test_brsl_return_main.c
+index 2f12014c..c42391f2 100644
+--- a/runtime/spu/tests/test_brsl_return_main.c
++++ b/runtime/spu/tests/test_brsl_return_main.c
+@@ -9,6 +9,8 @@ static int g_wrote = 0;
+ 
+ u128 spu_rdch(spu_context* ctx, uint32_t ch) { (void)ctx; (void)ch; return spu_zero(); }
+ uint32_t spu_rchcnt(spu_context* ctx, uint32_t ch) { (void)ctx; (void)ch; return 1; }
++/* Lifted MFC parameter writes go through this spu_wrch, not inline into ctx. */
++int g_spu_chhist_wr = 1;
+ void spu_wrch(spu_context* ctx, uint32_t channel, u128 value) {
+     (void)ctx;
+     if (channel == SPU_WrOutMbox) { g_out = value._u32[0]; g_wrote = 1; }
+diff --git a/runtime/spu/tests/test_dma_main.c b/runtime/spu/tests/test_dma_main.c
+index 34043e85..e99adab5 100644
+--- a/runtime/spu/tests/test_dma_main.c
++++ b/runtime/spu/tests/test_dma_main.c
+@@ -17,6 +17,8 @@ static int g_wrote = 0;
+ 
+ u128 spu_rdch(spu_context* ctx, uint32_t ch) { (void)ctx; (void)ch; return spu_zero(); }
+ uint32_t spu_rchcnt(spu_context* ctx, uint32_t ch) { (void)ctx; (void)ch; return 1; }
++/* Lifted MFC parameter writes go through this spu_wrch, not inline into ctx. */
++int g_spu_chhist_wr = 1;
+ void spu_wrch(spu_context* ctx, uint32_t channel, u128 value) {
+     if (channel == SPU_WrOutMbox) { g_out = value._u32[0]; g_wrote = 1; return; }
+     /* All other MFC-bound channels go through the real DMA engine in
+diff --git a/runtime/spu/tests/test_event_main.c b/runtime/spu/tests/test_event_main.c
+index d7f94662..5899e1ac 100644
+--- a/runtime/spu/tests/test_event_main.c
++++ b/runtime/spu/tests/test_event_main.c
+@@ -50,6 +50,8 @@ static ev_queue g_spu_evq;   /* event queue connected to the SPU (group id 7) */
+ u128 spu_rdch(spu_context* ctx, uint32_t ch) { (void)ctx; (void)ch; return spu_zero(); }
+ uint32_t spu_rchcnt(spu_context* ctx, uint32_t ch) { (void)ctx; (void)ch; return 1; }
+ 
++/* Lifted MFC parameter writes go through this spu_wrch, not inline into ctx. */
++int g_spu_chhist_wr = 1;
+ void spu_wrch(spu_context* ctx, uint32_t channel, u128 value) {
+     if (channel == SPU_WrOutIntrMbox) {
+         /* SPU raised a completion interrupt -> deliver as a thread-group event
+diff --git a/runtime/spu/tests/test_lfqueue_main.c b/runtime/spu/tests/test_lfqueue_main.c
+index c864a3b4..f007e287 100644
+--- a/runtime/spu/tests/test_lfqueue_main.c
++++ b/runtime/spu/tests/test_lfqueue_main.c
+@@ -43,6 +43,8 @@ static ev_queue g_spu_evq;
+ 
+ u128 spu_rdch(spu_context* ctx, uint32_t ch) { (void)ctx; (void)ch; return spu_zero(); }
+ uint32_t spu_rchcnt(spu_context* ctx, uint32_t ch) { (void)ctx; (void)ch; return 1; }
++/* Lifted MFC parameter writes go through this spu_wrch, not inline into ctx. */
++int g_spu_chhist_wr = 1;
+ void spu_wrch(spu_context* ctx, uint32_t channel, u128 value) {
+     if (channel == SPU_WrOutIntrMbox) { evq_push(&g_spu_evq, EV_SOURCE_SPU_GROUP, value._u32[0]); return; }
+     mfc_channel_write(&g_mfc, ctx, channel, value._u32[0]);
+diff --git a/runtime/spu/tests/test_shufb_main.c b/runtime/spu/tests/test_shufb_main.c
+index 97e1778b..a9328978 100644
+--- a/runtime/spu/tests/test_shufb_main.c
++++ b/runtime/spu/tests/test_shufb_main.c
+@@ -9,6 +9,8 @@ static int g_wrote = 0;
+ 
+ u128 spu_rdch(spu_context* ctx, uint32_t ch) { (void)ctx; (void)ch; return spu_zero(); }
+ uint32_t spu_rchcnt(spu_context* ctx, uint32_t ch) { (void)ctx; (void)ch; return 1; }
++/* Lifted MFC parameter writes go through this spu_wrch, not inline into ctx. */
++int g_spu_chhist_wr = 1;
+ void spu_wrch(spu_context* ctx, uint32_t channel, u128 value) {
+     (void)ctx;
+     if (channel == SPU_WrOutMbox) { g_out = value._u32[0]; g_wrote = 1; }
 diff --git a/runtime/spu/tests/test_spu_float_est.c b/runtime/spu/tests/test_spu_float_est.c
 index 0cda949f..193f27f8 100644
 --- a/runtime/spu/tests/test_spu_float_est.c
@@ -38539,6 +38660,58 @@ index 195c75e3..3d3eed6c 100644
          }
          u128 x = spu_shufb(a, b, c), y = spu_shufb_ref(a, b, c);
          if (memcmp(&x, &y, 16)) {
+diff --git a/runtime/spu/tests/test_sum_main.c b/runtime/spu/tests/test_sum_main.c
+index 1023b76e..6f87eda0 100644
+--- a/runtime/spu/tests/test_sum_main.c
++++ b/runtime/spu/tests/test_sum_main.c
+@@ -39,6 +39,8 @@ u128 spu_rdch(spu_context* ctx, uint32_t channel) {
+ uint32_t spu_rchcnt(spu_context* ctx, uint32_t channel) {
+     (void)ctx; (void)channel; return 1;
+ }
++/* Lifted MFC parameter writes go through this spu_wrch, not inline into ctx. */
++int g_spu_chhist_wr = 1;
+ void spu_wrch(spu_context* ctx, uint32_t channel, u128 value) {
+     (void)ctx;
+     if (channel == SPU_WrOutMbox) { g_out = value._u32[0]; g_wrote = 1; }
+diff --git a/runtime/spu/tests/test_taskset_main.c b/runtime/spu/tests/test_taskset_main.c
+index 4ee94300..91794922 100644
+--- a/runtime/spu/tests/test_taskset_main.c
++++ b/runtime/spu/tests/test_taskset_main.c
+@@ -43,6 +43,8 @@ static ev_queue g_taskset_evq;     /* taskset completion event queue */
+ 
+ u128 spu_rdch(spu_context* ctx, uint32_t ch) { (void)ctx; (void)ch; return spu_zero(); }
+ uint32_t spu_rchcnt(spu_context* ctx, uint32_t ch) { (void)ctx; (void)ch; return 1; }
++/* Lifted MFC parameter writes go through this spu_wrch, not inline into ctx. */
++int g_spu_chhist_wr = 1;
+ void spu_wrch(spu_context* ctx, uint32_t channel, u128 value) {
+     if (channel == SPU_WrOutIntrMbox) { evq_push(&g_taskset_evq, EV_SOURCE_SPU_GROUP, value._u32[0]); return; }
+     mfc_channel_write(&g_mfc, ctx, channel, value._u32[0]);
+diff --git a/runtime/spu/tests/test_torture_main.c b/runtime/spu/tests/test_torture_main.c
+index 30485cc5..53fd4151 100644
+--- a/runtime/spu/tests/test_torture_main.c
++++ b/runtime/spu/tests/test_torture_main.c
+@@ -22,6 +22,8 @@ static int g_stopped = 0;
+ 
+ u128 spu_rdch(spu_context* ctx, uint32_t ch) { (void)ctx; (void)ch; return spu_zero(); }
+ uint32_t spu_rchcnt(spu_context* ctx, uint32_t ch) { (void)ctx; (void)ch; return 1; }
++/* Lifted MFC parameter writes go through this spu_wrch, not inline into ctx. */
++int g_spu_chhist_wr = 1;
+ void spu_wrch(spu_context* ctx, uint32_t channel, u128 value) {
+     (void)ctx;
+     if (channel == SPU_WrOutMbox && g_nmarks < 64)
+diff --git a/runtime/spu/tests/test_workload_main.c b/runtime/spu/tests/test_workload_main.c
+index 11ffd6f7..3775ff13 100644
+--- a/runtime/spu/tests/test_workload_main.c
++++ b/runtime/spu/tests/test_workload_main.c
+@@ -32,6 +32,8 @@ u128 spu_rdch(spu_context* ctx, uint32_t ch) {
+     return r;
+ }
+ uint32_t spu_rchcnt(spu_context* ctx, uint32_t ch) { (void)ctx; (void)ch; return 1; }
++/* Lifted MFC parameter writes go through this spu_wrch, not inline into ctx. */
++int g_spu_chhist_wr = 1;
+ void spu_wrch(spu_context* ctx, uint32_t channel, u128 value) {
+     mfc_channel_write(&g_mfc, ctx, channel, value._u32[0]);
+ }
 diff --git a/runtime/syscalls/lv2_register.c b/runtime/syscalls/lv2_register.c
 index e5be07d6..7d50d42e 100644
 --- a/runtime/syscalls/lv2_register.c
@@ -40542,10 +40715,44 @@ index dd9e4b32..745dc69f 100644
      out = subprocess.run([exe], capture_output=True, text=True)
      print(out.stdout, end="")
 diff --git a/tools/spu_lifter.py b/tools/spu_lifter.py
-index 4610a361..92979030 100644
+index 4610a361..4df93422 100644
 --- a/tools/spu_lifter.py
 +++ b/tools/spu_lifter.py
-@@ -204,6 +204,10 @@ class LiftedFunction:
+@@ -62,6 +62,22 @@ except ImportError:
+ # disassembler hands us one of these, we can emit it verbatim as a macro.
+ _CHANNEL_MACROS = set(CHANNEL_NAMES.values())
+ 
++# MFC parameter channels only latch their value in the context until the
++# MFC_Cmd write (spu_wrch returns right after storing them), so lifted code
++# stores them itself: five or six of every DMA's eight or nine channel writes
++# no longer cost a call. Keyed by macro name and by channel number.
++_WRCH_LATCH = {
++    "MFC_LSA": "ctx->mfc_lsa = {v};",
++    "MFC_EAH": "ctx->mfc_eah = {v};",
++    "MFC_EAL": "ctx->mfc_eal = {v};",
++    "MFC_Size": "ctx->mfc_size = {v};",
++    "MFC_TagID": "ctx->mfc_tag = {v} & 0x1Fu;",
++    "MFC_WrTagMask": "ctx->mfc_tag_mask = {v};",
++}
++_WRCH_LATCH.update({"16": _WRCH_LATCH["MFC_LSA"], "17": _WRCH_LATCH["MFC_EAH"],
++                    "18": _WRCH_LATCH["MFC_EAL"], "19": _WRCH_LATCH["MFC_Size"],
++                    "20": _WRCH_LATCH["MFC_TagID"], "22": _WRCH_LATCH["MFC_WrTagMask"]})
++
+ # ---------------------------------------------------------------------------
+ # C preambles
+ # ---------------------------------------------------------------------------
+@@ -121,6 +137,10 @@ void spu_halt(spu_context* ctx);
+ u128 spu_rdch(spu_context* ctx, uint32_t channel);
+ uint32_t spu_rchcnt(spu_context* ctx, uint32_t channel);
+ void spu_wrch(spu_context* ctx, uint32_t channel, u128 value);
++/* SPU_CHHIST for the parameter channels lifted code stores itself:
++ * -1 not decided yet, 0 off, else on. While it isn't 0 those writes go
++ * through spu_wrch (which decides it and keeps the histogram). */
++extern int g_spu_chhist_wr;
+ 
+ /* Execution trace (only emitted when the lifter was invoked with --trace). */
+ void spu_trace_init(const char* path);
+@@ -204,6 +224,10 @@ class LiftedFunction:
      end_addr: int = 0
      body_lines: list[str] = field(default_factory=list)
      calls: list[int] = field(default_factory=list)
@@ -40556,7 +40763,7 @@ index 4610a361..92979030 100644
  
  
  # Mnemonics whose last operand is a branch target address (0x...).
-@@ -499,7 +503,30 @@ def compute_link_returns(insns, bounds) -> set:
+@@ -499,7 +523,30 @@ def compute_link_returns(insns, bounds) -> set:
  LV2_RESUMING_STOPS = {0x100, 0x110, 0x111}
  
  class SPULifter:
@@ -40588,7 +40795,7 @@ index 4610a361..92979030 100644
          self.functions: list[LiftedFunction] = []
          self.call_targets: set[int] = set()
          self.branch_targets: set[int] = set()
-@@ -525,7 +552,7 @@ class SPULifter:
+@@ -525,7 +572,7 @@ class SPULifter:
          # base, and every local-store address the code materializes from its own pc
          # (links, lqr/stqr, transfer and return pcs) adds ctx->reloc_delta, which the
          # dispatcher sets to placement - canonical base on entry (spu_overlay_register_region_reloc).
@@ -40597,7 +40804,7 @@ index 4610a361..92979030 100644
          # Addresses of `bi/biz/... $r0` that are COMPUTED TAIL JUMPS (r0 reloaded
          # via lqa/lqr), not function returns -- see compute_bi_r0_jumps(). Empty
          # set => every `bi $r0` is a return (the prior behaviour).
-@@ -538,11 +565,11 @@ class SPULifter:
+@@ -538,11 +585,11 @@ class SPULifter:
  
      # ------------------------------------------------------------------ #
      def lift_function(self, insns: list[SPUInstruction],
@@ -40612,7 +40819,7 @@ index 4610a361..92979030 100644
          for insn in insns:
              if insn.addr < start or insn.addr >= end:
                  continue
-@@ -557,6 +584,8 @@ class SPULifter:
+@@ -557,6 +604,8 @@ class SPULifter:
          # each merged chunk entry hands back to the drain when one is pending.
          merged_starts = {a for a in getattr(self, "func_starts", ()) if start < a < end}
          last_insn = None
@@ -40621,7 +40828,7 @@ index 4610a361..92979030 100644
          for insn in insns:
              if insn.addr < start or insn.addr >= end:
                  continue
-@@ -567,7 +596,13 @@ class SPULifter:
+@@ -567,7 +616,13 @@ class SPULifter:
                      f"    if (ctx->int_enable && (ctx->event_status & ctx->event_mask)) "
                      f"{{ ctx->pc = {self._pc(insn.addr)}; g_spu_trampoline_fn = "
                      f"{self.prefix}spu_func_{insn.addr:08X}; return; }}")
@@ -40635,7 +40842,7 @@ index 4610a361..92979030 100644
              if c:
                  if self.trace:
                      func.body_lines.append(f"    spu_trace_pc(ctx, {self._pc(insn.addr)});")
-@@ -576,6 +611,8 @@ class SPULifter:
+@@ -576,6 +631,8 @@ class SPULifter:
                      rt_idx = insn.raw & 0x7F
                      func.body_lines.append(f"    spu_trace_rt(ctx, {rt_idx});")
              last_insn = insn
@@ -40644,7 +40851,7 @@ index 4610a361..92979030 100644
  
          # Fall-through chaining: if the final instruction does NOT unconditionally
          # end the basic block (i.e. it's a normal op, a call brsl/bisl, or a
-@@ -589,7 +626,8 @@ class SPULifter:
+@@ -589,7 +646,8 @@ class SPULifter:
                           and (last_insn.raw & 0x3FFF) in LV2_RESUMING_STOPS))
                  and end in getattr(self, "func_starts", set())):
              func.body_lines.append(
@@ -40654,7 +40861,7 @@ index 4610a361..92979030 100644
  
          # Infinite no-op self-loop (the SPU `br .` halt idiom): a function whose
          # whole body is nops + an unconditional branch back into itself does
-@@ -613,11 +651,58 @@ class SPULifter:
+@@ -613,11 +671,58 @@ class SPULifter:
          return func
  
      def _pc(self, a: int) -> str:
@@ -40718,7 +40925,21 @@ index 4610a361..92979030 100644
  
      @staticmethod
      def _branch_target(insn: SPUInstruction):
-@@ -945,10 +1030,9 @@ class SPULifter:
+@@ -899,7 +1004,12 @@ class SPULifter:
+             return f"{g(rt())} = spu_pref_u32(spu_rchcnt(ctx, {_chan(ops[1])}));"
+         if mn == "wrch":
+             # operands: channel, $rt
+-            return f"spu_wrch(ctx, {_chan(ops[0])}, {g(_reg(ops[1]))});"
++            ch = _chan(ops[0])
++            if ch in _WRCH_LATCH:
++                val = g(_reg(ops[1]))
++                return (f"if (__builtin_expect(__atomic_load_n(&g_spu_chhist_wr, __ATOMIC_RELAXED) != 0, 0)) "
++                        f"spu_wrch(ctx, {ch}, {val}); else {{ {_WRCH_LATCH[ch].format(v=val + "._u32[0]")} }}")
++            return f"spu_wrch(ctx, {ch}, {g(_reg(ops[1]))});"
+ 
+         # ---- branches ----
+         if mn in ("br", "bra"):
+@@ -945,10 +1055,9 @@ class SPULifter:
                  # + image save/restore (adopt-on-serve cannot leak upward).
                  # --reloc: the callee's drain may dispatch into other placed code, which sets
                  # ctx->reloc_delta for itself; put this placement's back on return.
@@ -40731,7 +40952,7 @@ index 4610a361..92979030 100644
              return f"{link} /* TODO spu: brsl unresolved target */;"
          if mn in _COND_BR:
              tgt = self._branch_target(insn)
-@@ -959,11 +1043,10 @@ class SPULifter:
+@@ -959,11 +1068,10 @@ class SPULifter:
              if func.start_addr <= tgt < func.end_addr:
                  return f"if ({cond}) goto loc_{tgt:08X};"
              self.branch_targets.add(tgt)
@@ -40747,7 +40968,7 @@ index 4610a361..92979030 100644
          # Interrupt enable/disable bits on the bi family (bie/bid, irete/iretd,
          # bisle(d)...): bit 0x40000 = E (enable), 0x80000 = D (disable), taking
          # effect when the branch is TAKEN. The WWS jobmanager's poll loop runs
-@@ -1010,12 +1093,11 @@ class SPULifter:
+@@ -1010,12 +1118,11 @@ class SPULifter:
              # SPU_DRAIN + image save/restore) so the callee's tail-chains drain
              # here and its `bi $r0` returns via host return.
              # read the target BEFORE writing the link: rt may be the same register as ra
@@ -40762,7 +40983,7 @@ index 4610a361..92979030 100644
          # bisled: set link, branch to RA only if an external event is pending.
          if mn in ("bisled",):
              link_rt = insn.raw & 0x7F            # rt = link
-@@ -1073,16 +1155,17 @@ class SPULifter:
+@@ -1073,16 +1180,17 @@ class SPULifter:
          if func.start_addr <= tgt < func.end_addr:
              return f"goto loc_{tgt:08X};"
          self.branch_targets.add(tgt)
@@ -40785,7 +41006,7 @@ index 4610a361..92979030 100644
              lines.append(f"void {f.name}(spu_context* ctx);")
          defined = {f.start_addr for f in self.functions}
          for t in sorted(self.call_targets | self.branch_targets):
-@@ -1101,8 +1184,27 @@ class SPULifter:
+@@ -1101,8 +1209,27 @@ class SPULifter:
          lines = [SOURCE_PREAMBLE.format(header_name=header_name), ""]
          weak = "__attribute__((weak)) " if getattr(self, "weak_emit", False) else ""
          for f in self.functions:
@@ -40815,7 +41036,7 @@ index 4610a361..92979030 100644
                  lines.append(b if b.endswith(":") else f"    {b}")
              lines.append("}")
              lines.append("")
-@@ -1113,16 +1215,15 @@ class SPULifter:
+@@ -1113,16 +1240,15 @@ class SPULifter:
          # at runtime we route through spu_indirect_branch which either lands
          # on a registered mid-function entry (if one was emitted) or halts
          # cleanly with a "PC X not registered" diagnostic.
@@ -40835,7 +41056,7 @@ index 4610a361..92979030 100644
                               f"g_spu_trampoline_fn = spu_indirect_branch; return;")
                  lines.append("}")
              lines.append("")
-@@ -1131,6 +1232,8 @@ class SPULifter:
+@@ -1131,6 +1257,8 @@ class SPULifter:
          lines.append("typedef struct { uint32_t addr; void (*func)(spu_context*); const char* name; } spu_func_entry;")
          lines.append("static const spu_func_entry spu_function_table[] = {")
          for f in self.functions:
@@ -40844,7 +41065,7 @@ index 4610a361..92979030 100644
              lines.append(f'    {{ 0x{f.start_addr:08X}u, {f.name}, "{f.name}" }},')
          lines.append("    { 0, NULL, NULL }")
          lines.append("};")
-@@ -1146,6 +1249,257 @@ class SPULifter:
+@@ -1146,6 +1274,257 @@ class SPULifter:
  # CLI
  # ---------------------------------------------------------------------------
  
@@ -41102,7 +41323,7 @@ index 4610a361..92979030 100644
  def main() -> None:
      p = argparse.ArgumentParser(description="SPU to C lifter for ps3recomp")
      p.add_argument("input", nargs="?", default=None,
-@@ -1207,11 +1561,30 @@ def main() -> None:
+@@ -1207,11 +1586,30 @@ def main() -> None:
                          "by trampolines. Every chunk is still emitted and "
                          "registered on its own for indirect entry, so this only "
                          "changes speed, not which code can be reached.")
@@ -41137,7 +41358,7 @@ index 4610a361..92979030 100644
      p.add_argument("--max-group-insns", type=int, default=4000,
                     help="Cap on instructions per merged group (keeps clang fast).")
      p.add_argument("--force-indirect", default="",
-@@ -1336,8 +1709,10 @@ def main() -> None:
+@@ -1336,8 +1734,10 @@ def main() -> None:
  
      insns = disassemble_spu(data, base)
  
@@ -41150,7 +41371,7 @@ index 4610a361..92979030 100644
      lifter.bi_r0_jump = compute_bi_r0_jumps(insns, bounds)
      if lifter.bi_r0_jump:
          print(f"  {len(lifter.bi_r0_jump)} `bi $r0` computed-jump site(s) "
-@@ -1360,16 +1735,19 @@ def main() -> None:
+@@ -1360,16 +1760,19 @@ def main() -> None:
                f"{', '.join(f'0x{a:X}' for a in sorted(lifter.link_return))}")
      lifter.func_starts = {s for s, e in bounds}  # for fall-through tail-call chaining
      groups = {}
