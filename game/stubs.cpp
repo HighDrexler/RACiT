@@ -666,11 +666,62 @@ extern "C" void ps3_indirect_call(ppu_context* ctx);
 extern "C" void vm_write8(uint64_t a, uint8_t v);
 extern "C" PPU_THREAD_LOCAL void (*g_trampoline_fn)(void*);
 
+/* Continue at start (RACACIT_AUTO_CONTINUE=1, off by default): boot past the
+ * logos, PRESS START and the main menu into the latest save. It skips the
+ * first two as the settings above do, then once the main menu is up presses
+ * Cross on LOAD (the menu's first focus when there are saves) through the pad
+ * (runtime cellPad.c racit_pad_host_press), and the load list that follows
+ * takes the newest save without showing (cellSaveData.c
+ * racit_save_autopick_once). With no save of this game it stays on the main
+ * menu, where Cross would start a new game. A player who touches any control
+ * first stops it there. */
+#include <chrono>
+#include <thread>
+extern "C" void racit_pad_host_press(unsigned mask, int reports);
+extern "C" int racit_pad_player_active(void);
+extern "C" void racit_save_autopick_once(void);
+extern "C" void racit_save_autopick_cancel(void);
+extern "C" int racit_save_autopick_pending(void);
+extern "C" int racit_save_any(const char* prefix);
+static int front_end_auto_continue(void)
+{
+    static int on = -1;
+    if (on < 0) { const char* e = getenv("RACACIT_AUTO_CONTINUE"); on = (e && *e == '1') ? 1 : 0; }
+    return on;
+}
+static void front_end_continue_run(void)
+{
+    using namespace std::chrono;
+    const auto t0 = steady_clock::now();
+    const auto ms = [&] { return (long long)duration_cast<milliseconds>(steady_clock::now() - t0).count(); };
+    /* CreateOptions runs ten frames after Init; give the menu time to take input. */
+    std::this_thread::sleep_for(milliseconds(1500));
+    for (int tries = 0; tries < 8; tries++) {
+        if (racit_pad_player_active()) {
+            racit_save_autopick_cancel();
+            fprintf(stderr, "[front-end] continue at start: a control was used, staying on the menu%c", 10);
+            return;
+        }
+        racit_save_autopick_once();
+        racit_pad_host_press(0x4000u, 6);   /* Cross */
+        fprintf(stderr, "[front-end] continue at start: Cross on LOAD at %lld ms%c", ms(), 10);
+        for (int i = 0; i < 20; i++) {
+            std::this_thread::sleep_for(milliseconds(100));
+            if (!racit_save_autopick_pending()) {
+                fprintf(stderr, "[front-end] continue at start: loading the latest save (%lld ms after the menu)%c", ms(), 10);
+                return;
+            }
+        }
+    }
+    racit_save_autopick_cancel();
+    fprintf(stderr, "[front-end] continue at start: the load list never came, staying on the menu%c", 10);
+}
+
 static int front_end_skip_intro(void)
 {
     static int on = -1;
     if (on < 0) { const char* e = getenv("RACACIT_SKIP_INTRO"); on = (e && *e == '1') ? 1 : 0; }   /* off unless chosen: the seizure warning shows */
-    return on;
+    return on || front_end_auto_continue();
 }
 static uint32_t s_front_end_menu;   /* movie handle whose PRESS START is skipped after Init */
 
@@ -768,7 +819,7 @@ extern "C" void racacit_front_end_cards(ppu_context* ctx)
             mode, nm, ok ? "" : " -- SetVariable said no");
     static int skip_start = -1;
     if (skip_start < 0) { const char* e = getenv("RACACIT_SKIP_PRESS_START"); skip_start = (e && *e == '1') ? 1 : 0; }
-    s_front_end_menu = (ok && skip_start) ? (uint32_t)c.gpr[27] : 0u;
+    s_front_end_menu = (ok && (skip_start || front_end_auto_continue())) ? (uint32_t)c.gpr[27] : 0u;
 }
 
 extern "C" void racacit_front_end_menu(ppu_context* ctx)
@@ -789,6 +840,10 @@ extern "C" void racacit_front_end_menu(ppu_context* ctx)
     front_end_leave(ctx, c);
     fprintf(stderr, "[front-end] PRESS START skipped: main menu opens (RACACIT_SKIP_PRESS_START)%s\n",
             ok ? "" : " -- SetVariable said no");
+    if (ok && front_end_auto_continue()) {
+        if (racit_save_any("BCUS98124") || racit_save_any("BCES00511")) std::thread(front_end_continue_run).detach();
+        else fprintf(stderr, "[front-end] continue at start: no save yet, staying on the menu%c", 10);
+    }
 #ifdef __APPLE__
     { if (racacit_load_stats_on()) fprintf(stderr, "[load-stats] %8.0f ms: main menu (CreateOptions in 10 frames)%c", racacit_since_start_ms(), 10); }
 #endif

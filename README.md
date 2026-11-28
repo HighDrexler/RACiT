@@ -122,6 +122,7 @@ These are on the in-game menu's Game page too. The game reads most of them when 
 | Language | `RACACIT_LANGUAGE` | English | The disc's own translations: `fr`, `es`, `de`, `it`, `nl`. |
 | Logos and notices at boot | `RACACIT_SKIP_INTRO` | Show | Skips the startup logos and notices. |
 | PRESS START screen | `RACACIT_SKIP_PRESS_START` | Show | Skips the title screen (with logos skipped). |
+| Continue at start | `RACACIT_AUTO_CONTINUE` | Off | Goes straight from launch into your latest save, past the logos and menus. Touch any control before it loads to stay on the main menu. With no save yet it stops at the main menu. |
 | START skips movies | `RACACIT_START_SKIPS_MOVIES` | Yes | START skips a movie. |
 | Every cutscene skippable | `RACACIT_ALL_CUTSCENES_SKIPPABLE` | Yes | Lets you skip cutscenes the game normally doesn't let you skip. |
 | Land anywhere in space | `RACACIT_SPACE_FREE_LANDING` | Yes | Every moon and planet in space can be landed on without waiting for the story to unlock it. Off keeps the original story lock. |
