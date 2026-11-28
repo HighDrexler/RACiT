@@ -679,6 +679,7 @@ extern "C" PPU_THREAD_LOCAL void (*g_trampoline_fn)(void*);
 #include <thread>
 extern "C" void racit_pad_host_press(unsigned mask, int reports);
 extern "C" void racit_pad_host_cancel(void);
+extern "C" void racit_pad_host_clear(void);
 extern "C" int racit_pad_player_active(void);
 extern "C" void racit_save_autopick_once(void);
 extern "C" void racit_save_autopick_cancel(void);
@@ -724,6 +725,7 @@ static void front_end_continue_run(void)
             }
         }
     }
+    racit_pad_host_clear();   /* the press and the pick expire together */
     racit_save_autopick_cancel();
     fprintf(stderr, "[front-end] continue at start: the load list never came, staying on the menu%c", 10);
 }

@@ -2438,7 +2438,7 @@ index 4d916ac7..1dfee100 100644
      if (flags & CELL_FS_O_CREAT) {
          ensure_parent_dirs(host_path);
 diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
-index 5f8a2fa2..da34fa02 100644
+index 5f8a2fa2..8beb7622 100644
 --- a/libs/input/cellPad.c
 +++ b/libs/input/cellPad.c
 @@ -13,11 +13,13 @@
@@ -3761,7 +3761,7 @@ index 5f8a2fa2..da34fa02 100644
  }
  
  static void pad_shutdown_backend(void)
-@@ -776,6 +1769,92 @@ static unsigned long long pad_now_ms(void)
+@@ -776,6 +1769,95 @@ static unsigned long long pad_now_ms(void)
  #endif
  }
  
@@ -3781,7 +3781,8 @@ index 5f8a2fa2..da34fa02 100644
 +            abs((int)hs->analog_lx - 128) > 40 || abs((int)hs->analog_ly - 128) > 40 ||
 +            abs((int)hs->analog_rx - 128) > 40 || abs((int)hs->analog_ry - 128) > 40) {
 +            const unsigned long long now = pad_now_ms();
-+            if (!s_human_ms || now - s_human_ms > PAD_HUMAN_HOLD_MS) {
++            const unsigned long long h = __atomic_load_n(&s_human_ms, __ATOMIC_ACQUIRE);   /* Settings writes it too */
++            if (!h || now - h > PAD_HUMAN_HOLD_MS) {
 +                printf("[cellPad] controller in use -- scripted input paused (buttons %04X, L2 %d R2 %d, sticks %d,%d %d,%d)\n",
 +                       (unsigned)hs->buttons, hs->trigger_l2, hs->trigger_r2, hs->analog_lx, hs->analog_ly,
 +                       hs->analog_rx, hs->analog_ry);
@@ -3811,6 +3812,8 @@ index 5f8a2fa2..da34fa02 100644
 +    __atomic_store_n(&s_human_ms, pad_now_ms(), __ATOMIC_RELEASE);
 +    __atomic_store_n(&s_hostpress_n, 0, __ATOMIC_RELEASE);
 +}
++/* The host gave up on its press (no Load list came): drop what is left. */
++void racit_pad_host_clear(void) { __atomic_store_n(&s_hostpress_n, 0, __ATOMIC_RELEASE); }
 +int racit_pad_host_busy(void) { return __atomic_load_n(&s_hostpress_n, __ATOMIC_ACQUIRE) > 0; }
 +int racit_pad_player_active(void);
 +static int pad_scripted_ok(void)
@@ -3854,7 +3857,7 @@ index 5f8a2fa2..da34fa02 100644
  static void pad_poll_backend(void)
  {
      static unsigned long long s_last_ms = 0;
-@@ -793,7 +1872,33 @@ static void pad_poll_backend(void)
+@@ -793,7 +1875,33 @@ static void pad_poll_backend(void)
  #elif PAD_BACKEND_SDL2
      pad_poll_sdl2();
  #endif
@@ -3888,7 +3891,7 @@ index 5f8a2fa2..da34fa02 100644
      pad_track_assign();
      pad_unlock();
  }
-@@ -867,6 +1972,103 @@ void cellPad_poll(void)
+@@ -867,6 +1975,103 @@ void cellPad_poll(void)
   * were fixed.) These used to be redeclared here with a 64-bit address
   * parameter, which conflicts with the header now that it is included. */
  
@@ -3992,7 +3995,7 @@ index 5f8a2fa2..da34fa02 100644
  s32 cellPadGetData(u32 port_no, CellPadData* data_guest)
  {
      { static int _once = 0;
-@@ -883,6 +2085,7 @@ s32 cellPadGetData(u32 port_no, CellPadData* data_guest)
+@@ -883,6 +2088,7 @@ s32 cellPadGetData(u32 port_no, CellPadData* data_guest)
  
      /* Poll fresh state */
      pad_poll_backend();
@@ -4000,7 +4003,7 @@ index 5f8a2fa2..da34fa02 100644
  
      /* YDKJ_INJECT_PAD: the game's wait loop polls the pad (cellPadSetActDirect /
       * GetData) -- if it's parked on a "press button" prompt after loading, no
-@@ -977,7 +2180,7 @@ skip_inject: ;
+@@ -977,7 +2183,7 @@ skip_inject: ;
       * human at the pad. Env-gated test scaffolding, off by default. */
      { static int s_ap = -1; static unsigned s_apn = 0;
        if (s_ap < 0) s_ap = getenv("PAD_AUTOPRESS") ? 1 : 0;
@@ -4009,7 +4012,7 @@ index 5f8a2fa2..da34fa02 100644
            unsigned ph = s_apn++ % 240;
            if (ph < 12)
                data->button[CELL_PAD_BTN_OFFSET_DIGITAL2] |= 0x40;   /* CROSS */
-@@ -1013,7 +2216,7 @@ skip_inject: ;
+@@ -1013,7 +2219,7 @@ skip_inject: ;
                       *p ? " -- TRUNCATED at 256, the rest are ignored" : "");
            }
        }
@@ -4018,7 +4021,7 @@ index 5f8a2fa2..da34fa02 100644
            double now = pad_clock(t0);
            /* Latch, do not window. A fixed time window is missed whenever the
             * title stops polling the pad for longer than the window (it does
-@@ -1050,21 +2253,57 @@ skip_inject: ;
+@@ -1050,21 +2256,57 @@ skip_inject: ;
       */
      { static int s_pf = -1; static char pf_path[512];
        static unsigned held_mask = 0; static int held_n = 0;
@@ -4086,7 +4089,7 @@ index 5f8a2fa2..da34fa02 100644
                    fclose(f);
                    if (held_n > 0) { FILE* w = fopen(pf_path, "wb"); if (w) fclose(w); }
                }
-@@ -1072,9 +2311,46 @@ skip_inject: ;
+@@ -1072,9 +2314,47 @@ skip_inject: ;
            if (held_n > 0) {
                if (data->len > 0) held_n--;
                data->button[CELL_PAD_BTN_OFFSET_DIGITAL1] |= (u16)(held_mask & 0xFF);
@@ -4099,16 +4102,17 @@ index 5f8a2fa2..da34fa02 100644
 +              } }
        } }
  
-+    /* A held host press stops as soon as a person uses a control. */
-+    if (port_no == 0 && __atomic_load_n(&s_hostpress_n, __ATOMIC_ACQUIRE) > 0 && racit_pad_player_active())
-+        __atomic_store_n(&s_hostpress_n, 0, __ATOMIC_RELEASE);
 +    if (port_no == 0) {
-+        /* Claim this report first, so a cancel in between (Settings) either
-+         * wins and nothing is added, or comes after the press was taken. */
-+        int n = __atomic_load_n(&s_hostpress_n, __ATOMIC_ACQUIRE);
-+        while (n > 0 && !__atomic_compare_exchange_n(&s_hostpress_n, &n, data->len > 0 ? n - 1 : n, 0,
-+                                                    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {}
-+        if (n > 0) {
++        /* Claim this report in one step that also checks for a person at the
++         * controls (or Settings open): then the press is dropped, not added. A
++         * cancel in between makes the exchange fail and the loop look again. */
++        int n = __atomic_load_n(&s_hostpress_n, __ATOMIC_ACQUIRE), give = 0;
++        while (n > 0) {
++            give = !racit_pad_player_active();
++            const int next = !give ? 0 : data->len > 0 ? n - 1 : n;
++            if (__atomic_compare_exchange_n(&s_hostpress_n, &n, next, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) break;
++        }
++        if (n > 0 && give) {
 +            const unsigned m = __atomic_load_n(&s_hostpress_mask, __ATOMIC_RELAXED);
 +            data->button[CELL_PAD_BTN_OFFSET_DIGITAL1] |= (u16)(m & 0xFF);
 +            data->button[CELL_PAD_BTN_OFFSET_DIGITAL2] |= (u16)((m >> 8) & 0xFF);
@@ -4134,7 +4138,7 @@ index 5f8a2fa2..da34fa02 100644
      /* Analog sticks */
      /* PAD_STICK="lx,ly,rx,ry" (0-255, 128 = centred): hold the analog sticks at
       * fixed positions. Rubber Ducky drives its camera from the sticks and never
-@@ -1093,7 +2369,7 @@ skip_inject: ;
+@@ -1093,7 +2373,7 @@ skip_inject: ;
                   sscanf(e, "%d,%d,%d,%d,%lf,%lf", &a,&b,&c,&d,&s_from,&s_until);
                   s_v[0]=(unsigned char)a; s_v[1]=(unsigned char)b;
                   s_v[2]=(unsigned char)c; s_v[3]=(unsigned char)d; } }
@@ -4143,7 +4147,7 @@ index 5f8a2fa2..da34fa02 100644
                    hs->analog_rx = s_v[2]; hs->analog_ry = s_v[3];
                    hs->connected = 1; }
        /* PAD_SWEEP=<seconds per step>: walk the sticks through a fixed set of
-@@ -1104,7 +2380,7 @@ skip_inject: ;
+@@ -1104,7 +2384,7 @@ skip_inject: ;
        { static int sw = -1; static clock_t t0 = 0;
          if (sw < 0) { const char* e = getenv("PAD_SWEEP");
                        sw = e ? atoi(e) : 0; if (sw < 0) sw = 0; }
@@ -4152,7 +4156,7 @@ index 5f8a2fa2..da34fa02 100644
              static const unsigned char steps[9][4] = {
                  {128,128,128,128},
                  {128,  0,128,128}, {128,255,128,128},
-@@ -1172,10 +2448,40 @@ skip_inject: ;
+@@ -1172,10 +2452,40 @@ skip_inject: ;
          data->button[CELL_PAD_BTN_OFFSET_SENSOR_Y] = 399; /* gravity */
          data->button[CELL_PAD_BTN_OFFSET_SENSOR_Z] = 512;
          data->button[CELL_PAD_BTN_OFFSET_SENSOR_G] = 512;
@@ -4193,7 +4197,7 @@ index 5f8a2fa2..da34fa02 100644
      /* A non-zero len means "here is a CHANGE packet" -- the constant is literally
       * named CELL_PAD_LEN_CHANGE_DEFAULT. Hardware reports len = 0 once the port
       * has nothing new, and titles DRAIN on that: The Simpsons Arcade Game's
-@@ -1496,9 +2802,64 @@ s32 cellPadSetActDirect(u32 port_no, CellPadActParam* param)
+@@ -1496,9 +2806,64 @@ s32 cellPadSetActDirect(u32 port_no, CellPadActParam* param)
  #endif
  
  #if PAD_BACKEND_SDL2
