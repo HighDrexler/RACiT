@@ -35863,7 +35863,7 @@ index ea2e8351..0261d5e0 100644
  /* A store by the PPU landed on `ea`'s line. Raise SPU_EVENT_LR on every SPU
   * whose live reservation covers it, drop that reservation, and wake the host
 diff --git a/runtime/spu/spu_context.h b/runtime/spu/spu_context.h
-index 400b2ba5..02f1648d 100644
+index 400b2ba5..3d1e7828 100644
 --- a/runtime/spu/spu_context.h
 +++ b/runtime/spu/spu_context.h
 @@ -14,6 +14,12 @@
@@ -35931,7 +35931,21 @@ index 400b2ba5..02f1648d 100644
  
      /* Set by another host thread to stop this SPU from outside: a raw SPU's
       * PPU writing SPU_RunCntl = 0 (spu_raw.c). Lifted code never looks at it;
-@@ -630,6 +665,25 @@ static SPU_NOINLINE_COLD void spu_ls_read_probe(const spu_context* ctx, uint32_t
+@@ -433,6 +468,13 @@ typedef struct spu_context {
+      * spu_coh_reserve_fast). Written under that lock, read by the context's
+      * own thread. */
+     int coh_listed;
++
++    /* racacit: this context's cached address of its host thread's
++     * g_spu_trampoline_fn and the thread it belongs to (spu_tramp_slot).
++     * Zero in a fresh context; rewritten when the context runs on another
++     * thread. */
++    uintptr_t tramp_owner;
++    void (**tramp_slot)(struct spu_context*);
+ } spu_context;
+ 
+ /* event_status is written from more than one host thread: the SPU's own
+@@ -630,6 +672,25 @@ static SPU_NOINLINE_COLD void spu_ls_read_probe(const spu_context* ctx, uint32_t
      }
  }
  
@@ -35957,7 +35971,7 @@ index 400b2ba5..02f1648d 100644
  /* The read diagnostics, then g_spu_ls_rdiag recomputed: it drops to 0 once
   * none is armed (the first call also settles g_spu_ls_watch_n). */
  static SPU_NOINLINE_COLD void spu_ls_read_diag(const spu_context* ctx, uint32_t lsa)
-@@ -644,10 +698,12 @@ static SPU_NOINLINE_COLD void spu_ls_read_diag(const spu_context* ctx, uint32_t
+@@ -644,10 +705,12 @@ static SPU_NOINLINE_COLD void spu_ls_read_diag(const spu_context* ctx, uint32_t
  static inline u128 spu_ls_read128(const spu_context* ctx, uint32_t lsa)
  {
      u128 v;
@@ -35971,7 +35985,7 @@ index 400b2ba5..02f1648d 100644
  #if defined(__ARM_NEON)
      vst1q_u8(v._u8, vrev32q_u8(vld1q_u8(p)));     /* ldr q; rev32 */
  #elif SPU_LS_VEC
-@@ -746,7 +802,16 @@ static SPU_NOINLINE_COLD void spu_ls_write_diag(spu_context* ctx, uint32_t lsa,
+@@ -746,7 +809,16 @@ static SPU_NOINLINE_COLD void spu_ls_write_diag(spu_context* ctx, uint32_t lsa,
  static inline void spu_ls_write128(spu_context* ctx, uint32_t lsa, u128 val)
  {
      lsa &= SPU_LS_MASK & ~0xFu;
@@ -35989,7 +36003,7 @@ index 400b2ba5..02f1648d 100644
  #if defined(__ARM_NEON)
      vst1q_u8(p, vrev32q_u8(vld1q_u8(val._u8)));   /* rev32; str q */
  #elif SPU_LS_VEC
-@@ -765,8 +830,10 @@ static inline void spu_ls_write128(spu_context* ctx, uint32_t lsa, u128 val)
+@@ -765,8 +837,10 @@ static inline void spu_ls_write128(spu_context* ctx, uint32_t lsa, u128 val)
          p[i*4 + 3] = (uint8_t)w;
      }
  #endif
@@ -36000,7 +36014,7 @@ index 400b2ba5..02f1648d 100644
  }
  
  /* ---------------------------------------------------------------------------
-@@ -824,7 +891,12 @@ static inline u128 spu_make_preferred_u32(uint32_t val)
+@@ -824,7 +898,12 @@ static inline u128 spu_make_preferred_u32(uint32_t val)
  #define SPU_CH_LOCK(ch)   while (_InterlockedExchange(&(ch)->lock, 1)) _mm_pause()
  #define SPU_CH_UNLOCK(ch) _InterlockedExchange(&(ch)->lock, 0)
  #else
@@ -36013,7 +36027,7 @@ index 400b2ba5..02f1648d 100644
  #define SPU_CH_UNLOCK(ch) __atomic_store_n(&(ch)->lock, 0, __ATOMIC_RELEASE)
  #endif
  
-@@ -947,8 +1019,9 @@ void (*spu_take_interrupt(spu_context* ctx,
+@@ -947,8 +1026,9 @@ void (*spu_take_interrupt(spu_context* ctx,
  SPU_GATE int g_spu_irqwait_diag = -1;
  void spu_irqwait_diag(spu_context* ctx);
  
@@ -36025,7 +36039,7 @@ index 400b2ba5..02f1648d 100644
  /* SPU_PCHIST=1: bucket SPU execution by the GPU module's own symbols.
   *
   * SPU_VRAMPC showed 3.7M VRAM writes from Host2Local_Body and ZERO from
-@@ -1046,6 +1119,27 @@ static inline void spu_pchist_tick(const spu_context* ctx)
+@@ -1046,6 +1126,50 @@ static inline void spu_pchist_tick(const spu_context* ctx)
  extern volatile int g_spu_direct;                /* spu_drain.c: -1 unread, 0 off, 1 on */
  extern uint8_t g_spu_stack_reset_hint[1024];     /* spu_channels.c, by (entry >> 2) & 1023 */
  void spu_direct_init(void);
@@ -36037,10 +36051,33 @@ index 400b2ba5..02f1648d 100644
 + * step-watching diagnostics, SPU_TRACE_RING included, is running) that case
 + * is answered here: the same depth check, then return. Anything else, or
 + * the first call before g_spu_direct is read, takes the full drain. */
++/* racacit: on macOS every access to a thread-local is a call into the TLV
++ * resolver, and lifted SPU code writes g_spu_trampoline_fn at every exit
++ * (21k sites in A Crack in Time's images). On Apple arm64 the thread's
++ * identity is one register read (TPIDRRO_EL0, the thread's TSD base), so each
++ * context keeps the slot's address for the thread it last ran on and lifted
++ * code goes through that (spu_lifter.py emits SPU_TRAMP_OF(ctx) at each exit). Same
++ * variable, so mixing with direct accesses elsewhere is fine. */
++#if defined(__APPLE__) && defined(__aarch64__) && !defined(SPU_DRAIN_CALL_STUB)
++#  define SPU_TRAMP_FAST 1
++static inline void (**spu_tramp_slot(spu_context* c))(spu_context*)
++{
++    uintptr_t t;
++    __asm__("mrs %0, tpidrro_el0" : "=r"(t));
++    if (__builtin_expect(c->tramp_owner != t, 0)) {
++        c->tramp_slot = &g_spu_trampoline_fn;
++        c->tramp_owner = t;
++    }
++    return c->tramp_slot;
++}
++#  define SPU_TRAMP_OF(c) (*spu_tramp_slot(c))
++#else
++#  define SPU_TRAMP_OF(c) g_spu_trampoline_fn
++#endif
 +#ifndef SPU_DRAIN_CALL_STUB   /* tests that supply their own spu_drain_call */
 +static inline void spu_drain_call(spu_context* ctx, uint32_t return_pc)
 +{
-+    if (__builtin_expect(g_spu_direct > 0 && !g_spu_trampoline_fn &&
++    if (__builtin_expect(g_spu_direct > 0 && !SPU_TRAMP_OF(ctx) &&
 +                         ((ctx->pc ^ return_pc) & SPU_LS_MASK) == 0, 1)) {
 +        spu_depth_guard_check(ctx);
 +        return;
@@ -39704,7 +39741,7 @@ index dd9e4b32..745dc69f 100644
      out = subprocess.run([exe], capture_output=True, text=True)
      print(out.stdout, end="")
 diff --git a/tools/spu_lifter.py b/tools/spu_lifter.py
-index 4610a361..92979030 100644
+index 4610a361..50fb8c11 100644
 --- a/tools/spu_lifter.py
 +++ b/tools/spu_lifter.py
 @@ -204,6 +204,10 @@ class LiftedFunction:
@@ -39783,9 +39820,12 @@ index 4610a361..92979030 100644
          for insn in insns:
              if insn.addr < start or insn.addr >= end:
                  continue
-@@ -567,7 +596,13 @@ class SPULifter:
+@@ -565,9 +594,15 @@ class SPULifter:
+             if insn.addr in merged_starts:
+                 func.body_lines.append(
                      f"    if (ctx->int_enable && (ctx->event_status & ctx->event_mask)) "
-                     f"{{ ctx->pc = {self._pc(insn.addr)}; g_spu_trampoline_fn = "
+-                    f"{{ ctx->pc = {self._pc(insn.addr)}; g_spu_trampoline_fn = "
++                    f"{{ ctx->pc = {self._pc(insn.addr)}; SPU_TRAMP_OF(ctx) = "
                      f"{self.prefix}spu_func_{insn.addr:08X}; return; }}")
 +            fill = self._fill_idiom(insn, by_addr)
 +            if fill:
@@ -39812,7 +39852,7 @@ index 4610a361..92979030 100644
              func.body_lines.append(
 -                f"    {{ SPU_DIRECT(ctx, {self._pc(end)}, {self.prefix}spu_func_{end:08X}); }}")
 +                f"    {{ ctx->pc = {self._A(end)}; "
-+                f"g_spu_trampoline_fn = {self.prefix}spu_func_{end:08X}; return; }}")
++                f"SPU_TRAMP_OF(ctx) = {self.prefix}spu_func_{end:08X}; return; }}")
  
          # Infinite no-op self-loop (the SPU `br .` halt idiom): a function whose
          # whole body is nops + an unconditional branch back into itself does
@@ -39874,7 +39914,7 @@ index 4610a361..92979030 100644
 +            if t > insn.addr or t not in getattr(self, "func_starts", set()):
 +                return m.group(0)
 +            return ("{ if (__builtin_expect(ctx->int_enable && (ctx->event_status & ctx->event_mask), 0)) "
-+                    f"{{ ctx->pc = {self._A(t)}; g_spu_trampoline_fn = {self.prefix}spu_func_{t:08X}; return; }} "
++                    f"{{ ctx->pc = {self._A(t)}; SPU_TRAMP_OF(ctx) = {self.prefix}spu_func_{t:08X}; return; }} "
 +                    f"goto loc_{t:08X}; }}")
 +        return re.sub(r"goto loc_([0-9A-F]{8});", sub, c)
  
@@ -39905,10 +39945,24 @@ index 4610a361..92979030 100644
 +            # Cross-function conditional branch = conditional tail: hand the
 +            # target to the trampoline and unwind (enclosing SPU_DRAIN re-enters).
 +            return (f"if ({cond}) {{ ctx->pc = {self._A(tgt)}; "
-+                    f"g_spu_trampoline_fn = {self.prefix}spu_func_{tgt:08X}; return; }}")
++                    f"SPU_TRAMP_OF(ctx) = {self.prefix}spu_func_{tgt:08X}; return; }}")
          # Interrupt enable/disable bits on the bi family (bie/bid, irete/iretd,
          # bisle(d)...): bit 0x40000 = E (enable), 0x80000 = D (disable), taking
          # effect when the branch is TAKEN. The WWS jobmanager's poll loop runs
+@@ -992,11 +1075,11 @@ class SPULifter:
+                 return f"{_ied}SPU_RET(ctx);"
+             # Computed indirect tail: set pc + trampoline to the dispatcher, unwind.
+             return (f"{_ied}ctx->pc = {g(tgt_reg)}._u32[0]; "
+-                    f"g_spu_trampoline_fn = spu_indirect_branch; return;")
++                    f"SPU_TRAMP_OF(ctx) = spu_indirect_branch; return;")
+         # iret: interrupt return -> branch to the saved interrupt PC (SRR0).
+         if mn == "iret":
+             return (f"{_ied}ctx->pc = ctx->srr0; "
+-                    "g_spu_trampoline_fn = spu_indirect_branch; return;")
++                    "SPU_TRAMP_OF(ctx) = spu_indirect_branch; return;")
+         if mn in ("bisl",):
+             # `bisl rt, ra`: rt = link, ra = TARGET. The disassembler emits BOTH
+             # ("$r0, $r2"), so operand 0 is the link register -- taking it as the
 @@ -1010,12 +1093,11 @@ class SPULifter:
              # SPU_DRAIN + image save/restore) so the callee's tail-chains drain
              # here and its `bi $r0` returns via host return.
@@ -39924,6 +39978,24 @@ index 4610a361..92979030 100644
          # bisled: set link, branch to RA only if an external event is pending.
          if mn in ("bisled",):
              link_rt = insn.raw & 0x7F            # rt = link
+@@ -1024,7 +1106,7 @@ class SPULifter:
+             return (f"{{ uint32_t _tg = {g(tgt_reg)}._u32[0]; {g(link_rt)} = spu_link({self._pc((addr + 4) & 0x3FFFC)}); "
+                     f"if ((ctx->event_status & ctx->event_mask) != 0) {{ "
+                     f"{_ied}ctx->pc = _tg; "
+-                    f"g_spu_trampoline_fn = spu_indirect_branch; return; }} }}")
++                    f"SPU_TRAMP_OF(ctx) = spu_indirect_branch; return; }} }}")
+         # biz/binz/bihz/bihnz: ops[0] = condition reg, ops[1] = target reg.
+         if mn in ("biz", "binz", "bihz", "bihnz"):
+             cond = self._cond(mn[1:], _reg(ops[0]))   # strip leading 'b' -> iz/inz...
+@@ -1040,7 +1122,7 @@ class SPULifter:
+                     return f"if ({cond}) {{ {_ied}SPU_RET_REG(ctx, {tgt_reg}); }}"
+                 return f"if ({cond}) {{ {_ied}SPU_RET(ctx); }}"
+             return (f"if ({cond}) {{ {_ied}ctx->pc = {g(tgt_reg)}._u32[0]; "
+-                    f"g_spu_trampoline_fn = spu_indirect_branch; return; }}")
++                    f"SPU_TRAMP_OF(ctx) = spu_indirect_branch; return; }}")
+ 
+         # hint-for-branch: pure performance hint, safe to drop
+         if mn in ("hbr", "hbra", "hbrr"):
 @@ -1073,16 +1155,17 @@ class SPULifter:
          if func.start_addr <= tgt < func.end_addr:
              return f"goto loc_{tgt:08X};"
@@ -39936,7 +40008,7 @@ index 4610a361..92979030 100644
 +        # Cross-function unconditional tail: hand the target to the trampoline
 +        # and unwind so the enclosing SPU_DRAIN re-enters (no host-stack growth).
 +        return (f"{{ ctx->pc = {self._A(tgt)}; "
-+                f"g_spu_trampoline_fn = {self.prefix}spu_func_{tgt:08X}; return; }}")
++                f"SPU_TRAMP_OF(ctx) = {self.prefix}spu_func_{tgt:08X}; return; }}")
  
      # ------------------------------------------------------------------ #
      def emit_header(self) -> str:
@@ -39977,7 +40049,7 @@ index 4610a361..92979030 100644
                  lines.append(b if b.endswith(":") else f"    {b}")
              lines.append("}")
              lines.append("")
-@@ -1113,16 +1215,15 @@ class SPULifter:
+@@ -1113,17 +1215,16 @@ class SPULifter:
          # at runtime we route through spu_indirect_branch which either lands
          # on a registered mid-function entry (if one was emitted) or halts
          # cleanly with a "PC X not registered" diagnostic.
@@ -39992,11 +40064,13 @@ index 4610a361..92979030 100644
 -                lines.append(f"void {self.prefix}spu_func_{t:08X}(spu_context* ctx) {{")
 -                pc = self._pc(t) if self.reloc else f"0x{t:X}u"
 -                lines.append(f"    ctx->pc = {pc}; "
+-                             f"g_spu_trampoline_fn = spu_indirect_branch; return;")
 +                lines.append(f"void {self.prefix}spu_func_{t:08X}(spu_context* SPU_RESTRICT ctx) {{")
 +                lines.append(f"    ctx->pc = {self._A(t)}; "
-                              f"g_spu_trampoline_fn = spu_indirect_branch; return;")
++                             f"SPU_TRAMP_OF(ctx) = spu_indirect_branch; return;")
                  lines.append("}")
              lines.append("")
+ 
 @@ -1131,6 +1232,8 @@ class SPULifter:
          lines.append("typedef struct { uint32_t addr; void (*func)(spu_context*); const char* name; } spu_func_entry;")
          lines.append("static const spu_func_entry spu_function_table[] = {")
@@ -40342,3 +40416,16 @@ index 4610a361..92979030 100644
  
      os.makedirs(args.output, exist_ok=True)
      hp = os.path.join(args.output, args.header_name)
+diff --git a/tools/test_spu_lifter_merge_chunks.py b/tools/test_spu_lifter_merge_chunks.py
+index 4cb71610..bae722f6 100644
+--- a/tools/test_spu_lifter_merge_chunks.py
++++ b/tools/test_spu_lifter_merge_chunks.py
+@@ -94,7 +94,7 @@ def lift(merge):
+ 
+ class MergeChunkInterrupts(unittest.TestCase):
+     CHECK = ('if (ctx->int_enable && (ctx->event_status & ctx->event_mask)) '
+-             '{ ctx->pc = 0x4; g_spu_trampoline_fn = spu_func_00000004; return; }')
++             '{ ctx->pc = 0x4; SPU_TRAMP_OF(ctx) = spu_func_00000004; return; }')
+ 
+     def body(self, lifter, addr):
+         return '\n'.join(next(f for f in lifter.functions if f.start_addr == addr).body_lines)
