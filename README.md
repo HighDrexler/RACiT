@@ -68,6 +68,7 @@ The launcher's Settings screen and the in-game menu have the same settings, exce
 | Upscaling | `RACACIT_UPSCALE` | Bilinear | How the image is scaled to the window: bilinear, sharp (bicubic plus sharpening) or nearest (pixelated). |
 | Sharpness | `RACACIT_SHARPNESS` | 50% | Sharpening strength, 0 to 10 (0% to 100%). |
 | Brightness | `RACACIT_BRIGHTNESS` | Default (0) | -5 to +5. |
+| Bloom | `RACACIT_BLOOM` | On | The glow around bright things, `on` or `off`. Changes right away from the F1 menu. |
 | Texture quality | `RACACIT_TEX_QUALITY` | High (original) | Medium and low use smaller textures, for GPUs low on memory. Takes effect after a restart. |
 | Anisotropic filtering | `RACACIT_ANISO` | Off | 2x to 16x, sharper textures at an angle. |
 | Trilinear filtering | `RACACIT_TRILINEAR` | Off | Smoother blending between texture sizes. |
@@ -122,6 +123,7 @@ These are on the in-game menu's Game page too. The game reads most of them when 
 | Language | `RACACIT_LANGUAGE` | English | The disc's own translations: `fr`, `es`, `de`, `it`, `nl`. |
 | Logos and notices at boot | `RACACIT_SKIP_INTRO` | Show | Skips the startup logos and notices. |
 | PRESS START screen | `RACACIT_SKIP_PRESS_START` | Show | Skips the title screen (with logos skipped). |
+| Continue at start | `RACACIT_AUTO_CONTINUE` | Off | Goes straight from launch into your latest save, past the logos and menus. Touch any control before it loads to stay on the main menu. With no save yet it stops at the main menu. |
 | START skips movies | `RACACIT_START_SKIPS_MOVIES` | Yes | START skips a movie. |
 | Every cutscene skippable | `RACACIT_ALL_CUTSCENES_SKIPPABLE` | Yes | Lets you skip cutscenes the game normally doesn't let you skip. |
 | Land anywhere in space | `RACACIT_SPACE_FREE_LANDING` | Yes | Every moon and planet in space can be landed on without waiting for the story to unlock it. Off keeps the original story lock. |
@@ -142,4 +144,5 @@ These aren't in the menus and are still experimental.
 | --- | --- |
 | `RACACIT_FPS_CAP` above 60 | Lets the game run past 60 fps with game speed kept at real time, for example `RACACIT_FPS_CAP=120`. Use it with `RACACIT_VBLANK_HZ` and frame pacing off. Some things may still be tied to 60. |
 | `RACACIT_VBLANK_HZ` | The console's refresh rate the game sees, 60 by default. Set it to match a frame cap above 60. |
+| `RACACIT_BENCHMARK` | `1` runs a benchmark instead of playing: the game goes straight to the main menu, continues your latest save, strafes left and right for two minutes once the level is up, then quits. The result (average FPS, 1% and 0.1% lows) is in `benchmark.txt` next to `settings.txt` (`RACACIT_BENCHMARK_RESULT` names another file, which the launcher does for each run). It plays from a copy of your saves, so they don't change, and controllers and touch controls do nothing while it runs. The launcher's Benchmark button sets it for one run. |
 | `RACACIT_UI_FONT` | A font file (.ttf, .otf or .ttc) for the in-game menu and the FPS counter, for example `RACACIT_UI_FONT=/usr/share/fonts/TTF/Inter.ttf`. Without it the menu uses the system font: Segoe UI on Windows, the system font on macOS, your desktop's sans-serif on Linux, Roboto on Android. Not used on Windows or Android. |

@@ -1,5 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index a39405d6..1af1b517 100644
+index a39405d6..d65ced14 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -47,12 +47,9 @@ list(FILTER HLE_SOURCES EXCLUDE REGEX "/tests/")
@@ -166,7 +166,7 @@ index a39405d6..1af1b517 100644
  elseif(MSVC)
      # Real cl.exe -- clang-cl reports its id as Clang and is handled above.
      #
-@@ -488,6 +562,14 @@ if(PS3RECOMP_BUILD_TESTS)
+@@ -488,12 +562,29 @@ if(PS3RECOMP_BUILD_TESTS)
          add_test(NAME spu_lockline_wait COMMAND test_spu_lockline_wait)
          set_tests_properties(spu_lockline_wait PROPERTIES TIMEOUT 15)
  
@@ -181,7 +181,22 @@ index a39405d6..1af1b517 100644
      endif()
      add_executable(test_rsx_present_policy tests/test_rsx_present_policy.c)
      target_include_directories(test_rsx_present_policy PRIVATE
-@@ -568,7 +650,7 @@ endif()
+         "${CMAKE_CURRENT_SOURCE_DIR}/libs/video")
+     add_test(NAME rsx_present_policy COMMAND test_rsx_present_policy)
+ 
++    # Touch controls without SDL: a stick or camera drag never presses a button it crosses.
++    add_executable(test_touch_controls tests/test_touch_controls.c libs/input/touch_controls.c)
++    target_include_directories(test_touch_controls PRIVATE include libs/input)
++    target_compile_definitions(test_touch_controls PRIVATE TC_NO_SDL)
++    if(NOT WIN32)
++        target_link_libraries(test_touch_controls PRIVATE m)
++    endif()
++    add_test(NAME touch_controls COMMAND test_touch_controls)
++
+     # vmx_fmaf (fused multiply-add without a libm call per lane) against fmaf.
+     # Without -mfma it takes the double-rounding path; with it, the builtin.
+     add_executable(test_vmx_fmaf tests/test_vmx_fmaf.c)
+@@ -568,7 +659,7 @@ endif()
  # run. Builds on any POSIX host: it picks Metal on Apple and the null backend's
  # headless software path everywhere else, so Linux -- which has no real backend
  # yet -- can still run the whole guest command stream end to end in CI.
@@ -190,7 +205,7 @@ index a39405d6..1af1b517 100644
      add_executable(ps3recomp_host
          runtime/host/host_posix.c
          runtime/host/host_stubs.c
-@@ -716,7 +798,7 @@ endif()
+@@ -716,7 +807,7 @@ endif()
  #
  # The HLE NID table is generated exactly as a port generates it, so the smoke
  # title's firmware imports resolve through the same bridge a game's do.
@@ -2437,8 +2452,28 @@ index 4d916ac7..1dfee100 100644
      /* If creating, ensure parent directories exist */
      if (flags & CELL_FS_O_CREAT) {
          ensure_parent_dirs(host_path);
+diff --git a/libs/input/cellKb.c b/libs/input/cellKb.c
+index 6b4cdbc7..c5093c3b 100644
+--- a/libs/input/cellKb.c
++++ b/libs/input/cellKb.c
+@@ -120,9 +120,15 @@ static u16 kb_raw_to_ascii(u16 raw, u32 mkey)
+  * API implementations
+  * -----------------------------------------------------------------------*/
+ 
++/* Told of every cellKbInit call (A Crack in Time calls it at the main menu and
++ * again once a level is up): game/benchmark.cpp waits for the second. NULL
++ * unless a title sets it. */
++void (*g_kb_init_hook)(void) = 0;
++
+ s32 cellKbInit(u32 max_connect)
+ {
+     printf("[cellKb] Init(max_connect=%u)\n", max_connect);
++    { void (*hook)(void) = __atomic_load_n(&g_kb_init_hook, __ATOMIC_ACQUIRE); if (hook) hook(); }
+ 
+     if (s_kb_initialized)
+         return CELL_KB_ERROR_ALREADY_INITIALIZED;
 diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
-index 5f8a2fa2..4c04678f 100644
+index 5f8a2fa2..1f7272f8 100644
 --- a/libs/input/cellPad.c
 +++ b/libs/input/cellPad.c
 @@ -13,11 +13,13 @@
@@ -3402,7 +3437,7 @@ index 5f8a2fa2..4c04678f 100644
  
          s_host_state[i].buttons = btns;
  
-@@ -707,11 +1369,342 @@ static void pad_poll_sdl2(void)
+@@ -707,11 +1369,377 @@ static void pad_poll_sdl2(void)
          s_host_state[i].press_square   = (btns & CELL_PAD_CTRL_SQUARE)   ? 255 : 0;
          s_host_state[i].press_l1       = (btns & CELL_PAD_CTRL_L1)       ? 255 : 0;
          s_host_state[i].press_r1       = (btns & CELL_PAD_CTRL_R1)       ? 255 : 0;
@@ -3417,7 +3452,7 @@ index 5f8a2fa2..4c04678f 100644
 +            ds5_weapon(&st[10], 3, 6, 8);
 +            ds5_send(gc, st);
 +        }
-+    }
+     }
 +    pad_poll_sdl_fallbacks();
 +}
 +
@@ -3531,6 +3566,22 @@ index 5f8a2fa2..4c04678f 100644
 +
 +/* After the controllers (and PAD_IGNORE_REAL, under which only the test
 + * hook's keys count: rsx_host_ui_test_key). */
++/* Touch camera motion when keyboard and mouse are off (Settings > Controls, or
++ * PAD_NO_KEYBOARD): the same feed pad_poll_kbm makes, with touch as the mouse. */
++static void pad_touch_look(int dx, int dy, const rsx_host_options* opt)
++{
++    extern void racit_mouse_feed(uint64_t, int, int, int, float, int, int, float*);
++    extern int racit_stick_byte(float, float);
++    const uint64_t now_ns = (uint64_t)((double)SDL_GetPerformanceCounter() * 1000000000.0 / (double)SDL_GetPerformanceFrequency());
++    float push[2] = { 0.0f, 0.0f };
++    racit_mouse_feed(now_ns, dx, dy, 1, (float)opt->mouse_sens, opt->mouse_invert, 1, push);
++    if (push[0] || push[1]) {
++        PadHostState* hs = &s_host_state[0];
++        hs->analog_rx = (u8)racit_stick_byte(0.0f, push[0]);
++        hs->analog_ry = (u8)racit_stick_byte(0.0f, push[1]);
++    }
++}
++
 +static void pad_poll_kbm(int ignore_real)
 +{
 +    kb_init(ignore_real);
@@ -3541,9 +3592,18 @@ index 5f8a2fa2..4c04678f 100644
 +     * "hold" commands then reach the game without a window. */
 +    const int video = SDL_WasInit(SDL_INIT_VIDEO) != 0;
 +    if (!video && ignore_real) rsx_host_ui_poll_script();
-+    if (!s_kbm_on || !opt.kbm || (!video && !ignore_real)) return;
++    /* Camera swipes on the touch controls are mouse motion: they turn the
++     * cameras directly through the same feed, and touch counts as a captured
++     * mouse while the touch controls are up (touch_controls.c). */
++    int tdx = 0, tdy = 0;
++    const int touch_look = !ignore_real && touch_controls_look(&tdx, &tdy);
++    if (!s_kbm_on || !opt.kbm || (!video && !ignore_real)) {
++        if (touch_look) pad_touch_look(tdx, tdy, &opt);
++        return;
++    }
 +    int dx = 0, dy = 0, wheel = 0; unsigned mb = 0;
-+    const int captured = rsx_host_ui_mouse_take(&dx, &dy, &wheel, &mb);
++    int captured = rsx_host_ui_mouse_take(&dx, &dy, &wheel, &mb);
++    if (touch_look) { dx += tdx; dy += tdy; captured = 1; }
 +    /* Keys only while the game window has the keyboard: typing elsewhere does
 +     * not play, and nothing stays held across an Alt+Tab. */
 +    const Uint8* ks = !ignore_real && SDL_GetKeyboardFocus() ? SDL_GetKeyboardState(NULL) : NULL;
@@ -3611,7 +3671,8 @@ index 5f8a2fa2..4c04678f 100644
 +        if ((mb & 1u) || wh > 0) btns |= CELL_PAD_CTRL_L1;             /* left click / wheel up: previous ring */
 +        if ((mb & 4u) || wh < 0) btns |= CELL_PAD_CTRL_R1;             /* right click / wheel down: next ring */
 +    }
-+    if (btns || dx || dy || wheel || mb ||
++    /* A touch swipe is not the mouse: playing by touch keeps the pad prompts. */
++    if (btns || dx != tdx || dy != tdy || wheel || mb ||
 +        held[KB_LS_UP] || held[KB_LS_DOWN] || held[KB_LS_LEFT] || held[KB_LS_RIGHT] ||
 +        held[KB_RS_UP] || held[KB_RS_DOWN] || held[KB_RS_LEFT] || held[KB_RS_RIGHT])
 +        SDL_AtomicSet(&s_racit_keyboard_prompts, 1);
@@ -3668,14 +3729,18 @@ index 5f8a2fa2..4c04678f 100644
 +            hs->analog_rx = (u8)racit_stick_byte(kx, push[0]);
 +            hs->analog_ry = (u8)racit_stick_byte(ky, push[1]);
 +        }
-     }
- }
- 
++    }
++}
++
 +static void pad_poll_sdl_fallbacks(void)
 +{
 +    /* On-screen touch controls drive port 0 while no gamepad is attached. */
 +    touch_controls_set_gamepad(s_sdl_controllers[0] != NULL);
-+    if (touch_controls_active()) {
++    /* PAD_IGNORE_REAL (scripted runs, the benchmark): no touches at all, so a
++     * tap on the menu button can't push F1 into a scripted run either. */
++    static int ign = -1;
++    if (ign < 0) { const char* e = getenv("PAD_IGNORE_REAL"); ign = e && *e == '1'; }
++    if (!ign && touch_controls_active()) {
 +        static float s_aspect = 0.0f;
 +        if (s_aspect <= 0.0f) {
 +            SDL_Rect r;
@@ -3686,7 +3751,8 @@ index 5f8a2fa2..4c04678f 100644
 +        }
 +        PadHostState* hs = &s_host_state[0];
 +        u16 b = 0; u8 lx = 128, ly = 128, rx = 128, ry = 128;
-+        touch_controls_poll(s_aspect, &b, &lx, &ly, &rx, &ry);
++        /* A finger down shows the game's own controller prompts, not keycaps. */
++        if (touch_controls_poll(s_aspect, &b, &lx, &ly, &rx, &ry)) SDL_AtomicSet(&s_racit_keyboard_prompts, 0);
 +        hs->buttons = b;
 +        hs->analog_lx = lx; hs->analog_ly = ly; hs->analog_rx = rx; hs->analog_ry = ry;
 +        hs->trigger_l2 = (b & CELL_PAD_CTRL_L2) ? 255 : 0;
@@ -3698,6 +3764,10 @@ index 5f8a2fa2..4c04678f 100644
 +        hs->press_up = (b & CELL_PAD_CTRL_UP) ? 255 : 0;  hs->press_down  = (b & CELL_PAD_CTRL_DOWN)  ? 255 : 0;
 +        hs->press_left = (b & CELL_PAD_CTRL_LEFT) ? 255 : 0; hs->press_right = (b & CELL_PAD_CTRL_RIGHT) ? 255 : 0;
 +        hs->press_l1 = (b & CELL_PAD_CTRL_L1) ? 255 : 0;  hs->press_r1 = (b & CELL_PAD_CTRL_R1) ? 255 : 0;
++    } else {
++        /* Hidden (Settings open or a controller in): a finger held through it
++         * starts over afterwards instead of jumping from where it was. */
++        touch_controls_reset();
 +    }
 +}
 +
@@ -3716,8 +3786,8 @@ index 5f8a2fa2..4c04678f 100644
 +    const int k = SDL_GameControllerAddMappingsFromFile("gamecontrollerdb.txt");
 +    if (k > 0) fprintf(stderr, "[cellPad] %d controller mappings from gamecontrollerdb.txt%c", k, 10);
 +    (void)n;
-+}
-+
+ }
+ 
  static void pad_init_backend(void)
  {
 +    /* Face buttons by position on every controller: the bottom one is Cross,
@@ -3745,7 +3815,7 @@ index 5f8a2fa2..4c04678f 100644
      if (!s_sdl_inited) {
          if (SDL_WasInit(SDL_INIT_GAMECONTROLLER) == 0) {
              /* The game is not always the focused app: on macOS its window
-@@ -729,12 +1722,12 @@ static void pad_init_backend(void)
+@@ -729,12 +1757,14 @@ static void pad_init_backend(void)
              SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER);
          }
          s_sdl_inited = 1;
@@ -3757,11 +3827,13 @@ index 5f8a2fa2..4c04678f 100644
 -    /* Open any controllers already connected */
 -    pad_sdl_hotplug(1);
 +    pad_sdl_attach();
-+    SDL_AtomicSet(&s_racit_keyboard_prompts, s_sdl_controllers[0] == NULL);
++    /* Keycaps to start with only when there is neither a controller nor the
++     * touch controls: playing by touch is playing with a pad. */
++    SDL_AtomicSet(&s_racit_keyboard_prompts, s_sdl_controllers[0] == NULL && !touch_controls_active());
  }
  
  static void pad_shutdown_backend(void)
-@@ -776,6 +1769,62 @@ static unsigned long long pad_now_ms(void)
+@@ -776,6 +1806,95 @@ static unsigned long long pad_now_ms(void)
  #endif
  }
  
@@ -3781,21 +3853,48 @@ index 5f8a2fa2..4c04678f 100644
 +            abs((int)hs->analog_lx - 128) > 40 || abs((int)hs->analog_ly - 128) > 40 ||
 +            abs((int)hs->analog_rx - 128) > 40 || abs((int)hs->analog_ry - 128) > 40) {
 +            const unsigned long long now = pad_now_ms();
-+            if (!s_human_ms || now - s_human_ms > PAD_HUMAN_HOLD_MS) {
++            const unsigned long long h = __atomic_load_n(&s_human_ms, __ATOMIC_ACQUIRE);   /* Settings writes it too */
++            if (!h || now - h > PAD_HUMAN_HOLD_MS) {
 +                printf("[cellPad] controller in use -- scripted input paused (buttons %04X, L2 %d R2 %d, sticks %d,%d %d,%d)\n",
 +                       (unsigned)hs->buttons, hs->trigger_l2, hs->trigger_r2, hs->analog_lx, hs->analog_ly,
 +                       hs->analog_rx, hs->analog_ry);
 +                fflush(stdout);
 +            }
-+            s_human_ms = now;
++            __atomic_store_n(&s_human_ms, now, __ATOMIC_RELEASE);   /* read by racit_pad_player_active on other threads */
 +            return;
 +        }
 +    }
 +}
++/* A press the host asks for (Continue at start, game/stubs.cpp): `mask` held on
++ * port 0 for `reports` positive reports, over whatever the player presses.
++ * racit_pad_host_busy says whether it is still being held, and
++ * racit_pad_player_active whether a person has touched any control in the
++ * last 20 s (the host then stands down). */
++static unsigned s_hostpress_mask;
++static int s_hostpress_n;
++void racit_pad_host_press(unsigned mask, int reports)
++{
++    __atomic_store_n(&s_hostpress_mask, mask, __ATOMIC_RELAXED);
++    __atomic_store_n(&s_hostpress_n, reports, __ATOMIC_RELEASE);
++}
++/* Settings opened: a person is at the controls from now on, as after any
++ * control (racit_pad_player_active), and a held host press stops. */
++void racit_pad_host_cancel(void)
++{
++    __atomic_store_n(&s_human_ms, pad_now_ms(), __ATOMIC_RELEASE);
++    __atomic_store_n(&s_hostpress_n, 0, __ATOMIC_RELEASE);
++}
++/* The host gave up on its press (no Load list came): drop what is left. */
++void racit_pad_host_clear(void) { __atomic_store_n(&s_hostpress_n, 0, __ATOMIC_RELEASE); }
++int racit_pad_host_busy(void) { return __atomic_load_n(&s_hostpress_n, __ATOMIC_ACQUIRE) > 0; }
++int racit_pad_player_active(void);
 +static int pad_scripted_ok(void)
 +{
-+    return !s_human_ms || pad_now_ms() - s_human_ms > PAD_HUMAN_HOLD_MS;
++    const unsigned long long h = __atomic_load_n(&s_human_ms, __ATOMIC_ACQUIRE);
++    return !h || pad_now_ms() - h > PAD_HUMAN_HOLD_MS;
 +}
++/* Settings open counts at once, not only from the next full pad poll. */
++int racit_pad_player_active(void) { return !pad_scripted_ok() || rsx_host_ui_capturing(); }
 +
 +/* While the host settings menu is open (libs/video/rsx_host_ui.h) the game
 + * sees an idle pad, and keeps seeing one after the menu closes until every
@@ -3805,7 +3904,13 @@ index 5f8a2fa2..4c04678f 100644
 +{
 +    static int hold = 0;
 +    const int cap = rsx_host_ui_capturing();
-+    if (cap) hold = 1;
++    if (cap) {
++        hold = 1;
++        /* Opening Settings (F1) is a person at the controls: a host press waiting
++         * to be delivered (Continue at start) stops, as for any control. */
++        __atomic_store_n(&s_human_ms, pad_now_ms(), __ATOMIC_RELEASE);
++        __atomic_store_n(&s_hostpress_n, 0, __ATOMIC_RELEASE);
++    }
 +    if (!hold) return;
 +    int any = 0;
 +    for (int i = 0; i < PAD_MAX_HOST_PORTS; i++) {
@@ -3824,7 +3929,7 @@ index 5f8a2fa2..4c04678f 100644
  static void pad_poll_backend(void)
  {
      static unsigned long long s_last_ms = 0;
-@@ -793,7 +1842,33 @@ static void pad_poll_backend(void)
+@@ -793,7 +1912,33 @@ static void pad_poll_backend(void)
  #elif PAD_BACKEND_SDL2
      pad_poll_sdl2();
  #endif
@@ -3858,7 +3963,7 @@ index 5f8a2fa2..4c04678f 100644
      pad_track_assign();
      pad_unlock();
  }
-@@ -867,6 +1942,103 @@ void cellPad_poll(void)
+@@ -867,6 +2012,103 @@ void cellPad_poll(void)
   * were fixed.) These used to be redeclared here with a 64-bit address
   * parameter, which conflicts with the header now that it is included. */
  
@@ -3962,7 +4067,7 @@ index 5f8a2fa2..4c04678f 100644
  s32 cellPadGetData(u32 port_no, CellPadData* data_guest)
  {
      { static int _once = 0;
-@@ -883,6 +2055,7 @@ s32 cellPadGetData(u32 port_no, CellPadData* data_guest)
+@@ -883,6 +2125,7 @@ s32 cellPadGetData(u32 port_no, CellPadData* data_guest)
  
      /* Poll fresh state */
      pad_poll_backend();
@@ -3970,7 +4075,7 @@ index 5f8a2fa2..4c04678f 100644
  
      /* YDKJ_INJECT_PAD: the game's wait loop polls the pad (cellPadSetActDirect /
       * GetData) -- if it's parked on a "press button" prompt after loading, no
-@@ -977,7 +2150,7 @@ skip_inject: ;
+@@ -977,7 +2220,7 @@ skip_inject: ;
       * human at the pad. Env-gated test scaffolding, off by default. */
      { static int s_ap = -1; static unsigned s_apn = 0;
        if (s_ap < 0) s_ap = getenv("PAD_AUTOPRESS") ? 1 : 0;
@@ -3979,7 +4084,7 @@ index 5f8a2fa2..4c04678f 100644
            unsigned ph = s_apn++ % 240;
            if (ph < 12)
                data->button[CELL_PAD_BTN_OFFSET_DIGITAL2] |= 0x40;   /* CROSS */
-@@ -1013,7 +2186,7 @@ skip_inject: ;
+@@ -1013,7 +2256,7 @@ skip_inject: ;
                       *p ? " -- TRUNCATED at 256, the rest are ignored" : "");
            }
        }
@@ -3988,7 +4093,7 @@ index 5f8a2fa2..4c04678f 100644
            double now = pad_clock(t0);
            /* Latch, do not window. A fixed time window is missed whenever the
             * title stops polling the pad for longer than the window (it does
-@@ -1050,21 +2223,57 @@ skip_inject: ;
+@@ -1050,21 +2293,57 @@ skip_inject: ;
       */
      { static int s_pf = -1; static char pf_path[512];
        static unsigned held_mask = 0; static int held_n = 0;
@@ -4056,7 +4161,7 @@ index 5f8a2fa2..4c04678f 100644
                    fclose(f);
                    if (held_n > 0) { FILE* w = fopen(pf_path, "wb"); if (w) fclose(w); }
                }
-@@ -1072,9 +2281,30 @@ skip_inject: ;
+@@ -1072,9 +2351,47 @@ skip_inject: ;
            if (held_n > 0) {
                if (data->len > 0) held_n--;
                data->button[CELL_PAD_BTN_OFFSET_DIGITAL1] |= (u16)(held_mask & 0xFF);
@@ -4069,6 +4174,23 @@ index 5f8a2fa2..4c04678f 100644
 +              } }
        } }
  
++    if (port_no == 0) {
++        /* Claim this report in one step that also checks for a person at the
++         * controls (or Settings open): then the press is dropped, not added. A
++         * cancel in between makes the exchange fail and the loop look again. */
++        int n = __atomic_load_n(&s_hostpress_n, __ATOMIC_ACQUIRE), give = 0;
++        while (n > 0) {
++            give = !racit_pad_player_active();
++            const int next = !give ? 0 : data->len > 0 ? n - 1 : n;
++            if (__atomic_compare_exchange_n(&s_hostpress_n, &n, next, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) break;
++        }
++        if (n > 0 && give) {
++            const unsigned m = __atomic_load_n(&s_hostpress_mask, __ATOMIC_RELAXED);
++            data->button[CELL_PAD_BTN_OFFSET_DIGITAL1] |= (u16)(m & 0xFF);
++            data->button[CELL_PAD_BTN_OFFSET_DIGITAL2] |= (u16)((m >> 8) & 0xFF);
++        }
++    }
++
 +#ifdef __ANDROID__
 +    /* The dual-screen companion's taps (game/android_companion.cpp): a short
 +     * queue of holds -- buttons plus optional sticks for N polls each -- on
@@ -4088,7 +4210,7 @@ index 5f8a2fa2..4c04678f 100644
      /* Analog sticks */
      /* PAD_STICK="lx,ly,rx,ry" (0-255, 128 = centred): hold the analog sticks at
       * fixed positions. Rubber Ducky drives its camera from the sticks and never
-@@ -1093,7 +2323,7 @@ skip_inject: ;
+@@ -1093,7 +2410,7 @@ skip_inject: ;
                   sscanf(e, "%d,%d,%d,%d,%lf,%lf", &a,&b,&c,&d,&s_from,&s_until);
                   s_v[0]=(unsigned char)a; s_v[1]=(unsigned char)b;
                   s_v[2]=(unsigned char)c; s_v[3]=(unsigned char)d; } }
@@ -4097,7 +4219,7 @@ index 5f8a2fa2..4c04678f 100644
                    hs->analog_rx = s_v[2]; hs->analog_ry = s_v[3];
                    hs->connected = 1; }
        /* PAD_SWEEP=<seconds per step>: walk the sticks through a fixed set of
-@@ -1104,7 +2334,7 @@ skip_inject: ;
+@@ -1104,7 +2421,7 @@ skip_inject: ;
        { static int sw = -1; static clock_t t0 = 0;
          if (sw < 0) { const char* e = getenv("PAD_SWEEP");
                        sw = e ? atoi(e) : 0; if (sw < 0) sw = 0; }
@@ -4106,7 +4228,7 @@ index 5f8a2fa2..4c04678f 100644
              static const unsigned char steps[9][4] = {
                  {128,128,128,128},
                  {128,  0,128,128}, {128,255,128,128},
-@@ -1172,10 +2402,40 @@ skip_inject: ;
+@@ -1172,10 +2489,40 @@ skip_inject: ;
          data->button[CELL_PAD_BTN_OFFSET_SENSOR_Y] = 399; /* gravity */
          data->button[CELL_PAD_BTN_OFFSET_SENSOR_Z] = 512;
          data->button[CELL_PAD_BTN_OFFSET_SENSOR_G] = 512;
@@ -4147,7 +4269,7 @@ index 5f8a2fa2..4c04678f 100644
      /* A non-zero len means "here is a CHANGE packet" -- the constant is literally
       * named CELL_PAD_LEN_CHANGE_DEFAULT. Hardware reports len = 0 once the port
       * has nothing new, and titles DRAIN on that: The Simpsons Arcade Game's
-@@ -1496,9 +2756,64 @@ s32 cellPadSetActDirect(u32 port_no, CellPadActParam* param)
+@@ -1496,9 +2843,64 @@ s32 cellPadSetActDirect(u32 port_no, CellPadActParam* param)
  #endif
  
  #if PAD_BACKEND_SDL2
@@ -4217,18 +4339,22 @@ index 5f8a2fa2..4c04678f 100644
      return CELL_OK;
 diff --git a/libs/input/touch_controls.c b/libs/input/touch_controls.c
 new file mode 100644
-index 00000000..b7624af0
+index 00000000..cbaf159e
 --- /dev/null
 +++ b/libs/input/touch_controls.c
-@@ -0,0 +1,182 @@
+@@ -0,0 +1,350 @@
 +/* ps3recomp - on-screen touch controls. See touch_controls.h. */
 +#include "touch_controls.h"
 +#include "cellPad.h"
 +#include <stdlib.h>
 +#include <string.h>
 +#include <math.h>
++#include <stdatomic.h>
 +
-+#if !defined(_WIN32)
++#if defined(__APPLE__)
++#include <TargetConditionals.h>
++#endif
++#if !defined(_WIN32) && !defined(TC_NO_SDL)   /* TC_NO_SDL: tests/test_touch_controls.c */
 +#include <SDL2/SDL.h>
 +#define TC_HAVE_SDL 1
 +#endif
@@ -4264,67 +4390,87 @@ index 00000000..b7624af0
 +#define TC_N ((int)(sizeof k_layout / sizeof k_layout[0]))
 +#define TC_STICK_RANGE 0.12f       /* thumb travel for full deflection (height units) */
 +
-+static volatile uint32_t s_pressed;
-+static volatile int   s_stick_on;
-+static volatile float s_ax, s_ay, s_tx, s_ty;
-+static volatile int   s_gamepad;
++/* The pad poll thread works on its own copies (s_ax, s_ay: the stick anchor)
++ * and publishes what the overlay draws as one snapshot under s_lk; the
++ * presenter publishes the frame transform the same way. A plain spin lock:
++ * each side holds it for a few stores. */
++static atomic_flag s_lk = ATOMIC_FLAG_INIT;
++static void tc_lock(void)   { while (atomic_flag_test_and_set_explicit(&s_lk, memory_order_acquire)) {} }
++static void tc_unlock(void) { atomic_flag_clear_explicit(&s_lk, memory_order_release); }
++typedef struct { uint32_t pressed; int stick_on; float ax, ay, tx, ty; } tc_shown;
++static tc_shown s_shown;           /* under s_lk */
++static float s_ax, s_ay;           /* the pad poll thread only */
++static atomic_int s_gamepad;
 +
-+/* The layout at the player's size: RACACIT_TOUCH_SIZE, percent of the
-+ * default (60-160; positions stay, the buttons and their hit areas grow). */
++/* Settings read once, by whichever thread asks first (the pad poll thread or
++ * the presenter): s_init goes 0 -> 1 (filling) -> 2 (ready, release), and a
++ * thread that loses the race waits for 2 with acquire, so both see the same
++ * values. The layout is at the player's size: RACACIT_TOUCH_SIZE, percent of
++ * the default (60-160; positions stay, the buttons and their hit areas grow). */
 +static tc_button s_layout[TC_N];
-+static const tc_button* tc_layout(void)
++static float s_opacity;
++static int s_enabled;
++static atomic_int s_init;
++static void tc_init(void)
 +{
-+    static int done;
-+    if (!done) {
-+        float k = 1.0f;
-+        const char* e = getenv("RACACIT_TOUCH_SIZE");
-+        if (e && *e) { k = (float)atof(e) / 100.0f; if (!(k >= 0.6f)) k = 0.6f; if (k > 1.6f) k = 1.6f; }
-+        for (int i = 0; i < TC_N; i++) { s_layout[i] = k_layout[i]; s_layout[i].r *= k; }
-+        done = 1;
++    if (atomic_load_explicit(&s_init, memory_order_acquire) == 2) return;
++    int expect = 0;
++    if (!atomic_compare_exchange_strong_explicit(&s_init, &expect, 1, memory_order_acq_rel, memory_order_acquire)) {
++        while (atomic_load_explicit(&s_init, memory_order_acquire) != 2) {}
++        return;
 +    }
-+    return s_layout;
++    float k = 1.0f;
++    const char* e = getenv("RACACIT_TOUCH_SIZE");
++    if (e && *e) { k = (float)atof(e) / 100.0f; if (!(k >= 0.6f)) k = 0.6f; if (k > 1.6f) k = 1.6f; }
++    for (int i = 0; i < TC_N; i++) { s_layout[i] = k_layout[i]; s_layout[i].r *= k; }
++    e = getenv("RACACIT_TOUCH_OPACITY");
++    float op = (e && *e) ? (float)atof(e) / 100.0f : 1.0f;
++    if (!(op >= 0.15f)) op = 0.15f;
++    if (op > 1.0f) op = 1.0f;
++    s_opacity = op;
++    e = getenv("RACACIT_TOUCH");
++#if defined(__ANDROID__) || (defined(__APPLE__) && TARGET_OS_IPHONE)
++    s_enabled = (e && e[0] == '0') ? 0 : 1;
++#else
++    s_enabled = (e && e[0] == '1') ? 1 : 0;
++#endif
++    atomic_store_explicit(&s_init, 2, memory_order_release);
 +}
-+
-+float touch_controls_opacity(void)
-+{
-+    static float op = -1.0f;
-+    if (op < 0.0f) {
-+        const char* e = getenv("RACACIT_TOUCH_OPACITY");
-+        op = (e && *e) ? (float)atof(e) / 100.0f : 1.0f;
-+        if (!(op >= 0.15f)) op = 0.15f; if (op > 1.0f) op = 1.0f;
-+    }
-+    return op;
-+}
++static const tc_button* tc_layout(void) { tc_init(); return s_layout; }
++float touch_controls_opacity(void) { tc_init(); return s_opacity; }
 +
 +/* Where the frame is on the screen (normalised) and its shape there, from the
 + * presenter: touches are mapped into it, as the overlay is drawn in it. */
-+static volatile float s_fx0 = 0.0f, s_fy0 = 0.0f, s_fx1 = 1.0f, s_fy1 = 1.0f, s_faspect = 0.0f;
++typedef struct { float x0, y0, x1, y1, aspect; } tc_frame;
++static tc_frame s_frame = { 0.0f, 0.0f, 1.0f, 1.0f, 0.0f };   /* under s_lk */
 +void touch_controls_set_frame(float x0, float y0, float x1, float y1, float aspect)
 +{
 +    if (!(x1 > x0) || !(y1 > y0) || !(aspect > 0.0f)) return;
-+    s_fx0 = x0; s_fy0 = y0; s_fx1 = x1; s_fy1 = y1; s_faspect = aspect;
++    const tc_frame f = { x0, y0, x1, y1, aspect };
++    tc_lock(); s_frame = f; tc_unlock();
 +}
 +
 +int touch_controls_layout(const tc_button** out) { if (out) *out = tc_layout(); return TC_N; }
-+uint32_t touch_controls_pressed(void) { return s_pressed; }
-+void touch_controls_set_gamepad(int c) { s_gamepad = c; }
++uint32_t touch_controls_pressed(void) { tc_lock(); const uint32_t p = s_shown.pressed; tc_unlock(); return p; }
++void touch_controls_set_gamepad(int c) { atomic_store_explicit(&s_gamepad, c, memory_order_relaxed); }
 +void touch_controls_stick(int* a, float* ax, float* ay, float* tx, float* ty)
-+{ *a = s_stick_on; *ax = s_ax; *ay = s_ay; *tx = s_tx; *ty = s_ty; }
++{
++    uint32_t pressed;
++    touch_controls_shown(&pressed, a, ax, ay, tx, ty);
++}
++void touch_controls_shown(uint32_t* pressed, int* a, float* ax, float* ay, float* tx, float* ty)
++{
++    tc_lock(); const tc_shown s = s_shown; tc_unlock();
++    *pressed = s.pressed; *a = s.stick_on; *ax = s.ax; *ay = s.ay; *tx = s.tx; *ty = s.ty;
++}
 +
 +int touch_controls_active(void)
 +{
-+    static int en = -1;
-+    if (en < 0) {
-+        const char* e = getenv("RACACIT_TOUCH");
-+#ifdef __ANDROID__
-+        en = (e && e[0] == '0') ? 0 : 1;
-+#else
-+        en = (e && e[0] == '1') ? 1 : 0;
-+#endif
-+    }
++    tc_init();
++    const int en = s_enabled;
 +    /* The settings menu (rsx_host_ui) takes the touches while it is open. */
 +    extern int rsx_host_ui_capturing(void);
-+    return en && !s_gamepad && !rsx_host_ui_capturing();
++    return en && !atomic_load_explicit(&s_gamepad, memory_order_relaxed) && !rsx_host_ui_capturing();
 +}
 +
 +static uint8_t tc_axis(float d)
@@ -4336,51 +4482,200 @@ index 00000000..b7624af0
 +    return (uint8_t)(b < 0 ? 0 : b > 255 ? 255 : b);
 +}
 +
++/* How far a camera swipe turns, in mouse counts per frame height: it goes
++ * through the mouse's own path (game/desktop_mouse.cpp, 0.003 rad a count at
++ * 100%), so a swipe up the whole screen turns about 120 degrees and Settings >
++ * Controls mouse speed and invert apply to it too. */
++#define TC_LOOK_COUNTS 700.0f
++
++/* Each finger keeps the part it started on until it lifts. A stick or camera
++ * drag that crosses a button never presses it (dragging the camera over
++ * triangle opened the quick select ring), and a press that slides off its
++ * button never turns into a stick. A button finger can still slide onto the
++ * buttons next to it. */
++/* TC_ROLE_IDLE: landed where nothing takes it (the stick zone while the
++ * stick has a finger): it does nothing until it lifts. */
++enum { TC_ROLE_NONE, TC_ROLE_BUTTON, TC_ROLE_LSTICK, TC_ROLE_LOOK, TC_ROLE_IDLE };
++#define TC_FINGERS 10
++typedef struct { int64_t id; int role, seen; float lx, ly; } tc_finger;
++static tc_finger s_f[TC_FINGERS];
++static int s_nf;
++/* Camera motion not yet taken, in mouse counts. The pad poll thread only. */
++static float s_look_x, s_look_y;
++
++static tc_finger* tc_finger_for(int64_t id)
++{
++    for (int i = 0; i < s_nf; i++) if (s_f[i].id == id) return &s_f[i];
++    if (s_nf == TC_FINGERS) return NULL;
++    tc_finger* f = &s_f[s_nf++];
++    memset(f, 0, sizeof *f);
++    f->id = id;
++    return f;
++}
++
++static int tc_role_taken(int role)
++{
++    /* Every finger in the table is still down (lifted ones leave at the start
++     * of each apply), so one held from earlier frames counts even when this
++     * frame lists it after the new finger. */
++    for (int i = 0; i < s_nf; i++) if (s_f[i].role == role) return 1;
++    return 0;
++}
++
++static void tc_contacts_hold_over(void);
++void touch_controls_reset(void)
++{
++    s_nf = 0; s_look_x = s_look_y = 0.0f;
++    tc_contacts_hold_over();
++    const tc_shown none = { 0, 0, 0.0f, 0.0f, 0.0f, 0.0f };
++    tc_lock(); s_shown = none; tc_unlock();
++}
++
++int touch_controls_look(int* dx, int* dy)
++{
++    *dx = *dy = 0;
++    if (!touch_controls_active()) { s_look_x = s_look_y = 0.0f; return 0; }
++    *dx = (int)s_look_x; *dy = (int)s_look_y;   /* whole counts; the rest waits for the next take */
++    s_look_x -= (float)*dx; s_look_y -= (float)*dy;
++    return 1;
++}
++
++/* Which buttons a point is on (distance in height units, with a generous hit
++ * area): adds their masks and indexes, and returns whether it hit any. */
++static int tc_hit(const tc_button* lay, float x, float y, float aspect, uint16_t* b, uint32_t* pressed)
++{
++    int hit = 0;
++    for (int i = 0; i < TC_N; i++) {
++        const tc_button* k = &lay[i];
++        if (k->shape == TC_SHAPE_STICK) continue;
++        const float dx = (x - k->x) * aspect, dy = y - k->y, rr = k->r * 1.25f;
++        if (dx * dx + dy * dy <= rr * rr) { *b |= k->mask; *pressed |= 1u << i; hit = 1; }
++    }
++    return hit;
++}
++
++uint32_t touch_controls_apply(const tc_touch* t, int n, float aspect, uint16_t* buttons,
++                              uint8_t* lx, uint8_t* ly)
++{
++    uint16_t b = 0; uint32_t pressed = 0;
++    int lseen = 0;
++    float tx = 0.0f, ty = 0.0f;
++    const tc_button* lay = tc_layout();
++    /* Lifted fingers let go of their part first, so a finger that lands in
++     * the same poll as the stick's finger lifts can take the stick. */
++    for (int i = 0; i < s_nf; i++) {
++        s_f[i].seen = 0;
++        for (int j = 0; j < n; j++) if (t[j].id == s_f[i].id) { s_f[i].seen = 1; break; }
++    }
++    for (int i = 0; i < s_nf; )
++        if (!s_f[i].seen) s_f[i] = s_f[--s_nf]; else i++;
++    for (int j = 0; j < n; j++) {
++        const float x = t[j].x, y = t[j].y;
++        tc_finger* f = tc_finger_for(t[j].id);
++        if (!f) continue;
++        const int fresh = f->role == TC_ROLE_NONE;
++        f->seen = 1;
++        if (fresh) {
++            /* The part is the one under where the finger landed, even when
++             * it has moved since (down and motion in the same poll). */
++            const float px = t[j].landed ? t[j].x0 : x, py = t[j].landed ? t[j].y0 : y;
++            uint16_t nb = 0; uint32_t np = 0;
++            if (tc_hit(lay, px, py, aspect, &nb, &np)) {
++                f->role = TC_ROLE_BUTTON;
++            } else if (px < 0.40f && py > 0.33f && !tc_role_taken(TC_ROLE_LSTICK)) {
++                f->role = TC_ROLE_LSTICK; s_ax = px; s_ay = py;
++            } else if (px >= 0.40f) {
++                f->role = TC_ROLE_LOOK;
++            } else {
++                f->role = TC_ROLE_IDLE;
++            }
++            f->lx = px; f->ly = py;
++        }
++        if (f->role == TC_ROLE_BUTTON) tc_hit(lay, x, y, aspect, &b, &pressed);
++        if (f->role == TC_ROLE_LSTICK) {
++            tx = x; ty = y; lseen = 1;
++            *lx = tc_axis((x - s_ax) * aspect);
++            *ly = tc_axis(y - s_ay);
++        } else if (f->role == TC_ROLE_LOOK) {
++            s_look_x += (x - f->lx) * aspect * TC_LOOK_COUNTS;
++            s_look_y += (y - f->ly) * TC_LOOK_COUNTS;
++            f->lx = x; f->ly = y;
++        }
++    }
++    const tc_shown shown = { pressed, lseen, s_ax, s_ay, tx, ty };
++    tc_lock(); s_shown = shown; tc_unlock();
++    *buttons |= b;
++    return pressed;
++}
++
++#if TC_HAVE_SDL
++/* Fingers down, in screen coordinates, kept from SDL's touch events on the
++ * window thread (under s_lk); the pad poll thread copies them. Each touch
++ * gets its own id (s_serial), so a finger id SDL reuses after a lift starts a
++ * new touch, and keeps where it landed. */
++/* held_over: down while the controls were hidden (Settings open, a reset);
++ * it is left out until it lifts, so it doesn't replay a drag or resume a stick. */
++typedef struct { int64_t dev, sdl; int held_over; tc_touch t; } tc_contact;
++static tc_contact s_ct[TC_FINGERS];
++static int s_nct;
++static int64_t s_serial;
++void touch_controls_event(const union SDL_Event* e)
++{
++    if (e->type != SDL_FINGERDOWN && e->type != SDL_FINGERMOTION && e->type != SDL_FINGERUP) return;
++    /* A finger id is only unique on its own touch device. */
++    const int64_t dev = (int64_t)e->tfinger.touchId, sdl = (int64_t)e->tfinger.fingerId;
++    tc_lock();
++    int i = 0;
++    while (i < s_nct && (s_ct[i].sdl != sdl || s_ct[i].dev != dev)) i++;
++    if (e->type == SDL_FINGERUP) {
++        if (i < s_nct) s_ct[i] = s_ct[--s_nct];
++    } else if (e->type == SDL_FINGERDOWN || i == s_nct) {   /* a new touch (or motion we missed the down of) */
++        if (i < s_nct || s_nct < TC_FINGERS) {
++            if (i == s_nct) s_nct++;
++            tc_contact* c = &s_ct[i];
++            c->dev = dev; c->sdl = sdl; c->held_over = 0; c->t.id = ++s_serial; c->t.landed = 1;
++            c->t.x = c->t.x0 = e->tfinger.x; c->t.y = c->t.y0 = e->tfinger.y;
++        }
++    } else {
++        s_ct[i].t.x = e->tfinger.x; s_ct[i].t.y = e->tfinger.y;
++    }
++    tc_unlock();
++}
++static void tc_contacts_hold_over(void)
++{
++    tc_lock();
++    for (int i = 0; i < s_nct; i++) s_ct[i].held_over = 1;
++    tc_unlock();
++}
++#else
++void touch_controls_event(const union SDL_Event* e) { (void)e; }   /* no SDL touch here */
++static void tc_contacts_hold_over(void) {}
++#endif
++
 +int touch_controls_poll(float aspect, uint16_t* buttons,
 +                        uint8_t* lx, uint8_t* ly, uint8_t* rx, uint8_t* ry)
 +{
++    (void)rx; (void)ry;   /* the camera goes through touch_controls_look, not the right stick */
 +#if TC_HAVE_SDL
-+    static SDL_FingerID s_lfinger = -1, s_rfinger = -1;
-+    static float s_rlastx, s_rlasty;
-+    if (!touch_controls_active()) { s_pressed = 0; s_stick_on = 0; return 0; }
-+    uint16_t b = 0; uint32_t pressed = 0;
-+    int any = 0, lseen = 0, rseen = 0;
-+    if (s_faspect > 0.0f) aspect = s_faspect;
++    if (!touch_controls_active()) { touch_controls_reset(); return 0; }
++    tc_lock(); const tc_frame fr = s_frame; tc_unlock();
++    if (fr.aspect > 0.0f) aspect = fr.aspect;
 +    if (aspect <= 0.0f) aspect = 16.0f / 9.0f;
-+    const float fx0 = s_fx0, fy0 = s_fy0, fw = s_fx1 - s_fx0, fh = s_fy1 - s_fy0;
-+    for (int d = 0; d < SDL_GetNumTouchDevices(); d++) {
-+        SDL_TouchID tid = SDL_GetTouchDevice(d);
-+        for (int f = 0; f < SDL_GetNumTouchFingers(tid); f++) {
-+            SDL_Finger* fg = SDL_GetTouchFinger(tid, f);
-+            if (!fg) continue;
-+            any = 1;
-+            const float x = (fg->x - fx0) / fw, y = (fg->y - fy0) / fh;   /* in the frame */
-+            /* Buttons first: distance in height units. */
-+            int hit = 0;
-+            const tc_button* lay = tc_layout();
-+            for (int i = 0; i < TC_N; i++) {
-+                const tc_button* k = &lay[i];
-+                if (k->shape == TC_SHAPE_STICK) continue;
-+                float dx = (x - k->x) * aspect, dy = y - k->y;
-+                float rr = k->r * 1.25f;                    /* generous hit area */
-+                if (dx * dx + dy * dy <= rr * rr) { b |= k->mask; pressed |= 1u << i; hit = 1; }
-+            }
-+            if (hit) continue;
-+            if (fg->id == s_lfinger || (s_lfinger == -1 && x < 0.40f && y > 0.33f)) {
-+                if (s_lfinger != fg->id) { s_lfinger = fg->id; s_ax = x; s_ay = y; }
-+                s_tx = x; s_ty = y; lseen = 1;
-+                *lx = tc_axis((x - s_ax) * aspect);
-+                *ly = tc_axis(y - s_ay);
-+            } else if (fg->id == s_rfinger || (s_rfinger == -1 && x >= 0.45f)) {
-+                /* Right stick: deflection follows the drag speed (camera). */
-+                if (s_rfinger != fg->id) { s_rfinger = fg->id; s_rlastx = x; s_rlasty = y; }
-+                float dx = (x - s_rlastx) * aspect * 14.0f, dy = (y - s_rlasty) * 14.0f;
-+                s_rlastx = x; s_rlasty = y; rseen = 1;
-+                *rx = tc_axis(dx * TC_STICK_RANGE / 0.12f);
-+                *ry = tc_axis(dy * TC_STICK_RANGE / 0.12f);
-+            }
-+        }
++    const float fx0 = fr.x0, fy0 = fr.y0, fw = fr.x1 - fr.x0, fh = fr.y1 - fr.y0;
++    tc_touch t[TC_FINGERS];
++    int n = 0;
++    {   /* The window thread's copy (touch_controls_event): SDL's own finger
++         * records belong to the thread that delivers touches (Android's UI
++         * thread), so the pad thread never reads them. */
++        tc_lock();
++        for (int j = 0; j < s_nct; j++) if (!s_ct[j].held_over) t[n++] = s_ct[j].t;
++        tc_unlock();
 +    }
++    for (int j = 0; j < n; j++) {   /* in the frame */
++        t[j].x = (t[j].x - fx0) / fw; t[j].y = (t[j].y - fy0) / fh;
++        t[j].x0 = (t[j].x0 - fx0) / fw; t[j].y0 = (t[j].y0 - fy0) / fh;
++    }
++    const uint32_t pressed = touch_controls_apply(t, n, aspect, buttons, lx, ly);
 +    /* The menu button: a new press opens the settings menu, as F1 does on a
 +     * keyboard (pushed as a key event for the window thread to handle). */
 +    { static uint32_t s_was; const tc_button* lay = tc_layout();
@@ -4392,23 +4687,18 @@ index 00000000..b7624af0
 +              ev.type = SDL_KEYUP; ev.key.state = SDL_RELEASED; SDL_PushEvent(&ev);
 +          }
 +      s_was = pressed; }
-+    if (!lseen) s_lfinger = -1;
-+    if (!rseen) s_rfinger = -1;
-+    s_stick_on = lseen;
-+    s_pressed = pressed;
-+    *buttons |= b;
-+    return any;
++    return n > 0;
 +#else
-+    (void)aspect; (void)buttons; (void)lx; (void)ly; (void)rx; (void)ry;
++    (void)aspect; (void)buttons; (void)lx; (void)ly;
 +    return 0;
 +#endif
 +}
 diff --git a/libs/input/touch_controls.h b/libs/input/touch_controls.h
 new file mode 100644
-index 00000000..63ee883b
+index 00000000..8123b1ad
 --- /dev/null
 +++ b/libs/input/touch_controls.h
-@@ -0,0 +1,66 @@
+@@ -0,0 +1,96 @@
 +/*
 + * ps3recomp - on-screen touch controls (phones without a gamepad)
 + *
@@ -4418,7 +4708,7 @@ index 00000000..63ee883b
 + * what is hit always agree.
 + *
 + *   left third, lower 2/3  floating left stick (anchors where the thumb lands)
-+ *   right half, upper part right stick (drag; camera)
++ *   the rest of the right side  camera: a swipe turns it as the mouse does
 + *   bottom-right           cross / circle / square / triangle
 + *   bottom-left of centre  d-pad
 + *   top corners            L1 L2 / R1 R2, L3 / R3 below
@@ -4427,8 +4717,12 @@ index 00000000..63ee883b
 + * RACACIT_TOUCH_SIZE=<percent> scales the buttons (60-160), and
 + * RACACIT_TOUCH_OPACITY=<percent> fades the overlay (15-100).
 + *
-+ * Enabled by default on Android, elsewhere with RACACIT_TOUCH=1; RACACIT_TOUCH=0
-+ * turns it off. It is also hidden while a real gamepad is connected.
++ * A finger keeps the part it landed on until it lifts, so a stick or camera
++ * drag never presses a button it crosses.
++ *
++ * Enabled by default on Android and iOS, elsewhere with RACACIT_TOUCH=1;
++ * RACACIT_TOUCH=0 turns it off. It is also hidden while a real gamepad is
++ * connected (a phone controller, or the built-in controls of a handheld).
 + */
 +#ifndef PS3RECOMP_TOUCH_CONTROLS_H
 +#define PS3RECOMP_TOUCH_CONTROLS_H
@@ -4455,14 +4749,32 @@ index 00000000..63ee883b
 +/* The layout; returns the count. Same array every call. */
 +int  touch_controls_layout(const tc_button** out);
 +/* Read the current touches. Fills buttons (CELL_PAD_CTRL_* mask) and the
-+ * stick bytes (128 = centre) only for what touches are doing; returns 1 when
++ * left stick bytes (128 = centre) only for what touches are doing (rx and ry
++ * are left alone: the camera is touch_controls_look); returns 1 when
 + * any finger is down. `aspect` = frame width / height. */
 +int  touch_controls_poll(float aspect, uint16_t* buttons,
 +                         uint8_t* lx, uint8_t* ly, uint8_t* rx, uint8_t* ry);
++/* One finger on the screen, in frame coordinates (0..1). */
++/* landed: x0, y0 hold where it touched down (its part is chosen there);
++ * otherwise x, y are used for that too. id is unique for each touch. */
++typedef struct { int64_t id; float x, y; float x0, y0; int landed; } tc_touch;
++/* The part of touch_controls_poll that is not SDL: the fingers down now, each
++ * keeping the part it landed on (a button, the left stick or the camera) until
++ * it is no longer in the list. Fills buttons and the left stick as poll does,
++ * adds camera drags to what touch_controls_look hands out, and returns the
++ * pressed layout indices. Tests call it directly. */
++uint32_t touch_controls_apply(const tc_touch* t, int n, float aspect, uint16_t* buttons,
++                              uint8_t* lx, uint8_t* ly);
++/* Camera motion since the last call, in mouse counts (cellPad feeds it to
++ * the mouse camera path, game/desktop_mouse.cpp). Returns 1 while the touch
++ * controls are up: touch is then the pointer, as a captured mouse is. */
++int  touch_controls_look(int* dx, int* dy);
 +/* For the overlay: bitmask of layout indices currently pressed, and the left
 + * stick (anchor + thumb, normalised; valid when *active). */
 +uint32_t touch_controls_pressed(void);
 +void touch_controls_stick(int* active, float* ax, float* ay, float* tx, float* ty);
++/* Both of the above from one update, for the overlay. */
++void touch_controls_shown(uint32_t* pressed, int* active, float* ax, float* ay, float* tx, float* ty);
 +/* The presenter: where the frame is on the screen (normalised x0,y0-x1,y1)
 + * and its shape there (width / height in pixels). Touches are mapped into it. */
 +void touch_controls_set_frame(float x0, float y0, float x1, float y1, float aspect);
@@ -4470,6 +4782,14 @@ index 00000000..63ee883b
 +float touch_controls_opacity(void);
 +/* Gamepad presence, reported by the pad backend (hides the overlay). */
 +void touch_controls_set_gamepad(int connected);
++/* Forgets every finger and any camera motion not yet taken (the pad poll
++ * thread): while the controls are hidden, so a finger held across Settings
++ * or a controller connecting starts over instead of jumping. */
++void touch_controls_reset(void);
++/* SDL touch events from the window thread's event loop (finger down, motion,
++ * up); the controls read their fingers from these. Ignores other events. */
++union SDL_Event;
++void touch_controls_event(const union SDL_Event* e);
 +
 +#ifdef __cplusplus
 +}
@@ -6421,7 +6741,7 @@ index 2d4a54d4..49dff976 100644
  static int  s_boot_checked = 0;
  static u32  s_game_type = CELL_GAME_GAMETYPE_DISC;
 diff --git a/libs/system/cellSaveData.c b/libs/system/cellSaveData.c
-index 1fb1b120..c6f8bf90 100644
+index 1fb1b120..c59355bf 100644
 --- a/libs/system/cellSaveData.c
 +++ b/libs/system/cellSaveData.c
 @@ -30,6 +30,17 @@
@@ -6442,7 +6762,7 @@ index 1fb1b120..c6f8bf90 100644
  
  #ifdef _WIN32
  #  include <windows.h>
-@@ -66,6 +77,27 @@ static void adopt_gamedata_root(void)
+@@ -66,6 +77,42 @@ static void adopt_gamedata_root(void)
          snprintf(s_save_root, sizeof(s_save_root), "%s/dev_hdd0/home/00000001/savedata", env);
  }
  
@@ -6467,10 +6787,25 @@ index 1fb1b120..c6f8bf90 100644
 +    return s_save_root;
 +}
 +
++/* Continue at start (RACACIT_AUTO_CONTINUE, game/stubs.cpp): the next load list
++ * the game asks for picks the latest save without showing the list, once. The
++ * game arms it as it presses Cross on LOAD; savedata_ui_pick takes it. */
++static int s_autopick;
++int racit_pad_player_active(void);   /* libs/input/cellPad.c */
++void racit_pad_host_clear(void);      /* libs/input/cellPad.c */
++void racit_save_autopick_once(void) { __atomic_store_n(&s_autopick, 1, __ATOMIC_RELEASE); }
++void racit_save_autopick_cancel(void) { __atomic_store_n(&s_autopick, 0, __ATOMIC_RELEASE); }
++/* 1 while the armed pick has not been taken yet. */
++int racit_save_autopick_pending(void) { return __atomic_load_n(&s_autopick, __ATOMIC_ACQUIRE); }
++/* How many armed picks the Load list has taken (a save picked or the list
++ * left up): the worker never arms a retry once this has moved. */
++static int s_autopick_taken;
++int racit_save_autopick_taken(void) { return __atomic_load_n(&s_autopick_taken, __ATOMIC_ACQUIRE); }
++
  /* Ensure directory (and parents) exist */
  static void ensure_dirs(const char* path)
  {
-@@ -86,8 +118,7 @@ static void ensure_dirs(const char* path)
+@@ -86,8 +133,7 @@ static void ensure_dirs(const char* path)
  
  static void build_save_path(char* buf, size_t buf_size, const char* dirName)
  {
@@ -6480,7 +6815,7 @@ index 1fb1b120..c6f8bf90 100644
  #ifdef _WIN32
      for (char* p = buf; *p; p++) {
          if (*p == '/') *p = '\\';
-@@ -394,6 +425,158 @@ static s32 dispatch_func_stat_full(uint32_t func_opd, int is_new, const char* di
+@@ -394,6 +440,194 @@ static s32 dispatch_func_stat_full(uint32_t func_opd, int is_new, const char* di
   * `selected` receives the chosen directory ("" when none): the first listed
   * entry, else the new-save name, else the focus name. For a save with nothing
   * listed the new-save name wins -- headless, there is no user to pick. */
@@ -6548,6 +6883,20 @@ index 1fb1b120..c6f8bf90 100644
 +}
 +
 +/* One row of the save screen from the save on disk; 0 when there is none. */
++/* Whether a save directory holds a game file to load (a non-empty GAME.SAV):
++ * Continue at start only ever picks one of these. */
++static int savedata_loadable(const char* nm)
++{
++    char path[1024], fp[1100]; struct stat st;
++    build_save_path(path, sizeof path, nm);
++    snprintf(fp, sizeof fp, "%s/GAME.SAV", path);
++#ifdef _WIN32
++    return stat(fp, &st) == 0 && (st.st_mode & _S_IFMT) == _S_IFREG && st.st_size > 0;
++#else
++    return stat(fp, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0;
++#endif
++}
++
 +static int savedata_fill_entry(rsx_save_entry* s, const char* nm)
 +{
 +    char path[1024];
@@ -6610,6 +6959,28 @@ index 1fb1b120..c6f8bf90 100644
 +    }
 +    savedata_sort_entries(e, n);
 +
++    /* Continue at start: a load takes the newest save (the list is newest
++     * first) without asking, once. */
++    /* A player who took over since the press keeps the list. */
++    if (!is_save && __atomic_load_n(&s_autopick, __ATOMIC_ACQUIRE) && racit_pad_player_active())
++        __atomic_store_n(&s_autopick, 0, __ATOMIC_RELEASE);
++    int pick = -1;   /* the newest save with a game file; none leaves the list up */
++    for (int i = 0; i < n && pick < 0; i++) if (savedata_loadable(e[i].dir)) pick = i;
++    if (!is_save && pick < 0 && __atomic_exchange_n(&s_autopick, 0, __ATOMIC_ACQ_REL)) {
++        racit_pad_host_clear();   /* no Cross left over for the list */
++        __atomic_add_fetch(&s_autopick_taken, 1, __ATOMIC_ACQ_REL);
++        printf("[cellSaveData] continue at start: no save here has a game file, showing the list%c", 10);
++    }
++    /* Checked again after the scan: Settings may have opened meanwhile. */
++    if (!is_save && pick >= 0 && !racit_pad_player_active() && __atomic_exchange_n(&s_autopick, 0, __ATOMIC_ACQ_REL)) {
++        racit_pad_host_clear();   /* the rest of the Cross reports would reach the next screen */
++        __atomic_add_fetch(&s_autopick_taken, 1, __ATOMIC_ACQ_REL);
++        snprintf(selected, 64, "%s", e[pick].dir);
++        printf("[cellSaveData] continue at start: loading the latest save %s%c", selected, 10);
++        savedata_free_entries(e, n);
++        return 1;
++    }
++
 +    char focus_name[33] = "";
 +    if (focus) { for (int i = 0; i < 32; i++) focus_name[i] = (char)vm_read8(focus + (uint32_t)i); focus_name[32] = 0; }
 +    const int allow_new = is_save && new_name;
@@ -6639,7 +7010,7 @@ index 1fb1b120..c6f8bf90 100644
  static s32 dispatch_func_select(uint32_t func_opd, const CellSaveDataDirList* dirList,
                                  uint32_t dirCount, uint32_t setBuf_ea, int is_save,
                                  uint32_t userdata_ea, const char* who, char selected[64])
-@@ -429,9 +612,60 @@ static s32 dispatch_func_select(uint32_t func_opd, const CellSaveDataDirList* di
+@@ -429,9 +663,60 @@ static s32 dispatch_func_select(uint32_t func_opd, const CellSaveDataDirList* di
      const uint32_t fixed_n = vm_read32(set_ea + 8), fixed = vm_read32(set_ea + 12);
      const uint32_t newd = vm_read32(set_ea + 16), focus = vm_read32(set_ea + 4);
      const uint32_t new_name = newd ? vm_read32(newd + 4) : 0;
@@ -6702,7 +7073,26 @@ index 1fb1b120..c6f8bf90 100644
      else if (new_name)                       pick = new_name;
      else if (focus)                          pick = focus;
      if (pick) {
-@@ -451,13 +685,12 @@ static u32 enumerate_save_dirs(const char* prefix, CellSaveDataDirList* dirList,
+@@ -447,17 +732,31 @@ static s32 dispatch_func_select(uint32_t func_opd, const CellSaveDataDirList* di
+ }
+ 
+ /* Enumerate save directories matching a prefix. Returns count, fills dirList up to max. */
++static u32 enumerate_save_dirs(const char* prefix, CellSaveDataDirList* dirList, u32 max);
++/* Whether this title has a save the Load list can open (a directory starting
++ * with `prefix`, e.g. "BCUS98124", holding GAME.SAV): Continue at start only
++ * presses LOAD when there is one. */
++int racit_save_any(const char* prefix)
++{
++    CellSaveDataDirList* dirs = (CellSaveDataDirList*)calloc(64, sizeof *dirs);
++    if (!dirs) return 0;
++    u32 count = enumerate_save_dirs(prefix, dirs, 64);
++    if (count > 64) count = 64;
++    int found = 0;
++    for (u32 i = 0; i < count && !found; i++) found = savedata_loadable(dirs[i].dirName);
++    free(dirs);
++    return found;
++}
+ static u32 enumerate_save_dirs(const char* prefix, CellSaveDataDirList* dirList, u32 max)
  {
      u32 count = 0;
  
@@ -6718,7 +7108,7 @@ index 1fb1b120..c6f8bf90 100644
          for (char* p = search; *p; p++) {
              if (*p == '/') *p = '\\';
          }
-@@ -486,7 +719,7 @@ static u32 enumerate_save_dirs(const char* prefix, CellSaveDataDirList* dirList,
+@@ -486,7 +785,7 @@ static u32 enumerate_save_dirs(const char* prefix, CellSaveDataDirList* dirList,
      }
  #else
      {
@@ -6727,7 +7117,7 @@ index 1fb1b120..c6f8bf90 100644
          if (!dp)
              return 0;
  
-@@ -496,7 +729,7 @@ static u32 enumerate_save_dirs(const char* prefix, CellSaveDataDirList* dirList,
+@@ -496,7 +795,7 @@ static u32 enumerate_save_dirs(const char* prefix, CellSaveDataDirList* dirList,
                  continue;
              /* Check it's a directory */
              char full[1024];
@@ -6736,7 +7126,7 @@ index 1fb1b120..c6f8bf90 100644
              if (!dir_exists(full))
                  continue;
              if (prefix && prefix[0] && strncmp(de->d_name, prefix, strlen(prefix)) != 0)
-@@ -660,6 +893,92 @@ static u32 enumerate_save_files(const char* save_path,
+@@ -660,6 +959,92 @@ static u32 enumerate_save_files(const char* save_path,
      return count;
  }
  
@@ -6829,7 +7219,7 @@ index 1fb1b120..c6f8bf90 100644
  /* Execute file callback: read/write/delete files in the save directory */
  static s32 process_file_op(const char* save_path, CellSaveDataFileSet* set)
  {
-@@ -711,6 +1030,7 @@ static s32 process_file_op(const char* save_path, CellSaveDataFileSet* set)
+@@ -711,6 +1096,7 @@ static s32 process_file_op(const char* save_path, CellSaveDataFileSet* set)
      case CELL_SAVEDATA_FILEOP_WRITE:
      case CELL_SAVEDATA_FILEOP_WRITE_NOTRUNC: {
          ensure_dirs(save_path);
@@ -6837,7 +7227,7 @@ index 1fb1b120..c6f8bf90 100644
          const char* mode;
          if (set->fileOperation == CELL_SAVEDATA_FILEOP_WRITE && set->fileOffset == 0) {
              mode = "wb";
-@@ -985,6 +1305,9 @@ static s32 savedata_execute_run(const char* dirName, int is_save,
+@@ -985,6 +1371,9 @@ static s32 savedata_execute_run(const char* dirName, int is_save,
                     fileSet.fileOperation, fileSet.fileType,
                     fileSet.fileName ? fileSet.fileName : "", fileSet.fileOffset,
                     fileSet.fileSize, fileSet.fileBufSize, exc);
@@ -6847,7 +7237,7 @@ index 1fb1b120..c6f8bf90 100644
              if (exc < 0) { free(fileList); return exc; }
              exc_size = (u32)exc;
          }
-@@ -1007,6 +1330,24 @@ static s32 savedata_execute_run(const char* dirName, int is_save,
+@@ -1007,6 +1396,24 @@ static s32 savedata_execute_run(const char* dirName, int is_save,
   * API implementations
   * -----------------------------------------------------------------------*/
  
@@ -6872,7 +7262,7 @@ index 1fb1b120..c6f8bf90 100644
  s32 cellSaveDataListSave2(u32 version, CellSaveDataSetList* setList,
                             CellSaveDataSetBuf* setBuf,
                             CellSaveDataListCallback funcList,
-@@ -1053,6 +1394,7 @@ s32 cellSaveDataListSave2(u32 version, CellSaveDataSetList* setList,
+@@ -1053,6 +1460,7 @@ s32 cellSaveDataListSave2(u32 version, CellSaveDataSetList* setList,
                                            (uint32_t)(uintptr_t)userdata, "funcList", selectedDir);
      (void)listSet;
  
@@ -6880,7 +7270,7 @@ index 1fb1b120..c6f8bf90 100644
      if (cbResult.result < 0) {
          free(dirList);
          return CELL_SAVEDATA_ERROR_CBRESULT;
-@@ -1066,6 +1408,7 @@ s32 cellSaveDataListSave2(u32 version, CellSaveDataSetList* setList,
+@@ -1066,6 +1474,7 @@ s32 cellSaveDataListSave2(u32 version, CellSaveDataSetList* setList,
  
      s32 result = savedata_execute(selectedDir, 1, setBuf, funcStat, funcFile, userdata);
      free(dirList);
@@ -6888,7 +7278,7 @@ index 1fb1b120..c6f8bf90 100644
      return result;
  }
  
-@@ -1113,6 +1456,7 @@ s32 cellSaveDataListLoad2(u32 version, CellSaveDataSetList* setList,
+@@ -1113,6 +1522,7 @@ s32 cellSaveDataListLoad2(u32 version, CellSaveDataSetList* setList,
                                            (uint32_t)(uintptr_t)userdata, "funcList", selectedDir);
      (void)listSet;
  
@@ -6896,7 +7286,7 @@ index 1fb1b120..c6f8bf90 100644
      if (cbResult.result < 0) {
          free(dirList);
          return CELL_SAVEDATA_ERROR_CBRESULT;
-@@ -1193,7 +1537,7 @@ static s32 savedata_fixed(int is_save, CellSaveDataSetList* setList,
+@@ -1193,7 +1603,7 @@ static s32 savedata_fixed(int is_save, CellSaveDataSetList* setList,
          }
          printf("[cellSaveData] savedata_fixed: cbresult=%d listed=%u/%u prefix='%s' root='%s'\n",
                 result, listed, count,
@@ -6905,7 +7295,7 @@ index 1fb1b120..c6f8bf90 100644
          SAVEDATA_REJECT(CELL_SAVEDATA_ERROR_CBRESULT, w);
      }
      if (!funcStat)
-@@ -1252,6 +1596,25 @@ s32 cellSaveDataListAutoLoad(u32 version, u32 errDialog,
+@@ -1252,6 +1662,25 @@ s32 cellSaveDataListAutoLoad(u32 version, u32 errDialog,
      return savedata_fixed(0, setList, setBuf, funcFixed, funcStat, funcFile, userdata);
  }
  
@@ -6931,7 +7321,7 @@ index 1fb1b120..c6f8bf90 100644
  s32 cellSaveDataAutoSave2(u32 version, const char* dirName,
                             u32 errDialog,
                             CellSaveDataSetBuf* setBuf,
-@@ -1326,8 +1689,21 @@ s32 cellSaveDataDelete2(u32 container)
+@@ -1326,8 +1755,21 @@ s32 cellSaveDataDelete2(u32 container)
  {
      printf("[cellSaveData] Delete2(container=%u)\n", container);
  
@@ -6955,7 +7345,7 @@ index 1fb1b120..c6f8bf90 100644
      return CELL_OK;
  }
  
-@@ -1587,6 +1963,19 @@ void ps3_savedata_list_auto_load(ppu_context* ctx)
+@@ -1587,6 +2029,19 @@ void ps3_savedata_list_auto_load(ppu_context* ctx)
          (u32)ctx->gpr[10], (void*)(uintptr_t)savedata_arg9(ctx));
  }
  
@@ -9530,7 +9920,7 @@ index c4e4d849..0ed12868 100644
  /* ---- decoded state getters -------------------------------------------- */
  
 diff --git a/libs/video/rsx_draw_engine.c b/libs/video/rsx_draw_engine.c
-index 19548e0a..adc3a92f 100644
+index 19548e0a..62792228 100644
 --- a/libs/video/rsx_draw_engine.c
 +++ b/libs/video/rsx_draw_engine.c
 @@ -11,6 +11,7 @@
@@ -9780,7 +10170,17 @@ index 19548e0a..adc3a92f 100644
      u32 last_flip_buffer;
      u64 write_serial;       /* orders colour and depth writes to one address */
  
-@@ -224,10 +351,13 @@ static char s_ps_hlsl[256 * 1024];
+@@ -218,16 +345,23 @@ static struct {
+     rsx_fp_constant_block fp_constants;
+ } g;
+ 
++/* RACACIT_BLOOM (rsx_host_ui.c, live from the menu): 0 off, 1 low, 2 medium,
++ * 3 high, the game's own glow. */
++int g_racacit_bloom = 1;   /* 1 on, 0 off; written by the host UI thread, read per draw: relaxed atomics, a lone value */
++
+ /* The decompilers' HLSL. The VP decompiler builds bodies up to 192 KB. */
+ static char s_vs_hlsl[256 * 1024];
+ static char s_ps_hlsl[256 * 1024];
  
  /* The draw accumulator: one BEGIN_END group's batches, references and cuts. */
  static struct {
@@ -9798,7 +10198,7 @@ index 19548e0a..adc3a92f 100644
      u32 n_packets;
  
      rsx_vertex_ref* refs;
-@@ -375,10 +505,19 @@ static const u8* eng_fetch_ptr(void* user, u32 location, u32 offset, u32 min_byt
+@@ -375,10 +509,19 @@ static const u8* eng_fetch_ptr(void* user, u32 location, u32 offset, u32 min_byt
      return eng_fetch_detiled(location, offset, min_bytes);
  }
  
@@ -9819,7 +10219,7 @@ index 19548e0a..adc3a92f 100644
      return hash;
  }
  
-@@ -406,6 +545,130 @@ static u32 eng_pipeline_slot(u64 key)
+@@ -406,6 +549,130 @@ static u32 eng_pipeline_slot(u64 key)
  {
      return (u32)((key ^ (key >> 29)) * 0x9E3779B97F4A7C15ull >> 40) & (ENG_PIPELINE_INDEX - 1u);
  }
@@ -9950,7 +10350,7 @@ index 19548e0a..adc3a92f 100644
  
  /* ---- render state -------------------------------------------------------- */
  
-@@ -421,15 +684,35 @@ static int eng_depth_clamp_on(void)
+@@ -421,15 +688,35 @@ static int eng_depth_clamp_on(void)
      return on;
  }
  
@@ -9987,7 +10387,7 @@ index 19548e0a..adc3a92f 100644
      rs->alpha_ref_format = sf.color_format;
      rs->rt_fp16 = sf.color_format == RSX_SURFACE_FMT_F_W16Z16Y16X16;
      rs->blend_enable = rsx_dsp_reg(rsx, M_BLEND_ENABLE) & 1;
-@@ -475,6 +758,30 @@ void rsx_draw_engine_decode_render_state(const rsx_dispatch* rsx,
+@@ -475,6 +762,30 @@ void rsx_draw_engine_decode_render_state(const rsx_dispatch* rsx,
          const u32 z = rsx_dsp_reg(rsx, M_ZMIN_MAX_CONTROL);
          rs->depth_clamp = eng_depth_clamp_on() && ((z & 0xF0u) != 0 || (z & 0x0Fu) == 0);
      }
@@ -10018,7 +10418,7 @@ index 19548e0a..adc3a92f 100644
  }
  
  u64 rsx_draw_engine_hash_render_state(const rsx_be_render_state* rs, u64 hash)
-@@ -518,6 +825,7 @@ u64 rsx_draw_engine_hash_render_state(const rsx_be_render_state* rs, u64 hash)
+@@ -518,6 +829,7 @@ u64 rsx_draw_engine_hash_render_state(const rsx_be_render_state* rs, u64 hash)
      ENG_HASH_FIELD(bs_zpass);
      ENG_HASH_FIELD(depth_bounds_test);
      ENG_HASH_FIELD(depth_clamp);
@@ -10026,7 +10426,7 @@ index 19548e0a..adc3a92f 100644
  #undef ENG_HASH_FIELD
      return hash;
  }
-@@ -723,110 +1031,356 @@ static const void* eng_surface_seed(u32 location, u32 offset, u32 w, u32 h,
+@@ -723,110 +1035,356 @@ static const void* eng_surface_seed(u32 location, u32 offset, u32 w, u32 h,
      return g.tex_staging;
  }
  
@@ -10456,7 +10856,7 @@ index 19548e0a..adc3a92f 100644
          fprintf(stderr, "[rsx engine] surface %u:0x%08X %ux%u fmt %d%s\n",
                  location, offset, want_w, want_h, (int)want_fmt,
                  seed ? " (seeded from guest memory)" : ""); }
-@@ -839,10 +1393,29 @@ static u32 eng_surface_get(u32 location, u32 offset, u32 want_w, u32 want_h,
+@@ -839,10 +1397,29 @@ static u32 eng_surface_get(u32 location, u32 offset, u32 want_w, u32 want_h,
   * vtable path's target_for binds by. Resolution stops at the first member
   * that cannot be created, as that path stops at the first gap. Returns how
   * many were resolved, or 0. */
@@ -10487,7 +10887,7 @@ index 19548e0a..adc3a92f 100644
      /* SET_SURFACE_COLOR_TARGET 2 selects B alone; every other value starts at
       * A, and the MRT selectors add B, C and D on top of it. */
      const u32 sel = (sf.color_target == CELL_GCM_SURFACE_TARGET_1) ? 1u : 0u;
-@@ -852,6 +1425,9 @@ static u32 eng_current_target_set(u32 slots[RSX_BE_MAX_COLOR_TARGETS])
+@@ -852,6 +1429,9 @@ static u32 eng_current_target_set(u32 slots[RSX_BE_MAX_COLOR_TARGETS])
                                        sf.clip_w, sf.clip_h, fmt, sf.color_pitch[sel], aa_grid);
      if (first == ENG_INVALID) return 0;
      g.surfaces[first].pitch = sf.color_pitch[sel];
@@ -10497,7 +10897,7 @@ index 19548e0a..adc3a92f 100644
      slots[0] = first;
      u32 n = 1;
  
-@@ -1073,69 +1649,197 @@ static void eng_zdepth_extend(eng_zdepth* z, u32 rt_w, u32 rt_h)
+@@ -1073,69 +1653,197 @@ static void eng_zdepth_extend(eng_zdepth* z, u32 rt_w, u32 rt_h)
      if (rt_h > z->ext_h) z->ext_h = rt_h < z->h ? rt_h : z->h;
  }
  
@@ -10721,7 +11121,7 @@ index 19548e0a..adc3a92f 100644
      return slot;
  }
  
-@@ -1143,38 +1847,209 @@ static u32 eng_zdepth_get(u32 location, u32 offset, u32 rt_w, u32 rt_h)
+@@ -1143,38 +1851,209 @@ static u32 eng_zdepth_get(u32 location, u32 offset, u32 rt_w, u32 rt_h)
   * a depth-WRITING draw: a write-enable bit alone does not prove the pass
   * produced a usable depth map, and a clear-only zeta falls through to guest
   * memory instead (rsx_live_draw.c:6016-6018, 6265-6269). */
@@ -10954,7 +11354,7 @@ index 19548e0a..adc3a92f 100644
  
  /* PS3RECOMP_ENG_DEPTH_VIA_GUEST=1 (read at engine init): a depth target read
   * as A8R8G8B8 or DEPTH16 goes through guest memory even when the backend can
-@@ -1197,7 +2072,7 @@ static int s_depth_via_guest;
+@@ -1197,7 +2076,7 @@ static int s_depth_via_guest;
   * shadow map, takes the same way: without it every read of a freshly
   * rendered shadow map is a wait for the GPU plus a decode and an upload of
   * up to 2 MB. Returns the view, or 0 for the store through guest memory. */
@@ -10963,7 +11363,7 @@ index 19548e0a..adc3a92f 100644
  {
      eng_zdepth* z = &g.zdepths[slot];
      const u32 base_fmt = t->format & RSX_TEX_FMT_BASE_MASK & ~(u32)RSX_TEX_FMT_UNNORM;
-@@ -1310,6 +2185,9 @@ static void eng_unvtc_3d_slice(u8* dst, const u8* src, u32 blocks, u32 d, u32 z,
+@@ -1310,6 +2189,9 @@ static void eng_unvtc_3d_slice(u8* dst, const u8* src, u32 blocks, u32 d, u32 z,
  /* One hash per cached texture per presented frame. Word-at-a-time FNV over
   * the whole span is deliberately cheap: this is a mutation detector, not a
   * content id (rsx_live_draw.c:2002-2026). */
@@ -10973,7 +11373,7 @@ index 19548e0a..adc3a92f 100644
  static u64 eng_texture_content_hash(u32 location, u32 offset, u32 span,
                                      int* readable)
  {
-@@ -1317,15 +2195,10 @@ static u64 eng_texture_content_hash(u32 location, u32 offset, u32 span,
+@@ -1317,15 +2199,10 @@ static u64 eng_texture_content_hash(u32 location, u32 offset, u32 span,
      if (rsx_tiling_active()) rsx_tiling_footprint(location, offset, span, &offset, &span);
      const u8* src = span ? eng_guest_ptr(NULL, location, offset, span) : NULL;
      if (!src) { *readable = 0; return 0; }
@@ -10993,7 +11393,7 @@ index 19548e0a..adc3a92f 100644
      *readable = 1;
      return hash;
  }
-@@ -1381,13 +2254,93 @@ static int eng_staging_reserve(u32 bytes)
+@@ -1381,13 +2258,93 @@ static int eng_staging_reserve(u32 bytes)
  }
  
  /* Decode a guest texture out of guest memory and hand every face and level to
@@ -11092,7 +11492,7 @@ index 19548e0a..adc3a92f 100644
      rsx_tex_level lv[RSX_MAX_TEXTURE_LEVELS];
      const u32 nlv = rsx_texture_mip_chain(fmt, w, h, levels, pitch, lv);
      if (!nlv || !lv[0].tl.face_bytes) return 0;
-@@ -1446,14 +2399,39 @@ static u32 eng_texture_upload(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
+@@ -1446,14 +2403,39 @@ static u32 eng_texture_upload(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
      const u32 span = eng_texture_span(fmt, w, h, levels, pitch, cube);
      const u8* src = eng_guest_linear(location, offset, span);
      if (!src) return 0;
@@ -11135,7 +11535,7 @@ index 19548e0a..adc3a92f 100644
              const rsx_tex_layout* tl = &lv[m].tl;
              if (!eng_staging_reserve(tl->dst_row_bytes * tl->rows)) {
                  if (!into) g.be->texture_release(g.be->user, handle);
-@@ -1462,7 +2440,12 @@ static u32 eng_texture_upload(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
+@@ -1462,7 +2444,12 @@ static u32 eng_texture_upload(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
              rsx_texture_decode(g.tex_staging, tl->dst_row_bytes,
                                 face + lv[m].offset, lv[m].w, lv[m].h, tl,
                                 rsx_texture_argb_is_rgba());
@@ -11149,7 +11549,7 @@ index 19548e0a..adc3a92f 100644
                                   g.tex_staging, tl->dst_row_bytes, tl->rows);
          }
      }
-@@ -1476,97 +2459,210 @@ static u32 eng_texture_upload(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
+@@ -1476,97 +2463,210 @@ static u32 eng_texture_upload(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
   * cache full evicts the least recently used entry rather than returning
   * nothing: returning white "made the recovered orphanage render as flat
   * green/black geometry" (rsx_live_draw.c:2326-2334). */
@@ -11192,7 +11592,7 @@ index 19548e0a..adc3a92f 100644
 + * reuse against a fresh conversion), 8 texture units a program samples that
 + * end up with nothing bound. A mismatch is also repaired (converted again). */
 +static int eng_verify(int bit)
- {
++{
 +    static int v = -1;
 +    if (v < 0) { const char* e = getenv("RSX_ENG_VERIFY"); v = e ? (int)strtol(e, 0, 0) : 0; }
 +    return (v & bit) != 0;
@@ -11207,7 +11607,7 @@ index 19548e0a..adc3a92f 100644
 +
 +static u32 eng_texture_slot_core(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
 +                                 u32 levels, u32 pitch, int cube, u32 remap, u32 depth)
-+{
+ {
 +    /* RACiT: a volume only where the backend takes one (upstream's
 +     * texture_create_3d); otherwise depth 1 and the stacked-slices path
 +     * (eng_tex3d_ok) as before. The cache identity does not hold `depth`. */
@@ -11425,7 +11825,7 @@ index 19548e0a..adc3a92f 100644
  
      eng_texture e;
      memset(&e, 0, sizeof(e));
-@@ -1574,16 +2670,25 @@ static u32 eng_texture_slot(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
+@@ -1574,16 +2674,25 @@ static u32 eng_texture_slot(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
      e.width = w; e.height = h; e.pitch = pitch;
      e.remap = remap; e.cubemap = (u32)(cube != 0); e.depth = depth; e.levels = levels;
      e.last_hash_frame = g.frames;
@@ -11457,7 +11857,7 @@ index 19548e0a..adc3a92f 100644
  }
  
  /* ---- surfaces read through guest memory --------------------------------- */
-@@ -1748,37 +2853,266 @@ static void eng_surfaces_wrote(const u32* targets, u32 n_targets)
+@@ -1748,35 +2857,264 @@ static void eng_surfaces_wrote(const u32* targets, u32 n_targets)
      }
  }
  
@@ -11529,8 +11929,7 @@ index 19548e0a..adc3a92f 100644
 -                               rsx_be_sampler_desc* out)
 +/* 1 when [off, off + n) at `loc` overlaps the parked source, 2 the copy, 0 neither. */
 +static int eng_park_range(u32 loc, u32 off, u32 n)
- {
--    const u32 minf = (filter >> 16) & 7u;
++{
 +    if (!s_park.flips_left) return 0;
 +    const u64 lo = off, hi = (u64)off + n;
 +    if (loc == s_park.src_loc && lo < (u64)s_park.src_off + s_park.bytes && hi > s_park.src_off) return 1;
@@ -11745,12 +12144,10 @@ index 19548e0a..adc3a92f 100644
 +
 +static void eng_decode_sampler(u32 filter, u32 wrap, u32 control0,
 +                               rsx_be_sampler_desc* out)
-+{
-+    const u32 minf = (filter >> 16) & 7u;
+ {
+     const u32 minf = (filter >> 16) & 7u;
      const u32 magf = (filter >> 24) & 7u;
-     out->min_linear  = (u8)(minf == 2 || minf == 4 || minf == 6);
-     out->mag_linear  = (u8)(magf == 2);
-@@ -1844,6 +3178,121 @@ static u32 eng_volume_mask(void)
+@@ -1844,6 +3182,121 @@ static u32 eng_volume_mask(void)
      return mask;
  }
  
@@ -11872,7 +12269,7 @@ index 19548e0a..adc3a92f 100644
  static u32 eng_cube_mask(void)
  {
      u32 mask = 0;
-@@ -1864,6 +3313,10 @@ static u32 eng_cube_mask(void)
+@@ -1864,6 +3317,10 @@ static u32 eng_cube_mask(void)
   * layout and by the pipeline, because they must not disagree: the built-in
   * program declares all sixteen inputs, so narrowing the layout for it would
   * leave the pipeline's vertex descriptor short of what the shader reads. */
@@ -11883,7 +12280,7 @@ index 19548e0a..adc3a92f 100644
  static int eng_guest_programs(const u8** out_vp, u32* out_vp_instrs,
                                const u8** out_fp, u32* out_fp_size)
  {
-@@ -1872,8 +3325,16 @@ static int eng_guest_programs(const u8** out_vp, u32* out_vp_instrs,
+@@ -1872,8 +3329,16 @@ static int eng_guest_programs(const u8** out_vp, u32* out_vp_instrs,
      const u32 start = rsx_dsp_vp_start(&g.rsx);
      if (start < RSX_DSP_VP_INSTR) {
          vp_uc = (const u8*)(g.rsx.vp + start * 4);
@@ -11902,7 +12299,7 @@ index 19548e0a..adc3a92f 100644
      }
  
      /* A zero SET_SHADER_PROGRAM is "none", not "the program at offset 0": the
-@@ -1881,16 +3342,27 @@ static int eng_guest_programs(const u8** out_vp, u32* out_vp_instrs,
+@@ -1881,16 +3346,27 @@ static int eng_guest_programs(const u8** out_vp, u32* out_vp_instrs,
       * never read back as zero. */
      const u8* fp_uc = NULL;
      u32 fp_size = 0;
@@ -11940,7 +12337,7 @@ index 19548e0a..adc3a92f 100644
      }
  
      if (out_vp) *out_vp = vp_uc;
-@@ -1908,10 +3380,17 @@ static void eng_vertex_layout(rsx_vertex_layout_plan* layout)
+@@ -1908,10 +3384,17 @@ static void eng_vertex_layout(rsx_vertex_layout_plan* layout)
      const u8* uc = NULL;
      u32 instrs = 0;
      if (eng_guest_programs(&uc, &instrs, NULL, NULL)) {
@@ -11962,7 +12359,7 @@ index 19548e0a..adc3a92f 100644
      }
      rsx_vertex_layout_plan_init(layout, mask);
  }
-@@ -1988,6 +3467,47 @@ static u32 eng_sampled_units(const char* ps)
+@@ -1988,6 +3471,47 @@ static u32 eng_sampled_units(const char* ps)
      return mask;
  }
  
@@ -12010,7 +12407,7 @@ index 19548e0a..adc3a92f 100644
  /* The pipeline for this draw, built once per distinct key. A negative result
   * is cached too (handle 0), so a program pair that will not translate is not
   * retried on every draw of every frame. `out_tex_used` gets the units the
-@@ -2109,6 +3629,9 @@ static int eng_depth_bounds_on(void)
+@@ -2109,6 +3633,9 @@ static int eng_depth_bounds_on(void)
  static void eng_depth_bounds_prepare(u32 zslot, const rsx_be_render_state* rs)
  {
      s_dbz.unit = 0; s_dbz.copy = 0;
@@ -12020,7 +12417,7 @@ index 19548e0a..adc3a92f 100644
      if (g.be->set_depth_bounds || !g.be->depth_snapshot || !rs->depth_bounds_test ||
          zslot == ENG_INVALID || !eng_depth_bounds_on())
          return;
-@@ -2148,11 +3671,112 @@ static void eng_depth_bounds_prepare(u32 zslot, const rsx_be_render_state* rs)
+@@ -2148,11 +3675,112 @@ static void eng_depth_bounds_prepare(u32 zslot, const rsx_be_render_state* rs)
      s_dbz.mn = mn; s_dbz.mx = mx;
  }
  
@@ -12133,7 +12530,7 @@ index 19548e0a..adc3a92f 100644
      *out_fixed = 1;
      *out_tex_used = 0;
      *out_fp_hash = 0;
-@@ -2161,69 +3785,73 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
+@@ -2161,69 +3789,73 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
      u32 vp_instrs = 0, fp_size = 0;
      /* No resident program pair means the built-in one; see kEngFixedVS. */
      const int fixed = !eng_guest_programs(&vp_uc, &vp_instrs, &fp_uc, &fp_size);
@@ -12259,7 +12656,7 @@ index 19548e0a..adc3a92f 100644
      const u32 wpos_grid[2] = { sf.aa_sx ? sf.aa_sx : 1u, sf.aa_sy ? sf.aa_sy : 1u };
      const int wpos_scaled = !fixed && (wpos_grid[0] > 1u || wpos_grid[1] > 1u);
  
-@@ -2233,31 +3861,51 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
+@@ -2233,31 +3865,51 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
       * SHADER_CONTROL, the cube and vertex-texture masks, the input layout,
       * and the structural render state. */
      u64 key = 1469598103934665603ull;
@@ -12325,7 +12722,7 @@ index 19548e0a..adc3a92f 100644
      }
      key = eng_fnv1a(&layout->mask, sizeof layout->mask, key);
      key = eng_fnv1a(&layout->stride, sizeof layout->stride, key);
-@@ -2267,69 +3915,130 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
+@@ -2267,69 +3919,130 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
      key = eng_fnv1a(&rt_count, sizeof rt_count, key);
      key = rsx_draw_engine_hash_render_state(rs, key);
  
@@ -12507,7 +12904,7 @@ index 19548e0a..adc3a92f 100644
      const u64 fp_hash = fixed ? 0 : eng_fp_debug_hash(fp_uc, fp_size);
      /* RSX_ENGINE_SHADER_DUMP=<existing dir>: each new pipeline's two programs
       * as <dir>/pipe<handle>.vs.hlsl and .ps.hlsl, the handle being the one
-@@ -2362,13 +4071,57 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
+@@ -2362,13 +4075,57 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
              }
          }
      }
@@ -12572,7 +12969,7 @@ index 19548e0a..adc3a92f 100644
      g.pipelines[g.n_pipelines].key = key;
      g.pipelines[g.n_pipelines].fp_hash = fp_hash;
      g.pipelines[g.n_pipelines].handle = handle;
-@@ -2377,7 +4130,7 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
+@@ -2377,7 +4134,7 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
          (u16)(fixed ? 0xFFFFu : (eng_sampled_units(s_ps_hlsl) | dbz_bit));
      *out_tex_used = g.pipelines[g.n_pipelines].tex_used;
      *out_fp_hash = fp_hash;
@@ -12581,7 +12978,7 @@ index 19548e0a..adc3a92f 100644
      g.n_pipelines++;
      *out_fixed = fixed;
      return handle;
-@@ -2580,14 +4333,846 @@ static void dc_fetch(const rsx_vertex_layout_plan* layout, int allow_remap)
+@@ -2580,14 +4337,846 @@ static void dc_fetch(const rsx_vertex_layout_plan* layout, int allow_remap)
          dc.fetch_ok = 0;
          return;
      }
@@ -13432,7 +13829,7 @@ index 19548e0a..adc3a92f 100644
  /* ---- sink ---------------------------------------------------------------- */
  
  static void sink_begin(void* user, const rsx_dispatch* r, u32 prim)
-@@ -2628,11 +5213,26 @@ static void sink_immediate_vertex(void* user, const rsx_dispatch* r)
+@@ -2628,11 +5217,26 @@ static void sink_immediate_vertex(void* user, const rsx_dispatch* r)
      dc.n_immediate++;
  }
  
@@ -13460,7 +13857,7 @@ index 19548e0a..adc3a92f 100644
      dc.arr[dc.n_arr].first = first;
      dc.arr[dc.n_arr].count = count;
      dc.n_arr++;
-@@ -2652,201 +5252,567 @@ static void sink_inline_array(void* user, const rsx_dispatch* r,
+@@ -2652,201 +5256,567 @@ static void sink_inline_array(void* user, const rsx_dispatch* r,
      const u32 stride = rsx_vertex_inline_layout(r, NULL);
      if (!stride || bytes < stride) return;
      dc.n_packets++;
@@ -13677,13 +14074,7 @@ index 19548e0a..adc3a92f 100644
 + * each sel 0..3 = component of (Y, X, 0, 1), 4 = zero, 5 = one. */
 +static u32 s_tex_reint[RSX_BE_MAX_TEXTURES];
 +static inline u32 eng_tex_reint_code(const rsx_dsp_texture* t, u32 slot)
- {
--    (void)user; (void)r;
--    dc.n_packets++;
--    if (dc.n_idx >= ENG_MAX_BATCHES) return;
--    dc.idx[dc.n_idx].first = first;
--    dc.idx[dc.n_idx].count = count;
--    dc.n_idx++;
++{
 +    if ((t->format & 0x9Fu) != 0x95u || slot >= g.n_surfaces || g.surfaces[slot].fmt != RSX_BE_FMT_R8G8B8A8) return 0;
 +    u8 sel[4];
 +    rsx_texture_component_remap(t->remap & 0xFFFFu, 0x95u, sel);
@@ -13712,8 +14103,27 @@ index 19548e0a..adc3a92f 100644
 +    if (cs && ct && w < s->w && h < s->h)
 +        g.be->blit(g.be->user, s->handle, w - 1u, h - 1u, 1, 1, s->handle, w, h, s->w - w, s->h - h);
 +    s->edge_w = w; s->edge_h = h; s->edge_serial = s->last_write;
++}
++
++static inline void eng_tex_sub_set(u32 u, const rsx_dsp_texture* t, u32 slot)
+ {
+-    (void)user; (void)r;
+-    dc.n_packets++;
+-    if (dc.n_idx >= ENG_MAX_BATCHES) return;
+-    dc.idx[dc.n_idx].first = first;
+-    dc.idx[dc.n_idx].count = count;
+-    dc.n_idx++;
++    eng_copy_target_edges(t, slot);
++    float x = 1.0f, y = 1.0f;
++    if (slot < g.n_surfaces) {
++        const eng_surface* s = &g.surfaces[slot];
++        if (t->width && s->w > t->width) x = (float)t->width / (float)s->w;
++        if (t->height && s->h > t->height) y = (float)t->height / (float)s->h;
++    }
++    s_tex_sub[u][0] = x; s_tex_sub[u][1] = y;
++    s_tex_reint[u] = eng_tex_reint_code(t, slot);
  }
- 
+-
 -/* Which texture units this draw binds, and from where: a unit naming a
 - * registered colour surface samples that live target rather than guest
 - * memory (every post-process, shadow and reflection in a PS3 title is a
@@ -13759,18 +14169,6 @@ index 19548e0a..adc3a92f 100644
 -                s->pitch, t->width, t->height, t->format, t->pitch,
 -                t->dimension, t->mipmaps, t->cubemap, sf.color_format, sf.raster_type);
 -    return ENG_INVALID;
-+static inline void eng_tex_sub_set(u32 u, const rsx_dsp_texture* t, u32 slot)
-+{
-+    eng_copy_target_edges(t, slot);
-+    float x = 1.0f, y = 1.0f;
-+    if (slot < g.n_surfaces) {
-+        const eng_surface* s = &g.surfaces[slot];
-+        if (t->width && s->w > t->width) x = (float)t->width / (float)s->w;
-+        if (t->height && s->h > t->height) y = (float)t->height / (float)s->h;
-+    }
-+    s_tex_sub[u][0] = x; s_tex_sub[u][1] = y;
-+    s_tex_reint[u] = eng_tex_reint_code(t, slot);
-+}
 +/* The units the draw's fragment program samples; every unit for the built-in
 + * program. A title leaves units of earlier passes enabled -- its display
 + * buffer, a depth buffer -- and resolving each of those for every draw (a
@@ -14184,7 +14582,7 @@ index 19548e0a..adc3a92f 100644
      }
      return mask;
  }
-@@ -3147,7 +6113,7 @@ static void pd_note(const u32* targets, u32 n_targets, u32 zslot,
+@@ -3147,7 +6117,7 @@ static void pd_note(const u32* targets, u32 n_targets, u32 zslot,
  
      rsx_dsp_surface sf;
      rsx_dsp_viewport vp;
@@ -14193,7 +14591,7 @@ index 19548e0a..adc3a92f 100644
      rsx_dsp_get_viewport(&g.rsx, &vp);
      size_t at = strlen(s_pd.first);
      at += (size_t)snprintf(s_pd.first + at, sizeof s_pd.first - at,
-@@ -3272,8 +6238,131 @@ static void eng_log_rect_clear(const char* what, const u32 rc[4], u32 w, u32 h)
+@@ -3272,8 +6242,131 @@ static void eng_log_rect_clear(const char* what, const u32 rc[4], u32 w, u32 h)
                  what, rc[0], rc[1], rc[2], rc[3], w, h);
  }
  
@@ -14325,7 +14723,7 @@ index 19548e0a..adc3a92f 100644
      (void)user; (void)r;
      if (!g.ready || !dc.n_packets || !dc.fetch_ok) return;
      eng_arena_reset();
-@@ -3283,6 +6372,29 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -3283,6 +6376,29 @@ static void sink_end(void* user, const rsx_dispatch* r)
                            r->inline_dropped != dc.inline_dropped_at_begin)) return;
  
      const u32 prim = g.rsx.current_primitive;
@@ -14355,7 +14753,7 @@ index 19548e0a..adc3a92f 100644
      /* Everything that becomes triangles -- lists, strips, fans, quads, quad
       * strips and polygons -- is REBUILT into one triangle list through an
       * index buffer. A host strip topology cannot express a restart cut, which
-@@ -3295,41 +6407,68 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -3295,41 +6411,98 @@ static void sink_end(void* user, const rsx_dispatch* r)
      int scratch = 0;
      const int rebuild = eng_topology_rebuild(prim, 0, &scratch) != 0;
      if (!rebuild) {
@@ -14429,6 +14827,36 @@ index 19548e0a..adc3a92f 100644
 +          const u32 k = n++;
 +          if (k >= sfirst && k <= slast) { ENG_DROP(6); return; }
 +      } }
++
++    /* Bloom off (g_racacit_bloom 0, RACACIT_BLOOM=off in the host UI). The
++     * glow goes back over the scene in one full-target quad that samples a
++     * single colour target a quarter of the target's width and height (A
++     * Crack in Time: 240x176 into 960x704, after the blur passes, blended
++     * SRC_ALPHA, ONE). Off drops that draw. There's no weaker setting: a
++     * SRC_ALPHA source factor has no constant-scaled form in one blend
++     * factor. On (the default) skips the check. */
++    if (__builtin_expect(!__atomic_load_n(&g_racacit_bloom, __ATOMIC_RELAXED), 0) && prim == 8u) {
++        rsx_dsp_texture b0;
++        rsx_dsp_get_texture(&g.rsx, 0, &b0);
++        if (b0.enabled && b0.location == 0u && (b0.format & 0x9Fu) == 0x85u &&
++            b0.width * 4u == g.surfaces[target].w && b0.height * 4u == g.surfaces[target].h) {
++            /* The fragment program samples unit 0 alone (other units may
++             * still read as enabled from earlier draws), and the draw adds
++             * itself over the scene (SRC_ALPHA, ONE, FUNC_ADD): an ordinary
++             * quad of that shape, or one that subtracts, keeps drawing. */
++            if (eng_fp_tex_mask() == 1u && rs.blend_enable &&
++                rs.sf_rgb == 0x0302u && rs.df_rgb == 0x0001u && rs.eq_rgb == 0x8006u) {
++                static int said;
++                if (!said) {
++                    said = 1;
++                    fprintf(stderr, "[rsx engine] bloom composite: %ux%u at 0x%08X into 0x%08X, off%c",
++                            b0.width, b0.height, b0.offset, g.surfaces[target].offset, 10);
++                }
++                ENG_DROP(6);
++                return;
++            }
++        }
++    }
  
      rsx_dsp_surface sf;
      rsx_dsp_viewport vp;
@@ -14443,7 +14871,7 @@ index 19548e0a..adc3a92f 100644
  
      /* A guest program pair that will not translate has no fallback: the draw
       * is dropped, as the reference engine drops it. Substituting the built-in
-@@ -3343,7 +6482,7 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -3343,7 +6516,7 @@ static void sink_end(void* user, const rsx_dispatch* r)
                                            eng_surface_format(sf.color_format),
                                            n_targets, &pipeline_is_fixed, &tex_used,
                                            &fp_hash);
@@ -14452,7 +14880,7 @@ index 19548e0a..adc3a92f 100644
      if (fp_hash && eng_debug_fp(fp_hash, pipeline)) return;
  
      /* Textures before any pipeline or target binding: a cache refresh can
-@@ -3356,27 +6495,46 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -3356,27 +6529,46 @@ static void sink_end(void* user, const rsx_dispatch* r)
      memset(samplers, 0, sizeof samplers);
      memset(vtextures, 0, sizeof vtextures);
      memset(vsamplers, 0, sizeof vsamplers);
@@ -14511,7 +14939,7 @@ index 19548e0a..adc3a92f 100644
  
      /* The transform constant block, then the viewport epilogue the vertex
       * program's tail multiplies by: RSX window coordinates mapped into the
-@@ -3396,14 +6554,219 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -3396,14 +6588,219 @@ static void sink_end(void* user, const rsx_dispatch* r)
          xf[5] = -((vp.translate[1] - Hv * 0.5f) / (Hv * 0.5f));
          xf[6] = vp.translate[2];
      }
@@ -14735,7 +15163,7 @@ index 19548e0a..adc3a92f 100644
      if (g.fp_cb_cap < fp_bytes) {
          u8* n = (u8*)realloc(g.fp_cb, fp_bytes);
          if (!n) return;
-@@ -3415,17 +6778,50 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -3415,17 +6812,50 @@ static void sink_end(void* user, const rsx_dispatch* r)
          memcpy(g.fp_cb, g.fp_constants.values, g.fp_constants.count * 16u);
      { float* alpha = (float*)(g.fp_cb + nslots * 16u);
        alpha[0] = rsx_fp_alpha_ref(rs.alpha_ref_raw, rs.alpha_ref_format);
@@ -14793,7 +15221,7 @@ index 19548e0a..adc3a92f 100644
      /* The depth attachment is cleared the first time it is bound, so a title
       * that never clears its shadow zeta still tests against something. */
      const u32 depth_handle = (zslot != ENG_INVALID) ? g.zdepths[zslot].handle : 0;
-@@ -3437,20 +6833,68 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -3437,20 +6867,68 @@ static void sink_end(void* user, const rsx_dispatch* r)
          g.zdepths[zslot].had_write = 0;
      }
  
@@ -14869,7 +15297,7 @@ index 19548e0a..adc3a92f 100644
      }
      /* Dynamic, and deliberately outside the pipeline key. */
      g.be->set_stencil_ref(g.be->user,
-@@ -3466,29 +6910,315 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -3466,29 +6944,315 @@ static void sink_end(void* user, const rsx_dispatch* r)
          g.be->set_depth_bounds(g.be->user, fmin, fmax);
      }
  
@@ -15207,7 +15635,7 @@ index 19548e0a..adc3a92f 100644
      /* Counted only when the draw ran the guest's OWN programs, which is what
       * the test hook means: a draw through the built-in pair is a draw, not
       * evidence that the decompile-translate-compile path worked. */
-@@ -3496,9 +7226,32 @@ static void sink_end(void* user, const rsx_dispatch* r)
+@@ -3496,9 +7260,32 @@ static void sink_end(void* user, const rsx_dispatch* r)
  
      if (rs.color_mask) eng_surfaces_wrote(targets, n_targets);
      if (zslot != ENG_INVALID && rs.depth_test && rs.depth_write) {
@@ -15241,7 +15669,7 @@ index 19548e0a..adc3a92f 100644
  }
  
  static void sink_clear(void* user, const rsx_dispatch* r, u32 mask)
-@@ -3507,17 +7260,25 @@ static void sink_clear(void* user, const rsx_dispatch* r, u32 mask)
+@@ -3507,17 +7294,25 @@ static void sink_clear(void* user, const rsx_dispatch* r, u32 mask)
      if (!g.ready) return;
      u32 targets[RSX_BE_MAX_COLOR_TARGETS];
      const u32 n_targets = eng_current_target_set(targets);
@@ -15269,7 +15697,7 @@ index 19548e0a..adc3a92f 100644
      if (mask & (RSX_CLEAR_COLOR_R | RSX_CLEAR_COLOR_G |
                  RSX_CLEAR_COLOR_B | RSX_CLEAR_COLOR_A)) {
          const u32 c = rsx_dsp_clear_color(&g.rsx);
-@@ -3529,79 +7290,64 @@ static void sink_clear(void* user, const rsx_dispatch* r, u32 mask)
+@@ -3529,79 +7324,64 @@ static void sink_clear(void* user, const rsx_dispatch* r, u32 mask)
          };
          /* Every target the set names, not only A: a deferred pass clears its
           * whole G-buffer in one CLEAR_SURFACE, and B, C and D would otherwise
@@ -15394,7 +15822,7 @@ index 19548e0a..adc3a92f 100644
          }
      }
  }
-@@ -3612,22 +7358,582 @@ static void sink_clear(void* user, const rsx_dispatch* r, u32 mask)
+@@ -3612,22 +7392,582 @@ static void sink_clear(void* user, const rsx_dispatch* r, u32 mask)
   * scene's draws having executed (rsx_live_draw.c:7557-7570). */
  static u32 eng_present_surface(u32 buffer_id)
  {
@@ -15982,7 +16410,7 @@ index 19548e0a..adc3a92f 100644
      if (getenv("PS3RECOMP_METAL_FRAME_DUMP") && g.frames % 120 == 0) {
          u32 current = eng_current_surface();
          fprintf(stderr, "[rsx capture] frame=%u buffer=%u selected=%u current=%u draws=%u surfaces=%u\n",
-@@ -3638,9 +7944,46 @@ static void eng_present(u32 buffer_id)
+@@ -3638,9 +7978,46 @@ static void eng_present(u32 buffer_id)
                      g.surfaces[i].w, g.surfaces[i].h, g.surfaces[i].handle);
      }
      pd_present(target);
@@ -16029,7 +16457,7 @@ index 19548e0a..adc3a92f 100644
      g.last_guest_draws = g.guest_draws;
      g.guest_draws = 0;
  }
-@@ -3694,6 +8037,8 @@ int rsx_draw_engine_init(u32 width, u32 height)
+@@ -3694,6 +8071,8 @@ int rsx_draw_engine_init(u32 width, u32 height)
        s_depth_via_guest = e && *e && strcmp(e, "0") != 0; }
      g.vp_cb = (u8*)calloc(1, ENG_VP_CB_BYTES);
      if (!g.vp_cb) return -1;
@@ -16038,7 +16466,7 @@ index 19548e0a..adc3a92f 100644
      if (g.be->init && g.be->init(g.be->user, g.width, g.height) != 0) {
          free(g.vp_cb); g.vp_cb = NULL;
          return -1;
-@@ -3738,8 +8083,13 @@ void rsx_draw_engine_shutdown(void)
+@@ -3738,8 +8117,13 @@ void rsx_draw_engine_shutdown(void)
      if (g.ready && g.be->shutdown) g.be->shutdown(g.be->user);
  
      rsx_draw_engine_set_guest_memory(NULL, NULL);
@@ -16053,7 +16481,7 @@ index 19548e0a..adc3a92f 100644
      memset(&dc, 0, sizeof dc);
      free(g.tex_staging); free(g.vp_cb); free(g.fp_cb); free(g.indices);
      const rsx_draw_backend* be = g.be;
-@@ -3760,6 +8110,25 @@ void rsx_draw_engine_method(u32 method, u32 arg)
+@@ -3760,6 +8144,25 @@ void rsx_draw_engine_method(u32 method, u32 arg)
      rsx_dispatch_method(&g.rsx, m, arg);
  }
  
@@ -16079,7 +16507,7 @@ index 19548e0a..adc3a92f 100644
  void rsx_draw_engine_set_display_buffer(u32 buffer_id, u32 location, u32 offset,
                                          u32 pitch, u32 width, u32 height)
  {
-@@ -3786,10 +8155,363 @@ void rsx_draw_engine_present(void)
+@@ -3786,10 +8189,363 @@ void rsx_draw_engine_present(void)
       * a runner that both consumes 0xE944 and calls here would otherwise
       * re-present a double-buffered title's OTHER scanout. Presenting twice is
       * harmless either way -- the engine never clears the surface, so a second
@@ -17514,10 +17942,10 @@ index b6bf0704..7dc3db15 100644
   * PSO identity should use rsx_fp_structural_hash in buffered mode. */
 diff --git a/libs/video/rsx_host_ui.c b/libs/video/rsx_host_ui.c
 new file mode 100644
-index 00000000..349a70f3
+index 00000000..847a1f2a
 --- /dev/null
 +++ b/libs/video/rsx_host_ui.c
-@@ -0,0 +1,2790 @@
+@@ -0,0 +1,2813 @@
 +/*
 + * ps3recomp - host settings menu and on-screen display. See rsx_host_ui.h.
 + */
@@ -17576,6 +18004,7 @@ index 00000000..349a70f3
 + * (rsx_be_proxy.c); set from the options here. */
 +extern volatile int g_racacit_spu_spin_us;
 +extern volatile int g_racacit_present_pace;
++extern int g_racacit_bloom;   /* rsx_draw_engine.c */
 +static int   s_last_full = RSX_UI_DISPLAY_BORDERLESS;   /* what F11 returns to */
 +
 +static volatile int s_open;          /* menu showing */
@@ -17671,6 +18100,7 @@ index 00000000..349a70f3
 +    o.skip_clank = env_int("RACACIT_SKIP_CLANK", 0) ? 1 : 0;
 +    o.skip_intro = env_int("RACACIT_SKIP_INTRO", 0) ? 1 : 0;
 +    o.skip_press_start = env_int("RACACIT_SKIP_PRESS_START", 0) ? 1 : 0;
++    o.auto_continue    = env_int("RACACIT_AUTO_CONTINUE", 0) ? 1 : 0;
 +    o.armor_look = clampi(env_int("RACACIT_ARMOR_LOOK", 0), 0, 4);
 +    { const char* v = getenv("RACACIT_DS_SPEAKER"); o.ds_speaker = !(v && *v == '0'); }
 +    o.ds_volume = clampi(env_int("RACACIT_DS_SPK_VOL", 49), 0, 100);
@@ -17688,6 +18118,7 @@ index 00000000..349a70f3
 +                                                    : "off (every controller a plain pad, PS3 layout)", 10);
 +    o.tex_quality   = env_is("RACACIT_TEX_QUALITY", "low") || env_is("RACACIT_TEX_QUALITY", "2") ? 2
 +                    : env_is("RACACIT_TEX_QUALITY", "medium") || env_is("RACACIT_TEX_QUALITY", "1") ? 1 : 0;
++    o.bloom         = env_is("RACACIT_BLOOM", "off") ? 0 : 1;
 +    o.cpu_mode      = env_is("RACACIT_CPU_MODE", "max") || env_is("RACACIT_CPU_MODE", "maximum") ? 1 : 0;
 +    o.present_pace  = env_int("RACACIT_PRESENT_PACE", RSX_UI_PACE_DEFAULT) ? 1 : 0;
 +    o.kbm           = env_int("RACACIT_KBM", 1) ? 1 : 0;
@@ -17712,6 +18143,7 @@ index 00000000..349a70f3
 +    if (!s_game_start.gen) { s_game_start = o; s_game_start.gen = 1; }
 +    g_racacit_spu_spin_us = o.cpu_mode ? 200 : 30;
 +    g_racacit_present_pace = o.present_pace;
++    __atomic_store_n(&g_racacit_bloom, o.bloom, __ATOMIC_RELAXED);
 +    o.gen = 1;
 +    if (o.display_mode != RSX_UI_DISPLAY_WINDOWED) s_last_full = o.display_mode;
 +    LOCK(); s_opt = o; UNLOCK();
@@ -17776,6 +18208,7 @@ index 00000000..349a70f3
 +    snprintf(kv[k++], 96, "RACACIT_SKIP_CLANK=%d", o->skip_clank);
 +    snprintf(kv[k++], 96, "RACACIT_SKIP_INTRO=%d", o->skip_intro);
 +    snprintf(kv[k++], 96, "RACACIT_SKIP_PRESS_START=%d", o->skip_press_start);
++    snprintf(kv[k++], 96, "RACACIT_AUTO_CONTINUE=%d", o->auto_continue);
 +    snprintf(kv[k++], 96, "RACACIT_ARMOR_LOOK=%d", o->armor_look);
 +    snprintf(kv[k++], 96, "RACACIT_DS_SPEAKER=%d", o->ds_speaker);
 +    snprintf(kv[k++], 96, "RACACIT_DS_SPK_VOL=%d", o->ds_volume);
@@ -17788,6 +18221,7 @@ index 00000000..349a70f3
 +    snprintf(kv[k++], 96, "RACACIT_DS_LIGHT=%d", o->ds_lightbar);
 +    snprintf(kv[k++], 96, "RACACIT_DS_MOTION=%d", o->ds_motion);
 +    snprintf(kv[k++], 96, "RACACIT_SWAP_SHOULDERS=%d", o->shoulder_swap);
++    snprintf(kv[k++], 96, "RACACIT_BLOOM=%s", o->bloom ? "on" : "off");
 +    snprintf(kv[k++], 96, "RACACIT_TEX_QUALITY=%s", o->tex_quality == 2 ? "low" : o->tex_quality == 1 ? "medium" : "high");
 +    snprintf(kv[k++], 96, "RACACIT_CPU_MODE=%s", o->cpu_mode ? "max" : "efficient");
 +    snprintf(kv[k++], 96, "RACACIT_PRESENT_PACE=%d", o->present_pace);
@@ -18001,8 +18435,8 @@ index 00000000..349a70f3
 +enum { R_DISPLAY = 1, R_WINSIZE, R_VSYNC, R_ASPECT, R_UPSCALE, R_SHARP, R_BRIGHT,
 +       R_RES, R_ANISO, R_TRI, R_DSSPK, R_DSVOL, R_DSHAP, R_DSHVOL, R_DSRUMBLE, R_DSTRIG, R_DSSWAP,
 +       R_DSLIGHT, R_DSMOTION, R_FPS, R_DISCORD, R_SKIPCLANK, R_RESUME, R_QUIT,
-+       R_PRESET, R_TEXQ, R_PACE, R_CPU, R_KBM, R_MSENS, R_MINV, R_DSTRIGSTR, R_TROPHIES,
-+       R_FOV, R_CAMDIST, R_SKIPINTRO, R_SKIPSTART, R_SHOULDER,
++       R_PRESET, R_TEXQ, R_BLOOM, R_PACE, R_CPU, R_KBM, R_MSENS, R_MINV, R_DSTRIGSTR, R_TROPHIES,
++       R_FOV, R_CAMDIST, R_SKIPINTRO, R_SKIPSTART, R_AUTOCONT, R_SHOULDER,
 +       R_CH_BOLTAMT, R_CH_ADDBOLTS, R_CH_WPN, R_CH_WPNUP, R_CH_WPNMAX, R_CH_WPNRESET, R_CH_GOD,
 +       R_CH_DEST, R_CH_GO,
 +       R_LANG, R_FPSCAP, R_STARTSKIP, R_ALLCUTS, R_FREELAND, R_TODDISC, R_POWERPACK, R_CHEATS, R_SAVEUI };
@@ -18024,6 +18458,7 @@ index 00000000..349a70f3
 +    { K_OPT, R_DISCORD, "Discord status" },
 +    { K_OPT, R_SKIPINTRO, "Logos and notices at boot" },
 +    { K_OPT, R_SKIPSTART, "PRESS START screen" },
++    { K_OPT, R_AUTOCONT, "Continue at start" },
 +    { K_OPT, R_SKIPCLANK, "Clank levels (testing)" },
 +    { K_GAP, 0, "" },
 +    { K_ACT, R_RESUME,  "Resume" },
@@ -18059,6 +18494,7 @@ index 00000000..349a70f3
 +    { K_OPT, R_UPSCALE, "Upscaling" },
 +    { K_OPT, R_SHARP,   "Sharpness" },
 +    { K_OPT, R_BRIGHT,  "Brightness" },
++    { K_OPT, R_BLOOM,   "Bloom" },
 +    { K_HEAD, 0, "Textures" },
 +    { K_OPT, R_TEXQ,    "Texture quality" },
 +    { K_OPT, R_ANISO,   "Anisotropic filtering" },
@@ -18314,6 +18750,7 @@ index 00000000..349a70f3
 +    case R_PRESET: { const int p = preset_of(o); snprintf(b, n, "%s", p >= 0 ? k_presets[p].name : "Custom"); break; }
 +    case R_TEXQ:    snprintf(b, n, "%s%s", o->tex_quality == 2 ? "Low" : o->tex_quality == 1 ? "Medium" : "High (original)",
 +                         o->tex_quality != s_texq_active ? "  - after restart" : ""); break;
++    case R_BLOOM:   snprintf(b, n, "%s", o->bloom ? "On" : "Off"); break;
 +    case R_PACE:    snprintf(b, n, "%s", o->present_pace ? "On (even 60 Hz)" : "Off (turn on if motion stutters)"); break;
 +    case R_CPU:     snprintf(b, n, "%s", o->cpu_mode ? "Maximum (spin on all cores)" : "Efficient"); break;
 +    case R_KBM:     snprintf(b, n, "%s", o->kbm ? "On" : "Off"); break;
@@ -18326,6 +18763,7 @@ index 00000000..349a70f3
 +    case R_SKIPCLANK: snprintf(b, n, "%s", o->skip_clank ? "Skip" : "Play"); break;
 +    case R_SKIPINTRO: snprintf(b, n, "%s", o->skip_intro ? "Skip" : "Show"); break;
 +    case R_SKIPSTART: snprintf(b, n, "%s", !o->skip_press_start ? "Show" : o->skip_intro ? "Skip" : "Skip (with logos skipped)"); break;
++    case R_AUTOCONT: snprintf(b, n, "%s", o->auto_continue ? "Latest save" : "Off (main menu)"); break;
 +    case R_LANG:    snprintf(b, n, "%s", k_lang_names[o->language]); break;
 +    case R_FPSCAP:  if (o->fps_cap > 60) snprintf(b, n, "%d fps (set in settings.txt)", o->fps_cap);
 +                    else snprintf(b, n, "%s", o->fps_cap > 0 && o->fps_cap < 60 ? "Steady 30 fps (for slower PCs)" : "60 fps"); break;
@@ -18407,6 +18845,7 @@ index 00000000..349a70f3
 +        o->res_scale = k_presets[cur].res; o->trilinear = k_presets[cur].tri; o->tex_quality = k_presets[cur].texq;
 +        o->aniso = preset_aniso(cur); o->sampler_gen++; break; }
 +    case R_TEXQ:    o->tex_quality = cycle(o->tex_quality, 3, -dir); break;
++    case R_BLOOM:   o->bloom = cycle(o->bloom, 2, dir); __atomic_store_n(&g_racacit_bloom, o->bloom, __ATOMIC_RELAXED); break;
 +    case R_PACE:    o->present_pace = !o->present_pace; g_racacit_present_pace = o->present_pace; break;
 +    case R_CPU:     o->cpu_mode = !o->cpu_mode; g_racacit_spu_spin_us = o->cpu_mode ? 200 : 30; break;
 +    case R_KBM:     o->kbm = !o->kbm; break;
@@ -18419,6 +18858,7 @@ index 00000000..349a70f3
 +    case R_SKIPCLANK: o->skip_clank = !o->skip_clank; break;
 +    case R_SKIPINTRO: o->skip_intro = !o->skip_intro; break;
 +    case R_SKIPSTART: o->skip_press_start = !o->skip_press_start; break;
++    case R_AUTOCONT: o->auto_continue = !o->auto_continue; break;
 +    case R_LANG:    o->language = cycle(o->language, (int)N_OF(k_lang_codes), dir); break;
 +    case R_FPSCAP:  o->fps_cap = o->fps_cap == 0 ? 30 : 0; break;   /* 60 <-> steady 30 (a cap set by hand goes to 60) */
 +    case R_STARTSKIP: o->start_skips_movies = !o->start_skips_movies; break;
@@ -18449,10 +18889,15 @@ index 00000000..349a70f3
 +static void mouse_capture(int on);
 +static int s_mcap, s_mcap_resume;   /* see "Keyboard and mouse for the game" */
 +static const char* s_menu_src = "?";   /* what opened or closed it, for the log */
++void racit_pad_host_cancel(void);        /* libs/input/cellPad.c */
++void racit_save_autopick_cancel(void);   /* libs/system/cellSaveData.c */
 +static void open_menu(int open)
 +{
 +    if (open == s_open) return;
-+    s_open = open;
++    __atomic_store_n(&s_open, open, __ATOMIC_RELEASE);   /* read by rsx_host_ui_capturing on game threads */
++    /* A person opened Settings: anything Continue at start still had pending
++     * (a Cross to deliver, a save to pick) is dropped now. */
++    if (open) { racit_pad_host_cancel(); racit_save_autopick_cancel(); }
 +    s_quit_armed = 0;
 +    fprintf(stderr, "[settings] menu %s (%s)%c", open ? "opened" : "closed", s_menu_src, 10);
 +    s_menu_src = "?";
@@ -18517,15 +18962,19 @@ index 00000000..349a70f3
 +    settings_save();
 +}
 +
-+static volatile int s_sv_active;      /* the save screen is up */
++static int s_sv_active;      /* the save screen is up: written by the guest's save call, read with sv_up() */
++static int sv_up(void) { return __atomic_load_n(&s_sv_active, __ATOMIC_ACQUIRE); }
 +static int sv_event(const SDL_Event* e);
 +
-+int rsx_host_ui_capturing(void) { return s_open || s_sv_active; }
-+int rsx_host_ui_modal(void) { return s_sv_active; }
++int rsx_host_ui_capturing(void)
++{
++    return __atomic_load_n(&s_open, __ATOMIC_ACQUIRE) || __atomic_load_n(&s_sv_active, __ATOMIC_ACQUIRE);
++}
++int rsx_host_ui_modal(void) { return sv_up(); }
 +
 +int rsx_host_ui_visible(void)
 +{
-+    if (s_open || s_sv_active || s_tr.pop_n || s_note.on) return 1;
++    if (s_open || sv_up() || s_tr.pop_n || s_note.on) return 1;
 +    LOCK(); const int f = s_opt.fps; UNLOCK();
 +    return f;
 +}
@@ -18648,10 +19097,10 @@ index 00000000..349a70f3
 +
 +int rsx_host_ui_event(const SDL_Event* e)
 +{
-+    if (s_mcap && (s_sv_active || s_open)) mouse_capture(0);
++    if (s_mcap && (sv_up() || s_open)) mouse_capture(0);
 +    if (e->type == SDL_CONTROLLERBUTTONDOWN && pad_repeat_press(e)) return 0;
 +    /* The save screen owns the input while it is up (F11 still works). */
-+    if (s_sv_active) {
++    if (sv_up()) {
 +        if (e->type == SDL_KEYDOWN && !e->key.repeat &&
 +            (e->key.keysym.sym == SDLK_F11 || (e->key.keysym.sym == SDLK_RETURN && (e->key.keysym.mod & KMOD_ALT)))) {
 +            toggle_fullscreen(); return 0;
@@ -18751,7 +19200,9 @@ index 00000000..349a70f3
 +        else if (k_rows[s_sel].kind == K_OPT) adjust(k_rows[s_sel].id, dir);
 +        return 0; }
 +    case SDL_MOUSEMOTION: {
-+        if (s_mcap) { LOCK(); s_mdx += e->motion.xrel; s_mdy += e->motion.yrel; UNLOCK(); return 0; }
++        /* SDL mirrors touches as mouse motion: the touch controls already turn
++         * the camera from them, so a captured mouse takes only a real mouse. */
++        if (s_mcap) { if (e->motion.which != SDL_TOUCH_MOUSEID) { LOCK(); s_mdx += e->motion.xrel; s_mdy += e->motion.yrel; UNLOCK(); } return 0; }
 +        if (!s_open) return 0;
 +        const int r = mouse_row(e->motion.x, e->motion.y);
 +        rsx_host_options o; rsx_host_ui_options(&o);
@@ -19753,14 +20204,14 @@ index 00000000..349a70f3
 +    sv_keep_visible(nrows);
 +    SDL_MemoryBarrierRelease();
 +    s_sheet_gen++;
-+    s_sv_active = 1;
++    __atomic_store_n(&s_sv_active, 1, __ATOMIC_RELEASE);
 +    UNLOCK();
 +    fprintf(stderr, "[save ui] %s screen: %d saves%s%c", is_save == RSX_SAVE_MODE_DELETE ? "delete" : is_save ? "save" : "load",
 +            n, allow_new ? " + new" : "", 10);
 +    while (!s_sv.done) SDL_Delay(10);
 +    SDL_MemoryBarrierAcquire();
 +    const int r = s_sv.result;
-+    LOCK(); s_sv_active = 0; UNLOCK();
++    LOCK(); __atomic_store_n(&s_sv_active, 0, __ATOMIC_RELEASE); UNLOCK();
 +    fprintf(stderr, "[save ui] chose %d%c", r, 10);
 +    return r;
 +}
@@ -20034,7 +20485,7 @@ index 00000000..349a70f3
 +    rsx_host_options opt; rsx_host_ui_options(&opt);
 +    const float px = (float)f->px, lh = (float)f->line_h;
 +
-+    if (s_sv_active) { sv_build(&o, sw, sh); return o.n; }
++    if (sv_up()) { sv_build(&o, sw, sh); return o.n; }
 +    if (opt.fps && !s_open) racit_perf_overlay(&o, f);
 +    if (!s_open) { tr_popup(&o, sw, sh); note_popup(&o, sw, sh); return o.n; }
 +
@@ -20310,10 +20761,10 @@ index 00000000..349a70f3
 +#endif
 diff --git a/libs/video/rsx_host_ui.h b/libs/video/rsx_host_ui.h
 new file mode 100644
-index 00000000..e40452c5
+index 00000000..ae467b6f
 --- /dev/null
 +++ b/libs/video/rsx_host_ui.h
-@@ -0,0 +1,270 @@
+@@ -0,0 +1,273 @@
 +/*
 + * ps3recomp - host settings menu and on-screen display (RaCACiT)
 + *
@@ -20369,6 +20820,7 @@ index 00000000..e40452c5
 +    int   skip_clank;     /* 1: a load into a Great Clock (Clank) level goes on to the next level (testing) */
 +    int   skip_intro;     /* 1: boot without the logos and notices (game/stubs.cpp; from the next start) */
 +    int   skip_press_start; /* 1: boot past PRESS START to the main menu (game/stubs.cpp; from the next start) */
++    int   auto_continue;    /* 1: load the latest save at boot, past the logos and menus (game/stubs.cpp; from the next start) */
 +    int   armor_look;     /* 0: the armor worn; 1-4: Holoflux..Hyperflux's look, the worn armor's protection -- picked in the game's Skins menu (game/stubs.cpp) */
 +    int   ds_speaker;     /* 1: the DualSense speaker plays (cellAudio.c, ds_player.c) */
 +    int   ds_volume;      /* its volume, 0..100 percent                       */
@@ -20388,6 +20840,8 @@ index 00000000..e40452c5
 +                           * rsx_host_ui_options() then reads ds_speaker, ds_haptics, ds_triggers,
 +                           * ds_swap, ds_lightbar and ds_motion as 0; the stored values stay. */
 +    int   tex_quality;    /* 0 high (as shipped), 1 medium, 2 low: top mip levels left out (applies at start) */
++    int   bloom;          /* 1 on (as shipped), 0 off: whether the game's glow is added
++                           * back over the scene (rsx_draw_engine.c) */
 +    int   cpu_mode;       /* 0 efficient (SPU lanes sleep after a short spin), 1 maximum (they spin) */
 +    int   present_pace;   /* 1: presents held to an even 60 Hz (rsx_be_proxy.c) */
 +    int   kbm;            /* 1: keyboard and mouse play (cellPad.c)            */
@@ -22033,7 +22487,7 @@ index ba6c18eb..ce97e038 100644
          "    Out.t0=o[7];  Out.t1=o[8];  Out.t2=o[9];  Out.t3=o[10];\n"
          "    Out.t4=o[11]; Out.t5=o[12]; Out.t6=o[13]; Out.t7=o[14];\n"
 diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
-index f78c66f2..2b9c63ec 100644
+index f78c66f2..9c1490f9 100644
 --- a/libs/video/rsx_vulkan_backend.c
 +++ b/libs/video/rsx_vulkan_backend.c
 @@ -38,10 +38,13 @@
@@ -24938,7 +25392,7 @@ index f78c66f2..2b9c63ec 100644
      VkImageMemoryBarrier b = {
          .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
          .srcAccessMask = 0, .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
-@@ -1953,134 +3742,389 @@ static void vk_present_window(void)
+@@ -1953,134 +3742,416 @@ static void vk_present_window(void)
          .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
          .image = s_vk.sc_images[idx], .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
      };
@@ -25145,7 +25599,9 @@ index f78c66f2..2b9c63ec 100644
 +    }
 +}
 +static void ov_ring(float cx, float cy, float rx, float ry, float t, const float c[4])
-+{
+ {
+-    if (__atomic_load_n(&s_vk.present_inflight, __ATOMIC_ACQUIRE) && s_vk.present_fence)
+-        pvkWaitForFences(s_vk.device, 1, &s_vk.present_fence, VK_TRUE, UINT64_MAX);
 +    const int N = 28;
 +    for (int i = 0; i < N; i++) {
 +        float a0 = 6.2831853f * i / N, a1 = 6.2831853f * (i + 1) / N;
@@ -25156,14 +25612,38 @@ index f78c66f2..2b9c63ec 100644
 +    }
 +}
 +static void ov_line(float x0, float y0, float x1, float y1, float w, const float c[4])
- {
--    if (__atomic_load_n(&s_vk.present_inflight, __ATOMIC_ACQUIRE) && s_vk.present_fence)
--        pvkWaitForFences(s_vk.device, 1, &s_vk.present_fence, VK_TRUE, UINT64_MAX);
++{
 +    /* Thickness in screen pixels: perpendicular computed in unsquashed space. */
 +    float dx = (x1 - x0) / s_ov.ax, dy = y1 - y0, l = sqrtf(dx * dx + dy * dy);
 +    if (l <= 0.0f) return;
 +    float nx = -dy / l * w * 0.5f * s_ov.ax, ny = dx / l * w * 0.5f;
 +    ov_quad(x0 + nx, y0 + ny, x1 + nx, y1 + ny, x1 - nx, y1 - ny, x0 - nx, y0 - ny, c);
++}
++
++/* A shoulder or stick-click name (L1, R2, L3...) in strokes, centred at (cx, cy),
++ * h pixels tall, as the controller prints it. Each glyph is polylines in a
++ * 0.8 x 1 box, a run of points ending at -1, the glyph at -2. */
++static const float k_ov_glyph_L[] = { 0, 0, 0, 1, .8f, 1, -1, -2 };
++static const float k_ov_glyph_R[] = { 0, 1, 0, 0, .6f, 0, .8f, .15f, .8f, .35f, .6f, .5f, 0, .5f, -1, .35f, .5f, .8f, 1, -1, -2 };
++static const float k_ov_glyph_1[] = { .15f, .2f, .45f, 0, .45f, 1, -1, -2 };
++static const float k_ov_glyph_2[] = { 0, .2f, .15f, 0, .65f, 0, .8f, .15f, .8f, .4f, 0, 1, .8f, 1, -1, -2 };
++static const float k_ov_glyph_3[] = { 0, 0, .8f, 0, .35f, .42f, .6f, .42f, .8f, .6f, .8f, .85f, .65f, 1, 0, 1, -1, -2 };
++static void ov_label(float cx, float cy, float h, float lw, const char* s, const float c[4])
++{
++    const float adv = 1.2f * h * s_ov.ax, gw = .8f * h * s_ov.ax;
++    const int n = (int)strlen(s);
++    float x = cx - (adv * (float)(n - 1) + gw) * 0.5f;
++    const float y = cy - h * 0.5f;
++    for (int i = 0; i < n; i++, x += adv) {
++        const float* g = s[i] == 'L' ? k_ov_glyph_L : s[i] == 'R' ? k_ov_glyph_R : s[i] == '1' ? k_ov_glyph_1
++                       : s[i] == '2' ? k_ov_glyph_2 : s[i] == '3' ? k_ov_glyph_3 : NULL;
++        if (!g) continue;
++        while (g[0] != -2.0f) {
++            for (; g[2] != -1.0f; g += 2)
++                ov_line(x + g[0] * h * s_ov.ax, y + g[1] * h, x + g[2] * h * s_ov.ax, y + g[3] * h, lw, c);
++            g += 3;
++        }
++    }
  }
  
 -/* present_mu held. */
@@ -25264,7 +25744,9 @@ index f78c66f2..2b9c63ec 100644
 +    s_ov.sx = 2.0f / W; s_ov.sy = 2.0f / H;
 +    s_ov.ax = (W / H) / shown;
 +    const tc_button* L; const int n = touch_controls_layout(&L);
-+    const uint32_t pressed = touch_controls_pressed();
++    /* Buttons and stick from the same touch update. */
++    uint32_t pressed; int st_act; float st_ax, st_ay, st_tx, st_ty;
++    touch_controls_shown(&pressed, &st_act, &st_ax, &st_ay, &st_tx, &st_ty);
 +    /* RACACIT_TOUCH_OPACITY fades all of it (touch_controls.h). */
 +    const float op = touch_controls_opacity();
 +    const float fill[4]  = { 0.0f, 0.0f, 0.0f, 0.22f * op };
@@ -25279,8 +25761,7 @@ index f78c66f2..2b9c63ec 100644
 +        const int on = (pressed >> i) & 1u;
 +        const float t = ry * 0.08f;
 +        if (k->shape == TC_SHAPE_STICK) {
-+            int act; float ax, ay, tx, ty;
-+            touch_controls_stick(&act, &ax, &ay, &tx, &ty);
++            const int act = st_act; const float ax = st_ax, ay = st_ay, tx = st_tx, ty = st_ty;
 +            float bx = act ? ax * W : cx, by = act ? ay * H : cy;
 +            ov_disc(bx, by, rx, ry, fill);
 +            ov_ring(bx, by, rx, ry, t, edge);
@@ -25311,19 +25792,19 @@ index f78c66f2..2b9c63ec 100644
 +        case TC_SHAPE_LEFT:  ov_tri(cx - gx, cy, cx + gx * 0.6f, cy - g, cx + gx * 0.6f, cy + g, glyph); break;
 +        case TC_SHAPE_RIGHT: ov_tri(cx + gx, cy, cx - gx * 0.6f, cy + g, cx - gx * 0.6f, cy - g, glyph); break;
 +        case TC_SHAPE_PILL: {
-+            /* 1 bar = L1/R1/SELECT, 2 bars = L2/R2, play triangle = START,
-+             * a ring with a dot = L3/R3 (a stick click), 3 short bars = the
-+             * settings menu (mask 0: no pad button). */
++            /* L1 L2 R1 R2 L3 R3 by name, 1 bar = SELECT, play triangle =
++             * START, 3 short bars = the settings menu (mask 0: no pad button). */
 +            if (k->mask == 0) {
 +                for (int j = -1; j <= 1; j++) ov_line(cx - gx * 0.9f, cy + g * 0.45f * j, cx + gx * 0.9f, cy + g * 0.45f * j, lw, glyph);
 +                break; }
-+            if (k->mask == 0x0002u || k->mask == 0x0004u) {
-+                ov_ring(cx, cy, gx * 0.95f, g * 0.95f, lw, glyph); ov_disc(cx, cy, gx * 0.35f, g * 0.35f, glyph); break; }
 +            if (k->mask == 0x0008u) { ov_tri(cx - gx * 0.6f, cy - g * 0.7f, cx + gx * 0.8f, cy, cx - gx * 0.6f, cy + g * 0.7f, glyph); break; }
-+            const int two = (k->mask == 0x0100u || k->mask == 0x0200u);
-+            if (two) { ov_line(cx - gx * 1.2f, cy - g * 0.3f, cx + gx * 1.2f, cy - g * 0.3f, lw, glyph);
-+                       ov_line(cx - gx * 1.2f, cy + g * 0.3f, cx + gx * 1.2f, cy + g * 0.3f, lw, glyph); }
-+            else ov_line(cx - gx * 1.2f, cy, cx + gx * 1.2f, cy, lw, glyph);
++            /* The shoulders and stick clicks by name, as on the controller. */
++            /* CELL_PAD_CTRL_*: L1 0x0400, L2 0x0100, R1 0x0800, R2 0x0200, L3 0x0002, R3 0x0004 */
++            const char* name = k->mask == 0x0400u ? "L1" : k->mask == 0x0100u ? "L2"
++                             : k->mask == 0x0800u ? "R1" : k->mask == 0x0200u ? "R2"
++                             : k->mask == 0x0002u ? "L3" : k->mask == 0x0004u ? "R3" : NULL;
++            if (name) { ov_label(cx, cy, g * 1.5f, lw * 0.8f, name, glyph); break; }
++            ov_line(cx - gx * 1.2f, cy, cx + gx * 1.2f, cy, lw, glyph);   /* SELECT */
 +            break; }
 +        default: break;
 +        }
@@ -25415,7 +25896,7 @@ index f78c66f2..2b9c63ec 100644
                              s_vk.readback.buf, 1, &region);
      VkBufferMemoryBarrier host = {
          .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
-@@ -2088,30 +4132,19 @@ static void vk_present_record_end(VkCommandBuffer cb)
+@@ -2088,30 +4159,19 @@ static void vk_present_record_end(VkCommandBuffer cb)
          .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
          .buffer = s_vk.readback.buf, .offset = 0, .size = VK_WHOLE_SIZE,
      };
@@ -25455,7 +25936,7 @@ index f78c66f2..2b9c63ec 100644
  }
  
  /* ---------------------------------------------------------------------------
-@@ -2131,27 +4164,37 @@ static void vk_cb_present(void* ud, u32 buffer_id)
+@@ -2131,27 +4191,37 @@ static void vk_cb_present(void* ud, u32 buffer_id)
   * Pipelines, draws and textures are the next stages; until then
   * pipeline_create reports 0, which the engine caches as "cannot build".
   * -------------------------------------------------------------------------*/
@@ -25498,7 +25979,7 @@ index f78c66f2..2b9c63ec 100644
  static void vk_eng2_shutdown(void* user);
  
  static struct {
-@@ -2177,120 +4220,65 @@ static VkFormat vk_eng_format(rsx_be_format f, u32* bpp)
+@@ -2177,120 +4247,65 @@ static VkFormat vk_eng_format(rsx_be_format f, u32* bpp)
      }
  }
  
@@ -25509,8 +25990,7 @@ index f78c66f2..2b9c63ec 100644
 - * for the first two (see vk_eng_rt_blendable). */
 -#define VK_ENG_RT_FORMATS 4
 -static int vk_eng_rt_index(VkFormat f)
-+static u32 vk_eng_alloc(void)
- {
+-{
 -    switch (f) {
 -    case VK_FORMAT_R8G8B8A8_UNORM:      return 0;
 -    case VK_FORMAT_R16G16B16A16_SFLOAT: return 1;
@@ -25534,8 +26014,8 @@ index f78c66f2..2b9c63ec 100644
 - * device is picked, the 4096 Vulkan guarantees before. */
 -static u32 vk_max_dim(void) { return s_vk.max_dim ? s_vk.max_dim : 4096u; }
 -
--static u32 vk_eng_alloc(void)
--{
+ static u32 vk_eng_alloc(void)
+ {
 -    /* Hand out slots round-robin rather than lowest-first, so a handle the
 -     * engine releases is not immediately reused: a late or duplicated release
 -     * of an old handle then finds a free slot instead of a live object. */
@@ -25565,8 +26045,11 @@ index f78c66f2..2b9c63ec 100644
      if (!handle || handle >= VK_ENG_MAX_OBJ) return NULL;
      vk_eng_obj* o = &s_eobj[handle];
 -    return (o->kind == kind) ? o : NULL;
--}
--
++    if (o->kind != kind) return NULL;
++    if (o->lazy && vk_eng_color_back(o)) return NULL;
++    return o;
+ }
+ 
 -/* Host staging kept across readbacks and uploads. One buffer allocated,
 - * mapped and freed per call is three driver round trips, and on Windows
 - * those took from tens of milliseconds to seconds each under load. Each
@@ -25581,11 +26064,8 @@ index f78c66f2..2b9c63ec 100644
 -    while (cap < size) cap *= 2u;
 -    if (vk_create_host_buffer(b, cap, usage)) { vk_destroy_buffer(b); return NULL; }
 -    return b;
-+    if (o->kind != kind) return NULL;
-+    if (o->lazy && vk_eng_color_back(o)) return NULL;
-+    return o;
- }
- 
+-}
+-
 -/* Copy `rows` rows of `w` texels from host memory into a w x h rectangle at
 - * (x, y) of one level / layer of an image that is in GENERAL. */
 -static int vk_eng_upload_region(VkImage img, u32 layer, u32 mip, u32 x, u32 y,
@@ -25659,7 +26139,7 @@ index f78c66f2..2b9c63ec 100644
  static int vk_eng_upload(VkImage img, u32 layer, u32 mip, u32 w, u32 h, u32 bpp,
                           const void* src, u32 row_bytes)
  {
-@@ -2320,8 +4308,8 @@ static VkComponentMapping vk_remap(u32 remap, u32 rsx_fmt)
+@@ -2320,8 +4335,8 @@ static VkComponentMapping vk_remap(u32 remap, u32 rsx_fmt)
                               vk_remap_sel(sel[3]), vk_remap_sel(sel[0]) };
      return m;
  }
@@ -25670,7 +26150,7 @@ index f78c66f2..2b9c63ec 100644
  {
      VkImageViewCreateInfo vci = {
          .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = img,
-@@ -2329,7 +4317,45 @@ static int vk_eng_make_view(VkImage img, VkFormat fmt, u32 levels, VkComponentMa
+@@ -2329,7 +4344,45 @@ static int vk_eng_make_view(VkImage img, VkFormat fmt, u32 levels, VkComponentMa
          .format = fmt, .components = map,
          .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, levels ? levels : 1, 0, cube ? 6u : 1u },
      };
@@ -25717,7 +26197,7 @@ index f78c66f2..2b9c63ec 100644
  }
  
  static int vk_eng_init(void* user, u32 width, u32 height)
-@@ -2340,145 +4366,196 @@ static int vk_eng_init(void* user, u32 width, u32 height)
+@@ -2340,145 +4393,196 @@ static int vk_eng_init(void* user, u32 width, u32 height)
      return s_vk.device ? 0 : -1;
  }
  
@@ -25999,7 +26479,7 @@ index f78c66f2..2b9c63ec 100644
      return hd;
  }
  
-@@ -2501,16 +4578,13 @@ static void vk_eng_clear_color(void* user, u32 surface, const float rgba[4])
+@@ -2501,16 +4605,13 @@ static void vk_eng_clear_color(void* user, u32 surface, const float rgba[4])
                        ((u32)(rgba[1] * 255.0f + 0.5f) <<  8) |
                         (u32)(rgba[2] * 255.0f + 0.5f);
      vk_eng_obj* o = vk_eng_get(surface, VK_ENG_COLOR);
@@ -26018,7 +26498,7 @@ index f78c66f2..2b9c63ec 100644
  }
  
  static void vk_eng_clear_depth_stencil(void* user, u32 depth, u32 flags,
-@@ -2518,18 +4592,16 @@ static void vk_eng_clear_depth_stencil(void* user, u32 depth, u32 flags,
+@@ -2518,18 +4619,16 @@ static void vk_eng_clear_depth_stencil(void* user, u32 depth, u32 flags,
  {
      (void)user;
      vk_eng_obj* o = vk_eng_get(depth, VK_ENG_DEPTH);
@@ -26045,7 +26525,7 @@ index f78c66f2..2b9c63ec 100644
  }
  
  /* The named surface becomes the frame: blit it onto the display image, then
-@@ -2537,125 +4609,167 @@ static void vk_eng_clear_depth_stencil(void* user, u32 depth, u32 flags,
+@@ -2537,125 +4636,167 @@ static void vk_eng_clear_depth_stencil(void* user, u32 depth, u32 flags,
  static void vk_eng_present(void* user, u32 surface)
  {
      (void)user;
@@ -26284,7 +26764,7 @@ index f78c66f2..2b9c63ec 100644
      return hd;
  fail:
      vk_destroy_image(&o->im);
-@@ -2668,7 +4782,7 @@ static void vk_eng_texture_upload(void* user, u32 texture, u32 face, u32 mip, u3
+@@ -2668,7 +4809,7 @@ static void vk_eng_texture_upload(void* user, u32 texture, u32 face, u32 mip, u3
  {
      (void)user;
      vk_eng_obj* o = vk_eng_get(texture, VK_ENG_TEXTURE);
@@ -26293,7 +26773,7 @@ index f78c66f2..2b9c63ec 100644
      /* A BC row is a row of 4x4 blocks; the engine's `rows` already counts them. */
      const size_t tight = o->block ? (size_t)((w + 3u) / 4u) * o->block : (size_t)w * o->bpp;
      vk_eng_upload_rows(o->im.img, face, mip, w, h, tight, rows, src, row_bytes);
-@@ -2678,105 +4792,26 @@ static void vk_eng_texture_upload(void* user, u32 texture, u32 face, u32 mip, u3
+@@ -2678,105 +4819,26 @@ static void vk_eng_texture_upload(void* user, u32 texture, u32 face, u32 mip, u3
   * image, cached by (surface, crossbar, format) and released with the target. */
  static u32 vk_eng_surface_view(void* user, u32 surface, u32 remap, u32 rsx_format)
  {
@@ -26407,7 +26887,7 @@ index f78c66f2..2b9c63ec 100644
  /* ---- E4: depth snapshots --------------------------------------------------
   * A depth target read as a texture, which the engine asks for only after a
   * depth-writing draw. Metal resolves it with a fullscreen pass into R32Float;
-@@ -2787,123 +4822,348 @@ static u32 vk_eng_color_snapshot(void* user, u32 surface)
+@@ -2787,123 +4849,348 @@ static u32 vk_eng_color_snapshot(void* user, u32 surface)
   * Each depth target keeps ONE snapshot texture (its handle in `surface`),
   * refilled on every request, so nothing accumulates however often the engine
   * invalidates and asks again; it goes when the depth target goes. */
@@ -26829,7 +27309,7 @@ index f78c66f2..2b9c63ec 100644
  /* ---- E2: pipelines and draws ---------------------------------------------
   * A pipeline handle carries the two translated modules and the render state
   * the engine keyed it on. Topology is not part of that key (Metal sets it on
-@@ -2915,38 +5175,85 @@ static int vk_eng_depth_readback(void* user, u32 depth, u32 x, u32 y, u32 w, u32
+@@ -2915,38 +5202,85 @@ static int vk_eng_depth_readback(void* user, u32 depth, u32 x, u32 y, u32 w, u32
   * vtable guest path already creates. Vertex inputs are the engine's compact
   * layout: slot n is a float4 at n*16, at location n, as Metal reads it.
   * Known gaps, stated rather than guessed: vertex-texture units (their
@@ -26926,7 +27406,7 @@ index f78c66f2..2b9c63ec 100644
      u32          tex[RSX_BE_MAX_TEXTURES];
      rsx_be_sampler_desc samp[RSX_BE_MAX_TEXTURES];
      u32          tex_mask;
-@@ -2954,49 +5261,131 @@ static struct {
+@@ -2954,49 +5288,131 @@ static struct {
      u32          sc[4];
      int          have_vp, have_sc;
      u32          stencil_ref;
@@ -27081,7 +27561,7 @@ index f78c66f2..2b9c63ec 100644
              .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_LOAD,
              .stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE,
              .initialLayout = VK_IMAGE_LAYOUT_GENERAL, .finalLayout = VK_IMAGE_LAYOUT_GENERAL };
-@@ -3009,10 +5398,23 @@ static VkRenderPass vk_eng_render_pass(VkFormat cf, u32 n)
+@@ -3009,10 +5425,23 @@ static VkRenderPass vk_eng_render_pass(VkFormat cf, u32 n)
      VkRenderPassCreateInfo rci = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
                                     .attachmentCount = n + 1, .pAttachments = att,
                                     .subpassCount = 1, .pSubpasses = &sub };
@@ -27107,7 +27587,7 @@ index f78c66f2..2b9c63ec 100644
  
  /* Tables carried from the Metal backend, itself copied from the D3D12 live
   * draw engine a title has shipped on. */
-@@ -3030,6 +5432,10 @@ static VkBlendFactor vk_gcm_blend_factor(u32 f)
+@@ -3030,6 +5459,10 @@ static VkBlendFactor vk_gcm_blend_factor(u32 f)
      case 0x0306: return VK_BLEND_FACTOR_DST_COLOR;
      case 0x0307: return VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR;
      case 0x0308: return VK_BLEND_FACTOR_SRC_ALPHA_SATURATE;
@@ -27118,7 +27598,7 @@ index f78c66f2..2b9c63ec 100644
      default:     return VK_BLEND_FACTOR_ONE;
      }
  }
-@@ -3071,85 +5477,210 @@ static VkStencilOpState vk_gcm_stencil_face(u32 func, u32 fail, u32 zfail, u32 z
+@@ -3071,85 +5504,210 @@ static VkStencilOpState vk_gcm_stencil_face(u32 func, u32 fail, u32 zfail, u32 z
      return s;
  }
  
@@ -27383,7 +27863,7 @@ index f78c66f2..2b9c63ec 100644
          if (!(s_e2.warned & 1u)) { VK_LOG("engine: colour format %d not supported yet\n", (int)rt_fmt); s_e2.warned |= 1u; }
          return 0;
      }
-@@ -3158,183 +5689,1254 @@ static u32 vk_eng_pipeline_create(void* user, const char* vs_hlsl, const char* p
+@@ -3158,183 +5716,1254 @@ static u32 vk_eng_pipeline_create(void* user, const char* vs_hlsl, const char* p
      u32 slot = VK_ENG_MAX_PIPE;
      for (u32 i = 0; i < VK_ENG_MAX_PIPE; i++) if (!s_epipe[i].used) { slot = i; break; }
      if (slot == VK_ENG_MAX_PIPE) {
@@ -28788,7 +29268,7 @@ index f78c66f2..2b9c63ec 100644
      }
      return P->variant[topo_idx];
  }
-@@ -3343,59 +6945,67 @@ static void vk_eng_bind_pipeline(void* user, u32 pipeline) { (void)user; s_e2.pi
+@@ -3343,59 +6972,67 @@ static void vk_eng_bind_pipeline(void* user, u32 pipeline) { (void)user; s_e2.pi
  
  static void vk_eng2_shutdown(void* user)
  {
@@ -28879,7 +29359,7 @@ index f78c66f2..2b9c63ec 100644
      }
      s_e2.tex_mask = mask;
  }
-@@ -3416,20 +7026,10 @@ static void vk_eng_set_scissor(void* user, u32 x, u32 y, u32 w, u32 h)
+@@ -3416,20 +7053,10 @@ static void vk_eng_set_scissor(void* user, u32 x, u32 y, u32 w, u32 h)
      s_e2.sc[0] = x; s_e2.sc[1] = y; s_e2.sc[2] = w; s_e2.sc[3] = h; s_e2.have_sc = 1;
  }
  static void vk_eng_set_stencil_ref(void* user, u32 ref) { (void)user; s_e2.stencil_ref = ref; }
@@ -28903,7 +29383,7 @@ index f78c66f2..2b9c63ec 100644
  }
  
  static VkFramebuffer vk_eng_framebuffer(VkRenderPass rp, const u32* rt, u32 n, VkImageView dview,
-@@ -3448,7 +7048,7 @@ static VkFramebuffer vk_eng_framebuffer(VkRenderPass rp, const u32* rt, u32 n, V
+@@ -3448,7 +7075,7 @@ static VkFramebuffer vk_eng_framebuffer(VkRenderPass rp, const u32* rt, u32 n, V
                                      .renderPass = rp, .attachmentCount = n + 1, .pAttachments = views,
                                      .width = w, .height = h, .layers = 1 };
      VkFramebuffer fb = VK_NULL_HANDLE;
@@ -28912,7 +29392,7 @@ index f78c66f2..2b9c63ec 100644
      memcpy(s_e2.fb[s_e2.fb_count].key, key, sizeof key);
      s_e2.fb[s_e2.fb_count++].fb = fb;
      return fb;
-@@ -3462,19 +7062,101 @@ static VkImageView vk_eng_scratch_depth(u32 w, u32 h)
+@@ -3462,19 +7089,101 @@ static VkImageView vk_eng_scratch_depth(u32 w, u32 h)
          return s_e2.scratch_depth.view;
      vk_eng_drop_framebuffers();
      vk_destroy_image(&s_e2.scratch_depth);
@@ -29018,7 +29498,7 @@ index f78c66f2..2b9c63ec 100644
  static int vk_eng_ensure_indices(VkDeviceSize bytes)
  {
      if (s_e2.indices.buf && s_e2.indices.size >= bytes) return 0;
-@@ -3495,383 +7177,600 @@ static VkSampler vk_eng_sampler(const rsx_be_sampler_desc* d)
+@@ -3495,383 +7204,600 @@ static VkSampler vk_eng_sampler(const rsx_be_sampler_desc* d)
                    | ((u64)d->mip_present << 3) | ((u64)(d->wrap_s & 0xF) << 4)
                    | ((u64)(d->wrap_t & 0xF) << 8) | ((u64)(d->wrap_r & 0xF) << 12)
                    | ((u64)(lo >> 16) << 16) | ((u64)(hi >> 16) << 32);
@@ -29916,7 +30396,7 @@ index f78c66f2..2b9c63ec 100644
  }
  
  static const rsx_draw_backend s_vk_engine_backend = {
-@@ -3881,14 +7780,20 @@ static const rsx_draw_backend s_vk_engine_backend = {
+@@ -3881,14 +7807,20 @@ static const rsx_draw_backend s_vk_engine_backend = {
      .submit_and_wait      = vk_eng_submit_and_wait,
      .texture_create       = vk_eng_texture_create,
      .texture_upload       = vk_eng_texture_upload,
@@ -29940,7 +30420,7 @@ index f78c66f2..2b9c63ec 100644
      .pipeline_create      = vk_eng_pipeline_create,
      .pipeline_release     = vk_eng_pipeline_release,
      .bind_targets         = vk_eng_bind_targets,
-@@ -3900,17 +7805,13 @@ static const rsx_draw_backend s_vk_engine_backend = {
+@@ -3900,17 +7832,13 @@ static const rsx_draw_backend s_vk_engine_backend = {
      .set_viewport         = vk_eng_set_viewport,
      .set_scissor          = vk_eng_set_scissor,
      .set_stencil_ref      = vk_eng_set_stencil_ref,
@@ -29960,7 +30440,7 @@ index f78c66f2..2b9c63ec 100644
  };
  
  static rsx_backend s_vulkan_backend = {
-@@ -3930,37 +7831,90 @@ static rsx_backend s_vulkan_backend = {
+@@ -3930,37 +7858,90 @@ static rsx_backend s_vulkan_backend = {
   * -------------------------------------------------------------------------*/
  static int vk_init_all(u32 width, u32 height, const char* title)
  {
@@ -30064,7 +30544,7 @@ index f78c66f2..2b9c63ec 100644
      if (vk_load_instance_functions()) return -1;
      if (s_vk.windowed) {
          if (vk_load_wsi_instance_functions()) {
-@@ -3971,45 +7925,108 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+@@ -3971,45 +7952,108 @@ static int vk_init_all(u32 width, u32 height, const char* title)
              vk_window_drop(why);
          }
      }
@@ -30190,7 +30670,7 @@ index f78c66f2..2b9c63ec 100644
      if (vk_load_device_functions()) return -1;
      if (s_vk.windowed && vk_load_wsi_device_functions())
          vk_window_drop("the driver has no swapchain functions");
-@@ -4026,24 +8043,23 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+@@ -4026,24 +8070,23 @@ static int vk_init_all(u32 width, u32 height, const char* title)
      VK_CHECK(pvkAllocateCommandBuffers(s_vk.device, &cai, &s_vk.cmd), "vkAllocateCommandBuffers");
      VkFenceCreateInfo fci = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
      VK_CHECK(pvkCreateFence(s_vk.device, &fci, NULL, &s_vk.fence), "vkCreateFence");
@@ -30222,7 +30702,7 @@ index f78c66f2..2b9c63ec 100644
      if (vk_guest_init()) {
          VK_LOG("guest programs: setup failed, fixed-function path only\n");
          vk_guest_shutdown();
-@@ -4056,31 +8072,77 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+@@ -4056,31 +8099,77 @@ static int vk_init_all(u32 width, u32 height, const char* title)
       * null backend makes the same choice). */
      if (vk_begin()) return -1;
      vk_barrier_image(s_vk.color.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED);
@@ -30305,7 +30785,7 @@ index f78c66f2..2b9c63ec 100644
      /* One path at a time: the FIFO walker feeds both the rsx_state vtable
       * and the register-file engine, so registering both would record every
       * draw twice (the rule the Metal backend's init follows).
-@@ -4090,13 +8152,14 @@ int rsx_vulkan_backend_init(u32 width, u32 height, const char* title)
+@@ -4090,13 +8179,14 @@ int rsx_vulkan_backend_init(u32 width, u32 height, const char* title)
       * pipeline from the guest's programs, so without them it has nothing to
       * draw with, and the vtable's fixed-function path stays the default.
       * Either way PS3RECOMP_RSX_ENGINE=dispatch|vtable overrides. */
@@ -30322,7 +30802,7 @@ index f78c66f2..2b9c63ec 100644
      VK_LOG("offscreen target %ux%u ready, depth format %d (%s)\n",
             s_vk.width, s_vk.height, (int)s_vk.depth_format, title ? title : "");
      return 0;
-@@ -4104,7 +8167,7 @@ int rsx_vulkan_backend_init(u32 width, u32 height, const char* title)
+@@ -4104,7 +8194,7 @@ int rsx_vulkan_backend_init(u32 width, u32 height, const char* title)
  
  void rsx_vulkan_backend_shutdown(void)
  {
@@ -30331,7 +30811,7 @@ index f78c66f2..2b9c63ec 100644
      if (rsx_get_backend() == &s_vulkan_backend) rsx_set_backend(NULL);
      if (s_vk.eng_active) { rsx_draw_engine_shutdown(); s_vk.eng_active = 0; }
      rsx_draw_engine_set_backend(NULL);
-@@ -4118,8 +8181,14 @@ void rsx_vulkan_backend_shutdown(void)
+@@ -4118,8 +8208,14 @@ void rsx_vulkan_backend_shutdown(void)
          }
      }
      if (s_vk.windowed || s_vk.window) vk_window_drop(NULL);
@@ -30347,7 +30827,7 @@ index f78c66f2..2b9c63ec 100644
          vk_guest_shutdown();
          for (int i = 0; i < VK_PIPELINE_SLOTS; i++)
              if (s_vk.pipelines[i]) pvkDestroyPipeline(s_vk.device, s_vk.pipelines[i], NULL);
-@@ -4139,72 +8208,38 @@ void rsx_vulkan_backend_shutdown(void)
+@@ -4139,72 +8235,39 @@ void rsx_vulkan_backend_shutdown(void)
          vk_destroy_image(&s_vk.color);
          vk_destroy_buffer(&s_vk.vertices);
          vk_destroy_buffer(&s_vk.readback);
@@ -30378,6 +30858,7 @@ index f78c66f2..2b9c63ec 100644
      SDL_Event e;
 +    rsx_host_ui_poll_script();
      while (SDL_PollEvent(&e)) {
++        touch_controls_event(&e);   /* the touch controls' own copy of the fingers */
          if (e.type == SDL_QUIT) quit = 1;
 -        else if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE) quit = 1;
 -        else if (e.type == SDL_KEYDOWN && !e.key.repeat && s_vk.window &&
@@ -30427,7 +30908,7 @@ index f78c66f2..2b9c63ec 100644
  }
  
  u32 rsx_vulkan_backend_debug_color(void) { return s_vk.clear_argb; }
-@@ -4220,9 +8255,14 @@ u32 rsx_vulkan_backend_guest_draws(void)
+@@ -4220,9 +8283,14 @@ u32 rsx_vulkan_backend_guest_draws(void)
      return s_vk.eng_active ? rsx_draw_engine_guest_draws() : s_g.last_draws;
  }
  
@@ -36530,7 +37011,7 @@ index ea2e8351..0261d5e0 100644
  /* A store by the PPU landed on `ea`'s line. Raise SPU_EVENT_LR on every SPU
   * whose live reservation covers it, drop that reservation, and wake the host
 diff --git a/runtime/spu/spu_context.h b/runtime/spu/spu_context.h
-index 400b2ba5..2a3ad397 100644
+index 400b2ba5..788a4cce 100644
 --- a/runtime/spu/spu_context.h
 +++ b/runtime/spu/spu_context.h
 @@ -14,6 +14,12 @@
@@ -36598,7 +37079,7 @@ index 400b2ba5..2a3ad397 100644
  
      /* Set by another host thread to stop this SPU from outside: a raw SPU's
       * PPU writing SPU_RunCntl = 0 (spu_raw.c). Lifted code never looks at it;
-@@ -433,6 +468,11 @@ typedef struct spu_context {
+@@ -433,6 +468,19 @@ typedef struct spu_context {
       * spu_coh_reserve_fast). Written under that lock, read by the context's
       * own thread. */
      int coh_listed;
@@ -36607,10 +37088,18 @@ index 400b2ba5..2a3ad397 100644
 +     * after the wake. spu_coh_unregister waits for 0 (acquire), so no wake runs
 +     * on a context that is gone. __atomic builtins, like coh_listed. */
 +    unsigned ll_wake_refs;
++
++    /* racacit: this context's cached address of its host thread's
++     * g_spu_trampoline_fn and the thread it belongs to (spu_tramp_slot).
++     * Zero in a fresh context; rewritten when the context runs on another
++     * thread. */
++    uintptr_t tramp_owner;
++    unsigned tramp_epoch;   /* g_spu_tramp_epoch when tramp_slot was taken */
++    void (**tramp_slot)(struct spu_context*);
  } spu_context;
  
  /* event_status is written from more than one host thread: the SPU's own
-@@ -630,6 +670,25 @@ static SPU_NOINLINE_COLD void spu_ls_read_probe(const spu_context* ctx, uint32_t
+@@ -630,6 +678,25 @@ static SPU_NOINLINE_COLD void spu_ls_read_probe(const spu_context* ctx, uint32_t
      }
  }
  
@@ -36636,7 +37125,7 @@ index 400b2ba5..2a3ad397 100644
  /* The read diagnostics, then g_spu_ls_rdiag recomputed: it drops to 0 once
   * none is armed (the first call also settles g_spu_ls_watch_n). */
  static SPU_NOINLINE_COLD void spu_ls_read_diag(const spu_context* ctx, uint32_t lsa)
-@@ -644,10 +703,12 @@ static SPU_NOINLINE_COLD void spu_ls_read_diag(const spu_context* ctx, uint32_t
+@@ -644,10 +711,12 @@ static SPU_NOINLINE_COLD void spu_ls_read_diag(const spu_context* ctx, uint32_t
  static inline u128 spu_ls_read128(const spu_context* ctx, uint32_t lsa)
  {
      u128 v;
@@ -36650,7 +37139,7 @@ index 400b2ba5..2a3ad397 100644
  #if defined(__ARM_NEON)
      vst1q_u8(v._u8, vrev32q_u8(vld1q_u8(p)));     /* ldr q; rev32 */
  #elif SPU_LS_VEC
-@@ -746,7 +807,16 @@ static SPU_NOINLINE_COLD void spu_ls_write_diag(spu_context* ctx, uint32_t lsa,
+@@ -746,7 +815,16 @@ static SPU_NOINLINE_COLD void spu_ls_write_diag(spu_context* ctx, uint32_t lsa,
  static inline void spu_ls_write128(spu_context* ctx, uint32_t lsa, u128 val)
  {
      lsa &= SPU_LS_MASK & ~0xFu;
@@ -36668,7 +37157,7 @@ index 400b2ba5..2a3ad397 100644
  #if defined(__ARM_NEON)
      vst1q_u8(p, vrev32q_u8(vld1q_u8(val._u8)));   /* rev32; str q */
  #elif SPU_LS_VEC
-@@ -765,8 +835,10 @@ static inline void spu_ls_write128(spu_context* ctx, uint32_t lsa, u128 val)
+@@ -765,8 +843,10 @@ static inline void spu_ls_write128(spu_context* ctx, uint32_t lsa, u128 val)
          p[i*4 + 3] = (uint8_t)w;
      }
  #endif
@@ -36679,7 +37168,7 @@ index 400b2ba5..2a3ad397 100644
  }
  
  /* ---------------------------------------------------------------------------
-@@ -824,7 +896,12 @@ static inline u128 spu_make_preferred_u32(uint32_t val)
+@@ -824,7 +904,12 @@ static inline u128 spu_make_preferred_u32(uint32_t val)
  #define SPU_CH_LOCK(ch)   while (_InterlockedExchange(&(ch)->lock, 1)) _mm_pause()
  #define SPU_CH_UNLOCK(ch) _InterlockedExchange(&(ch)->lock, 0)
  #else
@@ -36692,7 +37181,7 @@ index 400b2ba5..2a3ad397 100644
  #define SPU_CH_UNLOCK(ch) __atomic_store_n(&(ch)->lock, 0, __ATOMIC_RELEASE)
  #endif
  
-@@ -947,8 +1024,9 @@ void (*spu_take_interrupt(spu_context* ctx,
+@@ -947,8 +1032,9 @@ void (*spu_take_interrupt(spu_context* ctx,
  SPU_GATE int g_spu_irqwait_diag = -1;
  void spu_irqwait_diag(spu_context* ctx);
  
@@ -36704,7 +37193,7 @@ index 400b2ba5..2a3ad397 100644
  /* SPU_PCHIST=1: bucket SPU execution by the GPU module's own symbols.
   *
   * SPU_VRAMPC showed 3.7M VRAM writes from Host2Local_Body and ZERO from
-@@ -1046,6 +1124,27 @@ static inline void spu_pchist_tick(const spu_context* ctx)
+@@ -1046,6 +1132,57 @@ static inline void spu_pchist_tick(const spu_context* ctx)
  extern volatile int g_spu_direct;                /* spu_drain.c: -1 unread, 0 off, 1 on */
  extern uint8_t g_spu_stack_reset_hint[1024];     /* spu_channels.c, by (entry >> 2) & 1023 */
  void spu_direct_init(void);
@@ -36716,10 +37205,40 @@ index 400b2ba5..2a3ad397 100644
 + * step-watching diagnostics, SPU_TRACE_RING included, is running) that case
 + * is answered here: the same depth check, then return. Anything else, or
 + * the first call before g_spu_direct is read, takes the full drain. */
++/* racacit: on macOS every access to a thread-local is a call into the TLV
++ * resolver, and lifted SPU code writes g_spu_trampoline_fn at every exit
++ * (21k sites in A Crack in Time's images). On Apple arm64 the thread's
++ * identity is one register read (TPIDRRO_EL0, the thread's TSD base), so each
++ * context keeps the slot's address for the thread it last ran on and lifted
++ * code goes through that (spu_lifter.py emits SPU_TRAMP_OF(ctx) at each exit). Same
++ * variable, so mixing with direct accesses elsewhere is fine. */
++#if defined(__APPLE__) && defined(__aarch64__) && !defined(SPU_DRAIN_CALL_STUB)
++#  define SPU_TRAMP_FAST 1
++extern unsigned g_spu_tramp_epoch;                               /* spu_drain.c */
++void (**spu_tramp_slot_take(spu_context* c, uintptr_t owner))(spu_context*);   /* spu_drain.c */
++static inline void (**spu_tramp_slot(spu_context* c))(spu_context*)
++{
++    uintptr_t t;
++    __asm__("mrs %0, tpidrro_el0" : "=r"(t));
++    /* A host thread that ends gives its TSD base back to libpthread, and a
++     * new thread can get the same one with its thread-locals somewhere else.
++     * Every thread that took a slot bumps g_spu_tramp_epoch as it exits
++     * (spu_tramp_slot_take), so a slot taken before that is taken again. The
++     * exit happens before the reuse (through libpthread's own lock and the new
++     * thread's creation), so a relaxed load sees the bump. */
++    if (__builtin_expect(c->tramp_owner != t ||
++                         c->tramp_epoch != __atomic_load_n(&g_spu_tramp_epoch, __ATOMIC_RELAXED), 0))
++        return spu_tramp_slot_take(c, t);
++    return c->tramp_slot;
++}
++#  define SPU_TRAMP_OF(c) (*spu_tramp_slot(c))
++#else
++#  define SPU_TRAMP_OF(c) g_spu_trampoline_fn
++#endif
 +#ifndef SPU_DRAIN_CALL_STUB   /* tests that supply their own spu_drain_call */
 +static inline void spu_drain_call(spu_context* ctx, uint32_t return_pc)
 +{
-+    if (__builtin_expect(g_spu_direct > 0 && !g_spu_trampoline_fn &&
++    if (__builtin_expect(g_spu_direct > 0 && !SPU_TRAMP_OF(ctx) &&
 +                         ((ctx->pc ^ return_pc) & SPU_LS_MASK) == 0, 1)) {
 +        spu_depth_guard_check(ctx);
 +        return;
@@ -37053,7 +37572,7 @@ index 8c4ccaa8..39bace69 100644
      }
      case MFC_RdAtomicStat:
 diff --git a/runtime/spu/spu_drain.c b/runtime/spu/spu_drain.c
-index 49bc2b94..15c645c1 100644
+index 49bc2b94..2e4025cf 100644
 --- a/runtime/spu/spu_drain.c
 +++ b/runtime/spu/spu_drain.c
 @@ -7,7 +7,7 @@
@@ -37065,7 +37584,40 @@ index 49bc2b94..15c645c1 100644
  /* setjmp/longjmp also save and restore the signal mask on POSIX: one
   * sigprocmask system call per halt, stack reset or task resume. These frames
   * never cross a signal handler, so the mask is the same at both ends. */
-@@ -32,6 +32,45 @@ SPU_THREAD_LOCAL void (*g_spu_trampoline_fn)(spu_context*) = 0;
+@@ -29,9 +29,78 @@ typedef struct spu_irq_frame {
+ 
+ /* Pending cross-function transfer target for this host thread's SPU context. */
+ SPU_THREAD_LOCAL void (*g_spu_trampoline_fn)(spu_context*) = 0;
++
++#ifdef SPU_TRAMP_FAST
++#include <pthread.h>
++/* spu_tramp_slot (spu_context.h): raised as each thread that took a slot
++ * exits, so a slot cached under a TSD base a new thread reuses is retaken. */
++unsigned g_spu_tramp_epoch;
++static pthread_key_t s_tramp_key;
++static pthread_once_t s_tramp_once = PTHREAD_ONCE_INIT;
++static void spu_tramp_thread_gone(void* p)
++{
++    (void)p;
++    __atomic_add_fetch(&g_spu_tramp_epoch, 1, __ATOMIC_RELEASE);
++}
++static int s_tramp_key_ok;
++static void spu_tramp_key_make(void) { s_tramp_key_ok = pthread_key_create(&s_tramp_key, spu_tramp_thread_gone) == 0; }
++/* Caches the slot only once this thread's exit is sure to bump the epoch.
++ * If the key can't be made or set, the context keeps no owner, so every
++ * lookup comes back here and uses the thread's own slot directly. */
++__attribute__((noinline)) void (**spu_tramp_slot_take(spu_context* c, uintptr_t owner))(spu_context*)
++{
++    pthread_once(&s_tramp_once, spu_tramp_key_make);
++    const int registered = s_tramp_key_ok &&
++        (pthread_getspecific(s_tramp_key) || pthread_setspecific(s_tramp_key, (void*)1) == 0);
++    if (!registered) { c->tramp_owner = 0; return &g_spu_trampoline_fn; }
++    c->tramp_epoch = __atomic_load_n(&g_spu_tramp_epoch, __ATOMIC_ACQUIRE);
++    c->tramp_slot = &g_spu_trampoline_fn;
++    c->tramp_owner = owner;
++    return c->tramp_slot;
++}
++#endif
  SPU_THREAD_LOCAL uint32_t g_spu_pch[8];
  SPU_THREAD_LOCAL unsigned g_spu_pch_n;
  
@@ -37111,7 +37663,7 @@ index 49bc2b94..15c645c1 100644
  /* yz_lockstep_tick now has its real body in spu_lockstep.c (milestone 2). */
  
  /* SPURS task-launch interception at a trampoline hop (milestone: SPURS kernel).
-@@ -48,6 +87,8 @@ void* volatile    g_pm_flow_ctx = 0;
+@@ -48,6 +117,8 @@ void* volatile    g_pm_flow_ctx = 0;
  #include <stdlib.h>
  #include <stdio.h>
  #include "ps3emu/log_first.h"
@@ -37120,7 +37672,7 @@ index 49bc2b94..15c645c1 100644
  
  /* Sync-model ring-drain: the wwsjob PM's job ring drains only when jobs mark
   * their record's "done" bit (0x8000 in the record's first halfword @LS 0xDF0).
-@@ -58,6 +99,92 @@ void* volatile    g_pm_flow_ctx = 0;
+@@ -58,6 +129,92 @@ void* volatile    g_pm_flow_ctx = 0;
   * set the done bit on the pending records -- the faithful sync equivalent of
   * the completion interrupt. Env SPU_JOBDRAIN (default off while validating). */
  extern void spu_halt(spu_context*);
@@ -37213,7 +37765,7 @@ index 49bc2b94..15c645c1 100644
  /* Last 32 drain steps on this host thread (pc), for post-mortems of a run that
   * ended where it should not have (spurs_policy.c, [pm-end]). */
  /* One thread-local object: every Darwin TLV access is a call, and this runs
-@@ -86,7 +213,10 @@ static int spu_task_launch_diagnostics(void)
+@@ -86,7 +243,10 @@ static int spu_task_launch_diagnostics(void)
      static int s_on = -1;
      if (s_on < 0)
          s_on = getenv("SPU_NO_LS0_END") || getenv("SPU_EXITTRACE") ||
@@ -37225,7 +37777,7 @@ index 49bc2b94..15c645c1 100644
      return s_on;
  }
  
-@@ -121,6 +251,8 @@ void spu_direct_init(void)
+@@ -121,6 +281,8 @@ void spu_direct_init(void)
      static const char* const diag[] = {
          "SPU_LOCKSTEP", "SPU_TAILRET", "SPU_PCHIST", "SPU_NO_LS0_END", "SPU_EXITTRACE",
          "SPU_STEPTRACE", "SPU_JOBDRAIN", "SPURS_PM_FLOW",
@@ -37234,7 +37786,7 @@ index 49bc2b94..15c645c1 100644
      };
      const char* e = getenv("PS3_SPU_DIRECT");
      int on = !(e && e[0] == '0' && !e[1]);
-@@ -165,6 +297,8 @@ void spu_drain_hop(spu_context* ctx, void (*fn)(spu_context*))
+@@ -165,6 +327,8 @@ void spu_drain_hop(spu_context* ctx, void (*fn)(spu_context*))
  
  static void spu_task_launch_slow(spu_context* ctx)
  {
@@ -37243,7 +37795,7 @@ index 49bc2b94..15c645c1 100644
      /* A SPURS job returning to LS 0 is finished -- its crt tail-jumps to the
       * resident job manager, and with the job loaded at 0 that lands on its own
       * entry. Planting a return address in r0 catches the jobs that get there
-@@ -451,6 +585,7 @@ void (*spu_take_interrupt(spu_context* ctx,
+@@ -451,6 +615,7 @@ void (*spu_take_interrupt(spu_context* ctx,
                  ctx->srr0 & SPU_LS_MASK, ctx->host_depth,
                  ctx->gpr[13]._u32[0], ctx->gpr[15]._u32[0]); } }
      ctx->pc = target & SPU_LS_MASK;
@@ -37251,7 +37803,7 @@ index 49bc2b94..15c645c1 100644
      { static int _n = 0;
        if (PS3_LOG_FIRST(_n, 16)) {
            /* WWS Load->Run diagnosis: the job-manager interrupt handler advances
-@@ -481,13 +616,13 @@ SPU_DRAIN_COLD void spu_depth_guard(spu_context* ctx)
+@@ -481,13 +646,13 @@ SPU_DRAIN_COLD void spu_depth_guard(spu_context* ctx)
  
      /* Ring of recent drain sites. When the depth trips, the useful question is
       * not "where are we" but "what cycle got us here" -- one pc names a point,
@@ -37270,7 +37822,7 @@ index 49bc2b94..15c645c1 100644
      if (ctx->host_depth < s_max / 2) return;
      s_ring[s_n % RING] = ((uint32_t)ctx->pc & SPU_LS_MASK);
      s_n++;
-@@ -538,7 +673,7 @@ typedef void (*spu_drain_fn)(spu_context*);
+@@ -538,7 +703,7 @@ typedef void (*spu_drain_fn)(spu_context*);
  extern spu_drain_fn spu_lookup(uint32_t addr, int image_id);
  
  
@@ -37279,7 +37831,7 @@ index 49bc2b94..15c645c1 100644
  {
      if (__builtin_expect(g_spu_direct < 0, 0)) spu_direct_init();
      spu_depth_guard_check(ctx);
-@@ -547,6 +682,21 @@ void spu_drain_call(spu_context* ctx, uint32_t return_pc)
+@@ -547,6 +712,21 @@ void spu_drain_call(spu_context* ctx, uint32_t return_pc)
       * SPU_DIRECT the code after a call can tail-call on for a long while
       * before it takes a step. */
      const uint32_t outer_ret_pc = ctx->drain_ret_pc;
@@ -37301,7 +37853,7 @@ index 49bc2b94..15c645c1 100644
      /* The frame an interrupt taken in THIS loop returns to. It stays armed
       * after the handler's first host function returns -- the handler keeps
       * running as trampolines of this loop -- until its iret fires or the
-@@ -562,18 +712,20 @@ void spu_drain_call(spu_context* ctx, uint32_t return_pc)
+@@ -562,18 +742,20 @@ void spu_drain_call(spu_context* ctx, uint32_t return_pc)
       * thread, so resolve it once per drain instead of once per access. */
      void (**const tramp)(spu_context*) = &g_spu_trampoline_fn;
  
@@ -37325,7 +37877,7 @@ index 49bc2b94..15c645c1 100644
              spu_drain_hop_inline(ctx, fn, recent);
              if (ctx->int_enable && (ctx->event_status & ctx->event_mask)) {
                  void (*vf)(spu_context*) = spu_take_interrupt(ctx, fn);
-@@ -602,19 +754,29 @@ void spu_drain_call(spu_context* ctx, uint32_t return_pc)
+@@ -602,19 +784,29 @@ void spu_drain_call(spu_context* ctx, uint32_t return_pc)
              }
              fn(ctx);
          }
@@ -37360,7 +37912,7 @@ index 49bc2b94..15c645c1 100644
                  *tramp = spu_indirect_branch;
                  continue;
              }
-@@ -622,9 +784,11 @@ void spu_drain_call(spu_context* ctx, uint32_t return_pc)
+@@ -622,9 +814,11 @@ void spu_drain_call(spu_context* ctx, uint32_t return_pc)
          {
              extern void spu_restart_dispatch(spu_context*);
              SPU_DRAIN_POP_IRQ();
@@ -40289,6 +40841,143 @@ index 7cf5b08f..99e9214b 100644
  
  static int failures;
  #define CHECK_RC(call, want) do { int32_t _rc = (int32_t)(call); \
+diff --git a/tests/test_touch_controls.c b/tests/test_touch_controls.c
+new file mode 100644
+index 00000000..7efc3155
+--- /dev/null
++++ b/tests/test_touch_controls.c
+@@ -0,0 +1,131 @@
++/* touch_controls_apply without SDL or a GPU: each finger keeps the part it
++ * landed on. A camera or stick drag that crosses a button must not press it
++ * (dragging the camera over triangle kept opening the quick select ring). */
++#include "touch_controls.h"
++#include "cellPad.h"
++
++#include <stdio.h>
++#include <stdlib.h>
++
++int rsx_host_ui_capturing(void) { return 0; }
++
++static int failures;
++static void check(int condition, const char* name)
++{
++    if (!condition) { fprintf(stderr, "FAIL: %s\n", name); failures++; }
++}
++
++static const float kAspect = 16.0f / 9.0f;
++static uint16_t b; static uint8_t lx, ly;
++static void step(const tc_touch* t, int n)
++{
++    b = 0; lx = ly = 128;
++    touch_controls_apply(t, n, kAspect, &b, &lx, &ly);
++}
++
++int main(void)
++{
++#ifdef _WIN32
++    _putenv_s("RACACIT_TOUCH", "1");
++#else
++    setenv("RACACIT_TOUCH", "1", 1);
++#endif
++    int dx, dy;
++    check(touch_controls_active(), "the touch controls are on");
++
++    /* A camera drag from open space onto triangle. */
++    tc_touch cam = { 1, 0.70f, 0.30f };
++    step(&cam, 1);
++    check(b == 0, "a camera finger in open space presses nothing");
++    touch_controls_look(&dx, &dy);
++    cam.x = 0.885f; cam.y = 0.55f;   /* triangle's centre */
++    step(&cam, 1);
++    check(!(b & CELL_PAD_CTRL_TRIANGLE), "a camera drag over triangle does not press it");
++    touch_controls_look(&dx, &dy);
++    check(dx > 0 && dy > 0, "the drag turns the camera right and down");
++    check(abs(dy - 175) <= 1, "a quarter-height drag is 175 counts");
++    step(NULL, 0);
++
++    /* A left stick drag onto the d-pad's right arrow. */
++    tc_touch stick = { 2, 0.15f, 0.70f };
++    step(&stick, 1);
++    check(b == 0 && lx == 128, "the stick lands centred");
++    stick.x = 0.375f; stick.y = 0.82f;
++    step(&stick, 1);
++    check(!(b & CELL_PAD_CTRL_RIGHT), "a stick drag over the d-pad does not press it");
++    check(lx > 200, "the stick is pushed right");
++    touch_controls_look(&dx, &dy);
++    check(dx == 0 && dy == 0, "the stick does not turn the camera");
++
++    /* A button press slides to the next button, and the stick works beside it. */
++    tc_touch two[2] = { { 3, 0.885f, 0.83f }, { 2, 0.375f, 0.82f } };
++    step(two, 2);
++    check((b & CELL_PAD_CTRL_CROSS) && !(b & CELL_PAD_CTRL_RIGHT), "cross with the stick held over the d-pad");
++    check(lx > 200, "the stick keeps its finger");
++    two[0].x = 0.950f; two[0].y = 0.69f;
++    step(two, 2);
++    check((b & CELL_PAD_CTRL_CIRCLE) && !(b & CELL_PAD_CTRL_CROSS), "a press slides from cross to circle");
++
++    /* A finger that started on a button never becomes the stick or the camera. */
++    two[0].x = 0.60f; two[0].y = 0.40f;
++    step(two, 2);
++    touch_controls_look(&dx, &dy);
++    check(b == 0 && dx == 0 && dy == 0, "a press slid off its buttons does nothing");
++
++    /* A second finger in the stick zone, listed before the stick's own finger,
++     * does not take the stick from it. */
++    step(NULL, 0);
++    tc_touch held = { 5, 0.15f, 0.70f };
++    step(&held, 1);
++    tc_touch pair[2] = { { 6, 0.10f, 0.60f }, { 5, 0.15f, 0.70f } };
++    step(pair, 2);
++    check(lx == 128 && ly == 128, "the held stick finger keeps the stick and its anchor");
++
++    /* The stick's finger lifts in the same poll another lands: the new one
++     * takes the stick where it landed. */
++    step(NULL, 0);
++    tc_touch first = { 8, 0.15f, 0.70f };
++    step(&first, 1);
++    tc_touch next = { 9, 0.20f, 0.70f };
++    step(&next, 1);
++    next.x = 0.30f;
++    step(&next, 1);
++    check(lx > 200, "a finger landing as the stick's lifts takes the stick from where it landed");
++
++    /* A second finger landing in the stick zone while the stick is held does
++     * nothing, even when it slides onto the d-pad. */
++    step(NULL, 0);
++    tc_touch duo[2] = { { 10, 0.15f, 0.70f }, { 11, 0.10f, 0.60f } };
++    step(duo, 2);
++    duo[1].x = 0.375f; duo[1].y = 0.82f;
++    step(duo, 2);
++    check(!(b & CELL_PAD_CTRL_RIGHT), "a spare finger slid onto the d-pad presses nothing");
++
++    /* A finger that landed on the stick and moved onto the d-pad before the
++     * first poll still steers the stick from where it landed. */
++    step(NULL, 0);
++    tc_touch moved = { 12, 0.375f, 0.82f, 0.15f, 0.70f, 1 };
++    step(&moved, 1);
++    check(!(b & CELL_PAD_CTRL_RIGHT) && lx > 200, "a stick swipe seen first mid-swipe is still the stick");
++
++    /* After a reset (Settings open), a held camera finger starts over. */
++    step(NULL, 0);
++    tc_touch look = { 7, 0.70f, 0.30f };
++    step(&look, 1);
++    touch_controls_look(&dx, &dy);
++    touch_controls_reset();
++    look.y = 0.80f;
++    step(&look, 1);
++    touch_controls_look(&dx, &dy);
++    check(dx == 0 && dy == 0, "a finger held through a reset does not jump the camera");
++
++    /* Everything lifted: a new touch on triangle presses it. */
++    step(NULL, 0);
++    tc_touch tri = { 4, 0.885f, 0.55f };
++    step(&tri, 1);
++    check(b & CELL_PAD_CTRL_TRIANGLE, "a tap on triangle presses it");
++
++    if (failures) { fprintf(stderr, "%d failure(s)\n", failures); return 1; }
++    puts("touch controls: ok");
++    return 0;
++}
 diff --git a/tools/extract_spu_images.py b/tools/extract_spu_images.py
 index 0c15cb73..11dd4030 100644
 --- a/tools/extract_spu_images.py
@@ -40873,7 +41562,7 @@ index dd9e4b32..745dc69f 100644
      out = subprocess.run([exe], capture_output=True, text=True)
      print(out.stdout, end="")
 diff --git a/tools/spu_lifter.py b/tools/spu_lifter.py
-index 4610a361..4df93422 100644
+index 4610a361..877d17d8 100644
 --- a/tools/spu_lifter.py
 +++ b/tools/spu_lifter.py
 @@ -62,6 +62,22 @@ except ImportError:
@@ -40986,9 +41675,12 @@ index 4610a361..4df93422 100644
          for insn in insns:
              if insn.addr < start or insn.addr >= end:
                  continue
-@@ -567,7 +616,13 @@ class SPULifter:
+@@ -565,9 +614,15 @@ class SPULifter:
+             if insn.addr in merged_starts:
+                 func.body_lines.append(
                      f"    if (ctx->int_enable && (ctx->event_status & ctx->event_mask)) "
-                     f"{{ ctx->pc = {self._pc(insn.addr)}; g_spu_trampoline_fn = "
+-                    f"{{ ctx->pc = {self._pc(insn.addr)}; g_spu_trampoline_fn = "
++                    f"{{ ctx->pc = {self._pc(insn.addr)}; SPU_TRAMP_OF(ctx) = "
                      f"{self.prefix}spu_func_{insn.addr:08X}; return; }}")
 +            fill = self._fill_idiom(insn, by_addr)
 +            if fill:
@@ -41015,7 +41707,7 @@ index 4610a361..4df93422 100644
              func.body_lines.append(
 -                f"    {{ SPU_DIRECT(ctx, {self._pc(end)}, {self.prefix}spu_func_{end:08X}); }}")
 +                f"    {{ ctx->pc = {self._A(end)}; "
-+                f"g_spu_trampoline_fn = {self.prefix}spu_func_{end:08X}; return; }}")
++                f"SPU_TRAMP_OF(ctx) = {self.prefix}spu_func_{end:08X}; return; }}")
  
          # Infinite no-op self-loop (the SPU `br .` halt idiom): a function whose
          # whole body is nops + an unconditional branch back into itself does
@@ -41077,7 +41769,7 @@ index 4610a361..4df93422 100644
 +            if t > insn.addr or t not in getattr(self, "func_starts", set()):
 +                return m.group(0)
 +            return ("{ if (__builtin_expect(ctx->int_enable && (ctx->event_status & ctx->event_mask), 0)) "
-+                    f"{{ ctx->pc = {self._A(t)}; g_spu_trampoline_fn = {self.prefix}spu_func_{t:08X}; return; }} "
++                    f"{{ ctx->pc = {self._A(t)}; SPU_TRAMP_OF(ctx) = {self.prefix}spu_func_{t:08X}; return; }} "
 +                    f"goto loc_{t:08X}; }}")
 +        return re.sub(r"goto loc_([0-9A-F]{8});", sub, c)
  
@@ -41122,10 +41814,24 @@ index 4610a361..4df93422 100644
 +            # Cross-function conditional branch = conditional tail: hand the
 +            # target to the trampoline and unwind (enclosing SPU_DRAIN re-enters).
 +            return (f"if ({cond}) {{ ctx->pc = {self._A(tgt)}; "
-+                    f"g_spu_trampoline_fn = {self.prefix}spu_func_{tgt:08X}; return; }}")
++                    f"SPU_TRAMP_OF(ctx) = {self.prefix}spu_func_{tgt:08X}; return; }}")
          # Interrupt enable/disable bits on the bi family (bie/bid, irete/iretd,
          # bisle(d)...): bit 0x40000 = E (enable), 0x80000 = D (disable), taking
          # effect when the branch is TAKEN. The WWS jobmanager's poll loop runs
+@@ -992,11 +1100,11 @@ class SPULifter:
+                 return f"{_ied}SPU_RET(ctx);"
+             # Computed indirect tail: set pc + trampoline to the dispatcher, unwind.
+             return (f"{_ied}ctx->pc = {g(tgt_reg)}._u32[0]; "
+-                    f"g_spu_trampoline_fn = spu_indirect_branch; return;")
++                    f"SPU_TRAMP_OF(ctx) = spu_indirect_branch; return;")
+         # iret: interrupt return -> branch to the saved interrupt PC (SRR0).
+         if mn == "iret":
+             return (f"{_ied}ctx->pc = ctx->srr0; "
+-                    "g_spu_trampoline_fn = spu_indirect_branch; return;")
++                    "SPU_TRAMP_OF(ctx) = spu_indirect_branch; return;")
+         if mn in ("bisl",):
+             # `bisl rt, ra`: rt = link, ra = TARGET. The disassembler emits BOTH
+             # ("$r0, $r2"), so operand 0 is the link register -- taking it as the
 @@ -1010,12 +1118,11 @@ class SPULifter:
              # SPU_DRAIN + image save/restore) so the callee's tail-chains drain
              # here and its `bi $r0` returns via host return.
@@ -41141,6 +41847,24 @@ index 4610a361..4df93422 100644
          # bisled: set link, branch to RA only if an external event is pending.
          if mn in ("bisled",):
              link_rt = insn.raw & 0x7F            # rt = link
+@@ -1024,7 +1131,7 @@ class SPULifter:
+             return (f"{{ uint32_t _tg = {g(tgt_reg)}._u32[0]; {g(link_rt)} = spu_link({self._pc((addr + 4) & 0x3FFFC)}); "
+                     f"if ((ctx->event_status & ctx->event_mask) != 0) {{ "
+                     f"{_ied}ctx->pc = _tg; "
+-                    f"g_spu_trampoline_fn = spu_indirect_branch; return; }} }}")
++                    f"SPU_TRAMP_OF(ctx) = spu_indirect_branch; return; }} }}")
+         # biz/binz/bihz/bihnz: ops[0] = condition reg, ops[1] = target reg.
+         if mn in ("biz", "binz", "bihz", "bihnz"):
+             cond = self._cond(mn[1:], _reg(ops[0]))   # strip leading 'b' -> iz/inz...
+@@ -1040,7 +1147,7 @@ class SPULifter:
+                     return f"if ({cond}) {{ {_ied}SPU_RET_REG(ctx, {tgt_reg}); }}"
+                 return f"if ({cond}) {{ {_ied}SPU_RET(ctx); }}"
+             return (f"if ({cond}) {{ {_ied}ctx->pc = {g(tgt_reg)}._u32[0]; "
+-                    f"g_spu_trampoline_fn = spu_indirect_branch; return; }}")
++                    f"SPU_TRAMP_OF(ctx) = spu_indirect_branch; return; }}")
+ 
+         # hint-for-branch: pure performance hint, safe to drop
+         if mn in ("hbr", "hbra", "hbrr"):
 @@ -1073,16 +1180,17 @@ class SPULifter:
          if func.start_addr <= tgt < func.end_addr:
              return f"goto loc_{tgt:08X};"
@@ -41153,7 +41877,7 @@ index 4610a361..4df93422 100644
 +        # Cross-function unconditional tail: hand the target to the trampoline
 +        # and unwind so the enclosing SPU_DRAIN re-enters (no host-stack growth).
 +        return (f"{{ ctx->pc = {self._A(tgt)}; "
-+                f"g_spu_trampoline_fn = {self.prefix}spu_func_{tgt:08X}; return; }}")
++                f"SPU_TRAMP_OF(ctx) = {self.prefix}spu_func_{tgt:08X}; return; }}")
  
      # ------------------------------------------------------------------ #
      def emit_header(self) -> str:
@@ -41194,7 +41918,7 @@ index 4610a361..4df93422 100644
                  lines.append(b if b.endswith(":") else f"    {b}")
              lines.append("}")
              lines.append("")
-@@ -1113,16 +1240,15 @@ class SPULifter:
+@@ -1113,17 +1240,16 @@ class SPULifter:
          # at runtime we route through spu_indirect_branch which either lands
          # on a registered mid-function entry (if one was emitted) or halts
          # cleanly with a "PC X not registered" diagnostic.
@@ -41209,11 +41933,13 @@ index 4610a361..4df93422 100644
 -                lines.append(f"void {self.prefix}spu_func_{t:08X}(spu_context* ctx) {{")
 -                pc = self._pc(t) if self.reloc else f"0x{t:X}u"
 -                lines.append(f"    ctx->pc = {pc}; "
+-                             f"g_spu_trampoline_fn = spu_indirect_branch; return;")
 +                lines.append(f"void {self.prefix}spu_func_{t:08X}(spu_context* SPU_RESTRICT ctx) {{")
 +                lines.append(f"    ctx->pc = {self._A(t)}; "
-                              f"g_spu_trampoline_fn = spu_indirect_branch; return;")
++                             f"SPU_TRAMP_OF(ctx) = spu_indirect_branch; return;")
                  lines.append("}")
              lines.append("")
+ 
 @@ -1131,6 +1257,8 @@ class SPULifter:
          lines.append("typedef struct { uint32_t addr; void (*func)(spu_context*); const char* name; } spu_func_entry;")
          lines.append("static const spu_func_entry spu_function_table[] = {")
@@ -41559,3 +42285,16 @@ index 4610a361..4df93422 100644
  
      os.makedirs(args.output, exist_ok=True)
      hp = os.path.join(args.output, args.header_name)
+diff --git a/tools/test_spu_lifter_merge_chunks.py b/tools/test_spu_lifter_merge_chunks.py
+index 4cb71610..bae722f6 100644
+--- a/tools/test_spu_lifter_merge_chunks.py
++++ b/tools/test_spu_lifter_merge_chunks.py
+@@ -94,7 +94,7 @@ def lift(merge):
+ 
+ class MergeChunkInterrupts(unittest.TestCase):
+     CHECK = ('if (ctx->int_enable && (ctx->event_status & ctx->event_mask)) '
+-             '{ ctx->pc = 0x4; g_spu_trampoline_fn = spu_func_00000004; return; }')
++             '{ ctx->pc = 0x4; SPU_TRAMP_OF(ctx) = spu_func_00000004; return; }')
+ 
+     def body(self, lifter, addr):
+         return '\n'.join(next(f for f in lifter.functions if f.start_addr == addr).body_lines)
