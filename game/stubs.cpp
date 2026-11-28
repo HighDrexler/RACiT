@@ -686,7 +686,11 @@ extern "C" int racit_save_any(const char* prefix);
 static int front_end_auto_continue(void)
 {
     static int on = -1;
-    if (on < 0) { const char* e = getenv("RACACIT_AUTO_CONTINUE"); on = (e && *e == '1') ? 1 : 0; }
+    if (on < 0) {
+        const char* e = getenv("RACACIT_AUTO_CONTINUE");
+        const char* b = getenv("RACACIT_BENCHMARK");   /* the benchmark presses LOAD itself */
+        on = (e && *e == '1' && !(b && *b == '1')) ? 1 : 0;
+    }
     return on;
 }
 static void front_end_continue_run(void)
@@ -841,7 +845,12 @@ extern "C" void racacit_front_end_menu(ppu_context* ctx)
     fprintf(stderr, "[front-end] PRESS START skipped: main menu opens (RACACIT_SKIP_PRESS_START)%s\n",
             ok ? "" : " -- SetVariable said no");
     if (ok && front_end_auto_continue()) {
-        if (racit_save_any("BCUS98124") || racit_save_any("BCES00511")) std::thread(front_end_continue_run).detach();
+#ifdef RACACIT_BCES00511
+        static const char kTitle[] = "BCES00511";
+#else
+        static const char kTitle[] = "BCUS98124";
+#endif
+        if (racit_save_any(kTitle)) std::thread(front_end_continue_run).detach();
         else fprintf(stderr, "[front-end] continue at start: no save yet, staying on the menu%c", 10);
     }
 #ifdef __APPLE__

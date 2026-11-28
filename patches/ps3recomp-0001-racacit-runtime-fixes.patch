@@ -2438,7 +2438,7 @@ index 4d916ac7..1dfee100 100644
      if (flags & CELL_FS_O_CREAT) {
          ensure_parent_dirs(host_path);
 diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
-index 5f8a2fa2..6bda6c43 100644
+index 5f8a2fa2..664caeac 100644
 --- a/libs/input/cellPad.c
 +++ b/libs/input/cellPad.c
 @@ -13,11 +13,13 @@
@@ -4072,7 +4072,7 @@ index 5f8a2fa2..6bda6c43 100644
                    fclose(f);
                    if (held_n > 0) { FILE* w = fopen(pf_path, "wb"); if (w) fclose(w); }
                }
-@@ -1072,9 +2297,37 @@ skip_inject: ;
+@@ -1072,9 +2297,40 @@ skip_inject: ;
            if (held_n > 0) {
                if (data->len > 0) held_n--;
                data->button[CELL_PAD_BTN_OFFSET_DIGITAL1] |= (u16)(held_mask & 0xFF);
@@ -4085,6 +4085,9 @@ index 5f8a2fa2..6bda6c43 100644
 +              } }
        } }
  
++    /* A held host press stops as soon as a person uses a control. */
++    if (port_no == 0 && __atomic_load_n(&s_hostpress_n, __ATOMIC_ACQUIRE) > 0 && racit_pad_player_active())
++        __atomic_store_n(&s_hostpress_n, 0, __ATOMIC_RELEASE);
 +    if (port_no == 0 && __atomic_load_n(&s_hostpress_n, __ATOMIC_ACQUIRE) > 0) {
 +        const unsigned m = __atomic_load_n(&s_hostpress_mask, __ATOMIC_RELAXED);
 +        data->button[CELL_PAD_BTN_OFFSET_DIGITAL1] |= (u16)(m & 0xFF);
@@ -4111,7 +4114,7 @@ index 5f8a2fa2..6bda6c43 100644
      /* Analog sticks */
      /* PAD_STICK="lx,ly,rx,ry" (0-255, 128 = centred): hold the analog sticks at
       * fixed positions. Rubber Ducky drives its camera from the sticks and never
-@@ -1093,7 +2346,7 @@ skip_inject: ;
+@@ -1093,7 +2349,7 @@ skip_inject: ;
                   sscanf(e, "%d,%d,%d,%d,%lf,%lf", &a,&b,&c,&d,&s_from,&s_until);
                   s_v[0]=(unsigned char)a; s_v[1]=(unsigned char)b;
                   s_v[2]=(unsigned char)c; s_v[3]=(unsigned char)d; } }
@@ -4120,7 +4123,7 @@ index 5f8a2fa2..6bda6c43 100644
                    hs->analog_rx = s_v[2]; hs->analog_ry = s_v[3];
                    hs->connected = 1; }
        /* PAD_SWEEP=<seconds per step>: walk the sticks through a fixed set of
-@@ -1104,7 +2357,7 @@ skip_inject: ;
+@@ -1104,7 +2360,7 @@ skip_inject: ;
        { static int sw = -1; static clock_t t0 = 0;
          if (sw < 0) { const char* e = getenv("PAD_SWEEP");
                        sw = e ? atoi(e) : 0; if (sw < 0) sw = 0; }
@@ -4129,7 +4132,7 @@ index 5f8a2fa2..6bda6c43 100644
              static const unsigned char steps[9][4] = {
                  {128,128,128,128},
                  {128,  0,128,128}, {128,255,128,128},
-@@ -1172,10 +2425,40 @@ skip_inject: ;
+@@ -1172,10 +2428,40 @@ skip_inject: ;
          data->button[CELL_PAD_BTN_OFFSET_SENSOR_Y] = 399; /* gravity */
          data->button[CELL_PAD_BTN_OFFSET_SENSOR_Z] = 512;
          data->button[CELL_PAD_BTN_OFFSET_SENSOR_G] = 512;
@@ -4170,7 +4173,7 @@ index 5f8a2fa2..6bda6c43 100644
      /* A non-zero len means "here is a CHANGE packet" -- the constant is literally
       * named CELL_PAD_LEN_CHANGE_DEFAULT. Hardware reports len = 0 once the port
       * has nothing new, and titles DRAIN on that: The Simpsons Arcade Game's
-@@ -1496,9 +2779,64 @@ s32 cellPadSetActDirect(u32 port_no, CellPadActParam* param)
+@@ -1496,9 +2782,64 @@ s32 cellPadSetActDirect(u32 port_no, CellPadActParam* param)
  #endif
  
  #if PAD_BACKEND_SDL2
@@ -6444,7 +6447,7 @@ index 2d4a54d4..49dff976 100644
  static int  s_boot_checked = 0;
  static u32  s_game_type = CELL_GAME_GAMETYPE_DISC;
 diff --git a/libs/system/cellSaveData.c b/libs/system/cellSaveData.c
-index 1fb1b120..f63c9fb2 100644
+index 1fb1b120..82793de9 100644
 --- a/libs/system/cellSaveData.c
 +++ b/libs/system/cellSaveData.c
 @@ -30,6 +30,17 @@
@@ -6465,7 +6468,7 @@ index 1fb1b120..f63c9fb2 100644
  
  #ifdef _WIN32
  #  include <windows.h>
-@@ -66,6 +77,36 @@ static void adopt_gamedata_root(void)
+@@ -66,6 +77,37 @@ static void adopt_gamedata_root(void)
          snprintf(s_save_root, sizeof(s_save_root), "%s/dev_hdd0/home/00000001/savedata", env);
  }
  
@@ -6494,6 +6497,7 @@ index 1fb1b120..f63c9fb2 100644
 + * the game asks for picks the latest save without showing the list, once. The
 + * game arms it as it presses Cross on LOAD; savedata_ui_pick takes it. */
 +static int s_autopick;
++int racit_pad_player_active(void);   /* libs/input/cellPad.c */
 +void racit_save_autopick_once(void) { __atomic_store_n(&s_autopick, 1, __ATOMIC_RELEASE); }
 +void racit_save_autopick_cancel(void) { __atomic_store_n(&s_autopick, 0, __ATOMIC_RELEASE); }
 +/* 1 while the armed pick has not been taken yet. */
@@ -6502,7 +6506,7 @@ index 1fb1b120..f63c9fb2 100644
  /* Ensure directory (and parents) exist */
  static void ensure_dirs(const char* path)
  {
-@@ -86,8 +127,7 @@ static void ensure_dirs(const char* path)
+@@ -86,8 +128,7 @@ static void ensure_dirs(const char* path)
  
  static void build_save_path(char* buf, size_t buf_size, const char* dirName)
  {
@@ -6512,7 +6516,7 @@ index 1fb1b120..f63c9fb2 100644
  #ifdef _WIN32
      for (char* p = buf; *p; p++) {
          if (*p == '/') *p = '\\';
-@@ -394,6 +434,167 @@ static s32 dispatch_func_stat_full(uint32_t func_opd, int is_new, const char* di
+@@ -394,6 +435,170 @@ static s32 dispatch_func_stat_full(uint32_t func_opd, int is_new, const char* di
   * `selected` receives the chosen directory ("" when none): the first listed
   * entry, else the new-save name, else the focus name. For a save with nothing
   * listed the new-save name wins -- headless, there is no user to pick. */
@@ -6644,6 +6648,9 @@ index 1fb1b120..f63c9fb2 100644
 +
 +    /* Continue at start: a load takes the newest save (the list is newest
 +     * first) without asking, once. */
++    /* A player who took over since the press keeps the list. */
++    if (!is_save && __atomic_load_n(&s_autopick, __ATOMIC_ACQUIRE) && racit_pad_player_active())
++        __atomic_store_n(&s_autopick, 0, __ATOMIC_RELEASE);
 +    if (!is_save && n > 0 && __atomic_exchange_n(&s_autopick, 0, __ATOMIC_ACQ_REL)) {
 +        snprintf(selected, 64, "%s", e[0].dir);
 +        printf("[cellSaveData] continue at start: loading the latest save %s%c", selected, 10);
@@ -6680,7 +6687,7 @@ index 1fb1b120..f63c9fb2 100644
  static s32 dispatch_func_select(uint32_t func_opd, const CellSaveDataDirList* dirList,
                                  uint32_t dirCount, uint32_t setBuf_ea, int is_save,
                                  uint32_t userdata_ea, const char* who, char selected[64])
-@@ -429,9 +630,60 @@ static s32 dispatch_func_select(uint32_t func_opd, const CellSaveDataDirList* di
+@@ -429,9 +634,60 @@ static s32 dispatch_func_select(uint32_t func_opd, const CellSaveDataDirList* di
      const uint32_t fixed_n = vm_read32(set_ea + 8), fixed = vm_read32(set_ea + 12);
      const uint32_t newd = vm_read32(set_ea + 16), focus = vm_read32(set_ea + 4);
      const uint32_t new_name = newd ? vm_read32(newd + 4) : 0;
@@ -6743,14 +6750,30 @@ index 1fb1b120..f63c9fb2 100644
      else if (new_name)                       pick = new_name;
      else if (focus)                          pick = focus;
      if (pick) {
-@@ -447,17 +699,20 @@ static s32 dispatch_func_select(uint32_t func_opd, const CellSaveDataDirList* di
+@@ -447,17 +703,36 @@ static s32 dispatch_func_select(uint32_t func_opd, const CellSaveDataDirList* di
  }
  
  /* Enumerate save directories matching a prefix. Returns count, fills dirList up to max. */
 +static u32 enumerate_save_dirs(const char* prefix, CellSaveDataDirList* dirList, u32 max);
-+/* Whether a save of this title exists (its directories start with `prefix`,
-+ * e.g. "BCUS98124"): Continue at start only presses LOAD when there is one. */
-+int racit_save_any(const char* prefix) { return enumerate_save_dirs(prefix, NULL, 0) > 0; }
++/* Whether this title has a save the Load list can open (a directory starting
++ * with `prefix`, e.g. "BCUS98124", holding GAME.SAV): Continue at start only
++ * presses LOAD when there is one. */
++int racit_save_any(const char* prefix)
++{
++    CellSaveDataDirList* dirs = (CellSaveDataDirList*)calloc(64, sizeof *dirs);
++    if (!dirs) return 0;
++    u32 count = enumerate_save_dirs(prefix, dirs, 64);
++    if (count > 64) count = 64;
++    int found = 0;
++    for (u32 i = 0; i < count && !found; i++) {
++        char path[1024], fp[1100]; struct stat st;
++        build_save_path(path, sizeof path, dirs[i].dirName);
++        snprintf(fp, sizeof fp, "%s/GAME.SAV", path);
++        found = stat(fp, &st) == 0 && st.st_size > 0;
++    }
++    free(dirs);
++    return found;
++}
  static u32 enumerate_save_dirs(const char* prefix, CellSaveDataDirList* dirList, u32 max)
  {
      u32 count = 0;
@@ -6767,7 +6790,7 @@ index 1fb1b120..f63c9fb2 100644
          for (char* p = search; *p; p++) {
              if (*p == '/') *p = '\\';
          }
-@@ -486,7 +741,7 @@ static u32 enumerate_save_dirs(const char* prefix, CellSaveDataDirList* dirList,
+@@ -486,7 +761,7 @@ static u32 enumerate_save_dirs(const char* prefix, CellSaveDataDirList* dirList,
      }
  #else
      {
@@ -6776,7 +6799,7 @@ index 1fb1b120..f63c9fb2 100644
          if (!dp)
              return 0;
  
-@@ -496,7 +751,7 @@ static u32 enumerate_save_dirs(const char* prefix, CellSaveDataDirList* dirList,
+@@ -496,7 +771,7 @@ static u32 enumerate_save_dirs(const char* prefix, CellSaveDataDirList* dirList,
                  continue;
              /* Check it's a directory */
              char full[1024];
@@ -6785,7 +6808,7 @@ index 1fb1b120..f63c9fb2 100644
              if (!dir_exists(full))
                  continue;
              if (prefix && prefix[0] && strncmp(de->d_name, prefix, strlen(prefix)) != 0)
-@@ -660,6 +915,92 @@ static u32 enumerate_save_files(const char* save_path,
+@@ -660,6 +935,92 @@ static u32 enumerate_save_files(const char* save_path,
      return count;
  }
  
@@ -6878,7 +6901,7 @@ index 1fb1b120..f63c9fb2 100644
  /* Execute file callback: read/write/delete files in the save directory */
  static s32 process_file_op(const char* save_path, CellSaveDataFileSet* set)
  {
-@@ -711,6 +1052,7 @@ static s32 process_file_op(const char* save_path, CellSaveDataFileSet* set)
+@@ -711,6 +1072,7 @@ static s32 process_file_op(const char* save_path, CellSaveDataFileSet* set)
      case CELL_SAVEDATA_FILEOP_WRITE:
      case CELL_SAVEDATA_FILEOP_WRITE_NOTRUNC: {
          ensure_dirs(save_path);
@@ -6886,7 +6909,7 @@ index 1fb1b120..f63c9fb2 100644
          const char* mode;
          if (set->fileOperation == CELL_SAVEDATA_FILEOP_WRITE && set->fileOffset == 0) {
              mode = "wb";
-@@ -985,6 +1327,9 @@ static s32 savedata_execute_run(const char* dirName, int is_save,
+@@ -985,6 +1347,9 @@ static s32 savedata_execute_run(const char* dirName, int is_save,
                     fileSet.fileOperation, fileSet.fileType,
                     fileSet.fileName ? fileSet.fileName : "", fileSet.fileOffset,
                     fileSet.fileSize, fileSet.fileBufSize, exc);
@@ -6896,7 +6919,7 @@ index 1fb1b120..f63c9fb2 100644
              if (exc < 0) { free(fileList); return exc; }
              exc_size = (u32)exc;
          }
-@@ -1007,6 +1352,24 @@ static s32 savedata_execute_run(const char* dirName, int is_save,
+@@ -1007,6 +1372,24 @@ static s32 savedata_execute_run(const char* dirName, int is_save,
   * API implementations
   * -----------------------------------------------------------------------*/
  
@@ -6921,7 +6944,7 @@ index 1fb1b120..f63c9fb2 100644
  s32 cellSaveDataListSave2(u32 version, CellSaveDataSetList* setList,
                             CellSaveDataSetBuf* setBuf,
                             CellSaveDataListCallback funcList,
-@@ -1053,6 +1416,7 @@ s32 cellSaveDataListSave2(u32 version, CellSaveDataSetList* setList,
+@@ -1053,6 +1436,7 @@ s32 cellSaveDataListSave2(u32 version, CellSaveDataSetList* setList,
                                            (uint32_t)(uintptr_t)userdata, "funcList", selectedDir);
      (void)listSet;
  
@@ -6929,7 +6952,7 @@ index 1fb1b120..f63c9fb2 100644
      if (cbResult.result < 0) {
          free(dirList);
          return CELL_SAVEDATA_ERROR_CBRESULT;
-@@ -1066,6 +1430,7 @@ s32 cellSaveDataListSave2(u32 version, CellSaveDataSetList* setList,
+@@ -1066,6 +1450,7 @@ s32 cellSaveDataListSave2(u32 version, CellSaveDataSetList* setList,
  
      s32 result = savedata_execute(selectedDir, 1, setBuf, funcStat, funcFile, userdata);
      free(dirList);
@@ -6937,7 +6960,7 @@ index 1fb1b120..f63c9fb2 100644
      return result;
  }
  
-@@ -1113,6 +1478,7 @@ s32 cellSaveDataListLoad2(u32 version, CellSaveDataSetList* setList,
+@@ -1113,6 +1498,7 @@ s32 cellSaveDataListLoad2(u32 version, CellSaveDataSetList* setList,
                                            (uint32_t)(uintptr_t)userdata, "funcList", selectedDir);
      (void)listSet;
  
@@ -6945,7 +6968,7 @@ index 1fb1b120..f63c9fb2 100644
      if (cbResult.result < 0) {
          free(dirList);
          return CELL_SAVEDATA_ERROR_CBRESULT;
-@@ -1193,7 +1559,7 @@ static s32 savedata_fixed(int is_save, CellSaveDataSetList* setList,
+@@ -1193,7 +1579,7 @@ static s32 savedata_fixed(int is_save, CellSaveDataSetList* setList,
          }
          printf("[cellSaveData] savedata_fixed: cbresult=%d listed=%u/%u prefix='%s' root='%s'\n",
                 result, listed, count,
@@ -6954,7 +6977,7 @@ index 1fb1b120..f63c9fb2 100644
          SAVEDATA_REJECT(CELL_SAVEDATA_ERROR_CBRESULT, w);
      }
      if (!funcStat)
-@@ -1252,6 +1618,25 @@ s32 cellSaveDataListAutoLoad(u32 version, u32 errDialog,
+@@ -1252,6 +1638,25 @@ s32 cellSaveDataListAutoLoad(u32 version, u32 errDialog,
      return savedata_fixed(0, setList, setBuf, funcFixed, funcStat, funcFile, userdata);
  }
  
@@ -6980,7 +7003,7 @@ index 1fb1b120..f63c9fb2 100644
  s32 cellSaveDataAutoSave2(u32 version, const char* dirName,
                             u32 errDialog,
                             CellSaveDataSetBuf* setBuf,
-@@ -1326,8 +1711,21 @@ s32 cellSaveDataDelete2(u32 container)
+@@ -1326,8 +1731,21 @@ s32 cellSaveDataDelete2(u32 container)
  {
      printf("[cellSaveData] Delete2(container=%u)\n", container);
  
@@ -7004,7 +7027,7 @@ index 1fb1b120..f63c9fb2 100644
      return CELL_OK;
  }
  
-@@ -1587,6 +1985,19 @@ void ps3_savedata_list_auto_load(ppu_context* ctx)
+@@ -1587,6 +2005,19 @@ void ps3_savedata_list_auto_load(ppu_context* ctx)
          (u32)ctx->gpr[10], (void*)(uintptr_t)savedata_arg9(ctx));
  }
  
