@@ -845,6 +845,7 @@ extern "C" void racacit_front_end_cards(ppu_context* ctx)
     s_front_end_menu = (ok && (skip_start || front_end_auto_continue())) ? (uint32_t)c.gpr[27] : 0u;
 }
 
+extern "C" void racit_benchmark_menu_open(void);   /* benchmark.cpp */
 extern "C" void racacit_front_end_menu(ppu_context* ctx)
 {
     const uint32_t handle = s_front_end_menu;
@@ -863,6 +864,7 @@ extern "C" void racacit_front_end_menu(ppu_context* ctx)
     front_end_leave(ctx, c);
     fprintf(stderr, "[front-end] PRESS START skipped: main menu opens (RACACIT_SKIP_PRESS_START)%s\n",
             ok ? "" : " -- SetVariable said no");
+    racit_benchmark_menu_open();
     if (ok && front_end_auto_continue()) {
 #ifdef RACACIT_BCES00511
         static const char kTitle[] = "BCES00511";

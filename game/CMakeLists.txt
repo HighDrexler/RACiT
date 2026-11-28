@@ -251,6 +251,7 @@ target_sources(${PROJECT_NAME} PRIVATE
     desktop_mouse.cpp
     discord_rpc.cpp
     frame_times.cpp
+    benchmark.cpp
     ${LIBSRE_SOURCES}
     ${PS3RECOMP_SCAFFOLD}
     ${HLE_NID_TABLE}

@@ -18,7 +18,9 @@
 #include <algorithm>
 #include <cmath>
 #include <ctime>
+#include <fstream>
 #include <functional>
+#include <iterator>
 #include <thread>
 #include <vector>
 
@@ -363,6 +365,7 @@ static int step_choice(const std::vector<std::pair<std::string, std::string>>& c
 // ---- screens ------------------------------------------------------------------------------
 static void home();
 static void play();
+static void benchmark();
 static void switch_game(int k);   // the game bar
 
 static Item button(const std::string& label, const std::string& sub, std::function<void()> act, bool enabled = true)
@@ -1494,6 +1497,8 @@ static void more_screen()
     scr.items.push_back(button("Your game", "Import it again, or use another copy", [] { set_screen(import_screen); }));
     scr.items.push_back(button("Mods", "", [] { set_screen(mods_screen); }));
     scr.items.push_back(button("Logs", "For bug reports", [] { set_screen(logs_screen); }));
+    scr.items.push_back(button("Benchmark", game_proc ? "Not while the game is running" : "Two minutes from your latest save, then the frame rate. Your saves don't change",
+                               [] { set_screen(home); benchmark(); }, b.version != 0 && S->game().ok && !game_proc));
     scr.items.push_back(button("Check for updates", g_update_ready ? "An update is available" : "", open_updates));
     scr.items.push_back(button("Help", "", [] { set_screen(help_screen); }));
     scr.items.push_back(button("Back", "", [] { set_screen(home); }));
@@ -1503,13 +1508,16 @@ static void more_screen()
 static void pad_close();
 static void pad_open();
 
-static void play()
+static bool g_benchmark_run;   // the running game is a benchmark: show its result when it ends
+
+static void start_game(bool benchmark)
 {
     if (game_proc) return;
     // The controller goes to the game: SDL's HID access here would compete with it.
     pad_close();
     void* h = nullptr;
-    const std::string r = S->launch(&h);
+    const std::string r = S->launch(&h, false, benchmark);
+    g_benchmark_run = benchmark && r.empty();
     if (!r.empty()) { pad_open(); message("Cannot start", r); return; }
     game_proc = (HANDLE)h;
     game_start = GetTickCount64();
@@ -1523,6 +1531,8 @@ static void play()
     else if (w != "stay") ShowWindow(g_hwnd, SW_MINIMIZE);
     refresh();
 }
+static void play() { start_game(false); }
+static void benchmark() { start_game(true); }
 
 static void game_exited(DWORD code)
 {
@@ -1542,6 +1552,16 @@ static void game_exited(DWORD code)
     g_sh_checked = false;   // the game may have found a new driver: offer the prepare (once)
     if (scr.title == S->prof->name) set_screen(home);   // back on Play
     else refresh();
+    if (g_benchmark_run) {
+        g_benchmark_run = false;
+        std::ifstream f(S->benchmark_result(), std::ios::binary);
+        std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        f.close();
+        std::error_code rec;
+        fs::remove(S->benchmark_result(), rec);   // shown once, then gone
+        while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) text.pop_back();
+        message("Benchmark", text.empty() ? std::string("No result: the run did not finish. More > Logs has the game's log.") : text);
+    }
 }
 
 // ---- gamepad (SDL) ------------------------------------------------------------------------------

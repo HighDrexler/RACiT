@@ -347,6 +347,8 @@ extern "C" void ps3_tl_at(unsigned long long t, char ev, uint32_t a, uint32_t b)
 extern "C" void ps3_tl(char ev, uint32_t a, uint32_t b);
 extern "C" unsigned long long ps3_qpc_us(void);
 extern "C" void racit_record_present(void);   /* frame_times.cpp */
+extern "C" int racit_benchmark_done(void);      /* benchmark.cpp */
+extern "C" void racit_benchmark_setup(void);    /* benchmark.cpp */
 static void present_guest_frame(void)
 {
     unsigned long long _t = rt_now_us();
@@ -846,9 +848,9 @@ static DWORD WINAPI frame_clock(LPVOID)
                 s_pass_us = pnow; s_pres0 = g_rt_present_total_us; s_drain0 = g_rt_drain_total_us;
             }
 #endif
-            if (pump && rsx_backend_pump() != 0) {
-                /* Window closed: quit. Guest threads are still running and
-                 * an orderly exit() would wait on them, so leave at once. */
+            if (pump && (rsx_backend_pump() != 0 || racit_benchmark_done())) {
+                /* Window closed (or the benchmark is over): quit. Guest threads are
+                 * still running and an orderly exit() would wait on them, so leave at once. */
                 fprintf(stderr, "[rsx] window closed -- exiting\n");
                 fflush(stdout); fflush(stderr);
 #ifdef _WIN32
@@ -1792,6 +1794,7 @@ int main(int argc, char** argv)
 #endif
 
     printf("=== ps3recomp game runner ===\n");
+    racit_benchmark_setup();   /* RACACIT_BENCHMARK=1: after every platform read its settings */
 #if defined(_WIN32) && (defined(__x86_64__) || defined(_M_X64))
     /* Which exe and which processor: a player's log said neither, and the
      * older-CPU build's slow paths were found only by matching its stall
