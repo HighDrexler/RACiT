@@ -27,6 +27,14 @@
 namespace fs = std::filesystem;
 using namespace std::chrono_literals;
 
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#else
+#include <fcntl.h>
+#include <sys/file.h>
+#include <unistd.h>
+#endif
 extern "C" void (*g_kb_init_hook)(void);   // libs/input/cellKb.c
 
 namespace {
@@ -37,6 +45,31 @@ std::atomic<bool> s_menu{ false };
 std::atomic<unsigned> s_kb_inits{ 0 };
 std::atomic<bool> s_done{ false };
 fs::path s_dir, s_run, s_pad, s_frames, s_result;
+
+// A run holds an exclusive lock on its folder's .racit-benchmark-live for as long as the
+// game is running, and the system lets it go when the process ends, however it ends. A
+// later run removes a folder only when it can take that lock itself.
+#ifdef _WIN32
+using LiveLock = HANDLE;
+const LiveLock kNoLock = INVALID_HANDLE_VALUE;
+LiveLock live_lock(const fs::path& p)
+{
+    return CreateFileW(p.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+}
+void live_unlock(LiveLock h) { CloseHandle(h); }
+#else
+using LiveLock = int;
+const LiveLock kNoLock = -1;
+LiveLock live_lock(const fs::path& p)
+{
+    const int fd = open(p.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+    if (fd < 0) return kNoLock;
+    if (flock(fd, LOCK_EX | LOCK_NB) != 0) { close(fd); return kNoLock; }
+    return fd;
+}
+void live_unlock(LiveLock fd) { close(fd); }
+#endif
+LiveLock s_live = kNoLock;   // this run's, held until the process ends
 
 bool put_env(const char* key, const std::string& value)
 {
@@ -84,7 +117,6 @@ bool wait_for(Pred done, std::chrono::seconds limit)
 void finish(const std::string& text)
 {
     std::ofstream(s_result, std::ios::binary | std::ios::trunc) << text;
-    std::ofstream(s_run / ".racit-benchmark-done", std::ios::binary) << text;   // the next run may remove this one
     std::fprintf(stderr, "[benchmark] %s", text.c_str());
     std::fflush(stderr);
     // main() leaves the way it does when the window is closed. If its loop is not
@@ -163,8 +195,9 @@ void run()
 
 // The launcher looks for this text in the game program before it offers a benchmark run
 // (launcher/src/store.cpp): an older build would ignore RACACIT_BENCHMARK and play from
-// the real saves. racit_benchmark_setup reads it, so no linker drops it.
-extern "C" const char racit_feature_benchmark[] = "RACIT-FEATURE:benchmark-1";
+// the real saves. racit_benchmark_setup reads it, so no linker drops it. Version 2: the
+// result goes to the file the launcher names in RACACIT_BENCHMARK_RESULT.
+extern "C" const char racit_feature_benchmark[] = "RACIT-FEATURE:benchmark-2";
 
 extern "C" int racit_benchmark_on(void)
 {
@@ -213,18 +246,17 @@ extern "C" void racit_benchmark_setup(void)
     const std::string stem = (fs::weakly_canonical(fs::absolute(s_dir, ec), ec) / "benchmark-run-").string();
     if (real.string().rfind(stem, 0) == 0)
         fail_setup("the saves are in " + real.string() + ", a benchmark run's copy; set the real save folder");
-    // Earlier runs' folders are removed only when this mode made them (the marker) and
-    // they finished, or were left over a day ago by a run that never did: a run still
-    // going in another game window keeps its files.
-    const auto day_ago = fs::file_time_type::clock::now() - std::chrono::hours(24);
+    // Earlier runs' folders are removed only when this mode made them (the marker) and no
+    // game holds them: a run still going in another game window, even one stopped in a
+    // debugger for days, keeps its lock and its files.
     for (const auto& d : fs::directory_iterator(s_dir, ec)) {
         const fs::path p = d.path();
         if (!d.is_directory(ec) || p.filename().string().rfind("benchmark-run-", 0) != 0) continue;
-        if (!fs::exists(p / ".racit-benchmark-run", ec)) continue;
-        if (fs::exists(p / ".racit-benchmark-done", ec)) { fs::remove_all(p, ec); continue; }
-        ec.clear();
-        const auto made = fs::last_write_time(p / ".racit-benchmark-run", ec);
-        if (!ec && made < day_ago) fs::remove_all(p, ec);   // a time that cannot be read keeps the folder
+        if (!fs::exists(p / ".racit-benchmark-run", ec) || !fs::exists(p / ".racit-benchmark-live", ec)) continue;
+        const LiveLock other = live_lock(p / ".racit-benchmark-live");
+        if (other == kNoLock) continue;
+        live_unlock(other);
+        fs::remove_all(p, ec);
         ec.clear();
     }
     ec.clear();
@@ -232,6 +264,8 @@ extern "C" void racit_benchmark_setup(void)
         std::chrono::system_clock::now().time_since_epoch().count()));
     if (!fs::create_directory(s_run, ec) || ec)   // false with no error when it already exists
         fail_setup("could not make a new folder for the run at " + s_run.string());
+    s_live = live_lock(s_run / ".racit-benchmark-live");
+    if (s_live == kNoLock) fail_setup("could not lock the run's folder " + s_run.string());
     std::ofstream(s_run / ".racit-benchmark-run", std::ios::binary) << "made by RACACIT_BENCHMARK\n";
     s_pad = s_run / "pad.txt";
     s_frames = s_run / "frames.txt";

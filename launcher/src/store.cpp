@@ -2033,7 +2033,7 @@ std::string Store::launch(void** process, bool prepare, bool benchmark)
             : "This PC's processor has no AVX2, and build v" + std::to_string(b.version) + " has no version for "
               "older processors (" + prog + "). Install a release that includes one.";
     if (benchmark) {
-        if (!program_has(exe, "RACIT-FEATURE:benchmark-1"))
+        if (!program_has(exe, "RACIT-FEATURE:benchmark-2"))
             return "Build v" + std::to_string(b.version) + " has no benchmark mode, and would play from your own saves. "
                    "Install the latest release to run the benchmark.";
         fs::remove(benchmark_result(), ec);   // a result from an earlier run is never shown as this one
@@ -2085,7 +2085,7 @@ std::string Store::launch_mac(const BuildInfo& b, const fs::path& eboot, std::ma
 
     const fs::path exe = b.dir / RACIT_GAME_EXE;
     if (benchmark) {   // as on Windows (launch)
-        if (!program_has(exe, "RACIT-FEATURE:benchmark-1"))
+        if (!program_has(exe, "RACIT-FEATURE:benchmark-2"))
             return "Build v" + std::to_string(b.version) + " has no benchmark mode, and would play from your own saves. "
                    "Install the latest release to run the benchmark.";
         fs::remove(benchmark_result(), ec);
