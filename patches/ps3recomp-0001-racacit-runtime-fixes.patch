@@ -36773,7 +36773,7 @@ index 49bc2b94..c5ed6e9a 100644
 +#undef SPU_DRAIN_AT_RETURN
  }
 diff --git a/runtime/spu/spu_helpers.h b/runtime/spu/spu_helpers.h
-index 9691a152..3a489448 100644
+index 9691a152..6312bdbf 100644
 --- a/runtime/spu/spu_helpers.h
 +++ b/runtime/spu/spu_helpers.h
 @@ -483,6 +483,28 @@ static inline u128 spu_shufb(u128 a, u128 b, u128 c) {
@@ -37052,7 +37052,64 @@ index 9691a152..3a489448 100644
  #else
  #define SPU__DP_RN1(f) static inline u128 f(u128 a) { return f##_h_(a); }
  #define SPU__DP_RN2(f) static inline u128 f(u128 a, u128 b) { return f##_h_(a, b); }
-@@ -2493,4 +2692,515 @@ static inline u128 spu_fsmh(u128 a) { return spu_fsmh_ref(a); }
+@@ -1833,9 +2032,53 @@ static inline u128 spu_cflts(u128 a, int i8) {
+     r = vbicq_u32(r, vceqzq_u32(e));
+     u128 out; memcpy(&out, &r, 16); return out;
+ }
+-static inline u128 spu_cfltu(u128 a, int i8)   { return spu_cfltu_ref(a, i8); }
+-static inline u128 spu_csflt(u128 a, int i8)   { return spu_csflt_ref(a, i8); }
+-static inline u128 spu_cuflt(u128 a, int i8)   { return spu_cuflt_ref(a, i8); }
++/* cfltu: the same with FCVTZU, which truncates and saturates at 0 and 2^32 - 1 as the
++ * SPU does (a negative lane, -inf included, gives 0). Exponent 255 lanes give 0 when
++ * negative and 0xFFFFFFFF otherwise. */
++static inline u128 spu_cfltu(u128 a, int i8) {
++    const int scale = 173 - (i8 & 0xFF);
++    if (scale < 0 || scale > 127) return spu_cfltu_ref(a, i8);
++    uint32x4_t x; memcpy(&x, &a, 16);
++    const float32x4_t f = vmulq_f32(vreinterpretq_f32_u32(x),
++                                    vreinterpretq_f32_u32(vdupq_n_u32((uint32_t)(scale + 127) << 23)));
++    uint32x4_t r = vcvtq_u32_f32(f);
++    const uint32x4_t e = vandq_u32(vshrq_n_u32(x, 23), vdupq_n_u32(0xFFu));
++    const uint32x4_t sat = vsubq_u32(vshrq_n_u32(x, 31), vdupq_n_u32(1u));   /* 0xFFFFFFFF or 0 */
++    r = vbslq_u32(vceqq_u32(e, vdupq_n_u32(0xFFu)), sat, r);
++    r = vbicq_u32(r, vceqzq_u32(e));
++    u128 out; memcpy(&out, &r, 16); return out;
++}
++/* csflt/cuflt: as on x86, |v| as an exact double gives the top bit (its exponent) and the
++ * next 23 bits (its fraction, truncated); the result exponent is top + i8 - 28,
++ * saturated above 255 and flushed below 1. Two doubles per half. */
++static inline uint32x4_t spu__xn_cxflt(float64x2_t lo, float64x2_t hi, uint32x4_t sign, uint32x4_t nz, int i8) {
++    const uint64x2_t ul = vreinterpretq_u64_f64(lo), uh = vreinterpretq_u64_f64(hi);
++    const uint32x4_t ex = vcombine_u32(vmovn_u64(vshrq_n_u64(ul, 52)), vmovn_u64(vshrq_n_u64(uh, 52)));
++    const uint32x4_t fr = vandq_u32(vcombine_u32(vmovn_u64(vshrq_n_u64(ul, 29)), vmovn_u64(vshrq_n_u64(uh, 29))),
++                                    vdupq_n_u32(0x7FFFFFu));
++    /* top = exponent - 1023 (the sign bit is clear), biased = top + i8 - 28 */
++    const int32x4_t biased = vaddq_s32(vreinterpretq_s32_u32(vandq_u32(ex, vdupq_n_u32(0x7FFu))),
++                                       vdupq_n_s32((i8 & 0xFF) - 28 - 1023));
++    uint32x4_t r = vorrq_u32(sign, vorrq_u32(vshlq_n_u32(vreinterpretq_u32_s32(biased), 23), fr));
++    r = vbslq_u32(vcgtq_s32(biased, vdupq_n_s32(255)), vorrq_u32(sign, vdupq_n_u32(0x7FFFFFFFu)), r);
++    r = vbicq_u32(r, vcltq_s32(biased, vdupq_n_s32(1)));
++    return vandq_u32(r, nz);
++}
++static inline u128 spu_csflt(u128 a, int i8) {
++    int32x4_t v; memcpy(&v, &a, 16);
++    const float64x2_t lo = vabsq_f64(vcvtq_f64_s64(vmovl_s32(vget_low_s32(v))));
++    const float64x2_t hi = vabsq_f64(vcvtq_f64_s64(vmovl_s32(vget_high_s32(v))));
++    const uint32x4_t r = spu__xn_cxflt(lo, hi, vandq_u32(vreinterpretq_u32_s32(v), vdupq_n_u32(0x80000000u)),
++                                       vmvnq_u32(vceqzq_s32(v)), i8);
++    u128 out; memcpy(&out, &r, 16); return out;
++}
++static inline u128 spu_cuflt(u128 a, int i8) {
++    uint32x4_t v; memcpy(&v, &a, 16);
++    const float64x2_t lo = vcvtq_f64_u64(vmovl_u32(vget_low_u32(v)));
++    const float64x2_t hi = vcvtq_f64_u64(vmovl_u32(vget_high_u32(v)));
++    const uint32x4_t r = spu__xn_cxflt(lo, hi, vdupq_n_u32(0), vmvnq_u32(vceqzq_u32(v)), i8);
++    u128 out; memcpy(&out, &r, 16); return out;
++}
+ #else
+ static inline u128 spu_fi(u128 a, u128 b)      { return spu_fi_ref(a, b); }
+ static inline u128 spu_frest(u128 a)           { return spu_frest_ref(a); }
+@@ -2493,4 +2736,515 @@ static inline u128 spu_fsmh(u128 a) { return spu_fsmh_ref(a); }
  static inline u128 spu_fsmb(u128 a) { return spu_fsmb_ref(a); }
  #endif
  
@@ -37831,6 +37888,32 @@ index 275adfa6..a91d8918 100644
      /* Trace ONLY the stalled queue's own runs: wkl_data == the sync EA the PPU
       * barrier/ticket probes armed (ticket-pub arms it at first publish, before
       * the PM's first work pass). Idle re-runs of this wid matter as much as the
+diff --git a/runtime/spu/tests/test_spu_float_est.c b/runtime/spu/tests/test_spu_float_est.c
+index 0cda949f..193f27f8 100644
+--- a/runtime/spu/tests/test_spu_float_est.c
++++ b/runtime/spu/tests/test_spu_float_est.c
+@@ -1,7 +1,9 @@
+ /* The vector spu_fi/frest/frsqest/cflts/cfltu/csflt/cuflt (AVX2 on x86) must be bit-identical
+  * to the scalar references (spu_*_ref) for every input: random words, ordinary floats, the
+  * normal/extended-range boundaries, zeros and denormals, integers of every magnitude, and every
+- * scale immediate. Prints a rough speed comparison too. Build on x86 with AVX2:
++ * scale immediate. Prints a rough speed comparison too. ARM64 NEON (fi, cflts, cfltu, csflt,
++ * cuflt; frest and frsqest are the references there) builds with plain `cc -O2 -I../../../include -I..`.
++ * Build on x86 with AVX2:
+  *   cc -O2 -mavx2 -mfma -I../../../include -I.. test_spu_float_est.c -o t && ./t */
+ #include "../spu_helpers.h"
+ #include <stdio.h>
+@@ -62,8 +64,8 @@ static void report(const char* op, int imm, u128 a, u128 b, u128 got, u128 want)
+ 
+ int main(void)
+ {
+-#if !(defined(__AVX2__) && !defined(__ARM_NEON) && !defined(SPU_SCALAR_HELPERS))
+-    puts("test_spu_float_est: no AVX2, nothing to compare");
++#if !((defined(__AVX2__) || (defined(__aarch64__) && defined(__ARM_NEON))) && !defined(SPU_SCALAR_HELPERS))
++    puts("test_spu_float_est: no AVX2 or ARM64 NEON, nothing to compare");
+     return 0;
+ #else
+     const long N = 2000000;
 diff --git a/runtime/spu/tests/test_spu_numeric_semantics.c b/runtime/spu/tests/test_spu_numeric_semantics.c
 index 3f233b33..cab64db5 100644
 --- a/runtime/spu/tests/test_spu_numeric_semantics.c
