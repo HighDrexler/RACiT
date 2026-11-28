@@ -2453,7 +2453,7 @@ index 4d916ac7..1dfee100 100644
      if (flags & CELL_FS_O_CREAT) {
          ensure_parent_dirs(host_path);
 diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
-index 5f8a2fa2..e6cc3b9f 100644
+index 5f8a2fa2..1f7272f8 100644
 --- a/libs/input/cellPad.c
 +++ b/libs/input/cellPad.c
 @@ -13,11 +13,13 @@
@@ -3432,7 +3432,7 @@ index 5f8a2fa2..e6cc3b9f 100644
 +            ds5_weapon(&st[10], 3, 6, 8);
 +            ds5_send(gc, st);
 +        }
-+    }
+     }
 +    pad_poll_sdl_fallbacks();
 +}
 +
@@ -3559,9 +3559,9 @@ index 5f8a2fa2..e6cc3b9f 100644
 +        PadHostState* hs = &s_host_state[0];
 +        hs->analog_rx = (u8)racit_stick_byte(0.0f, push[0]);
 +        hs->analog_ry = (u8)racit_stick_byte(0.0f, push[1]);
-     }
- }
- 
++    }
++}
++
 +static void pad_poll_kbm(int ignore_real)
 +{
 +    kb_init(ignore_real);
@@ -3766,8 +3766,8 @@ index 5f8a2fa2..e6cc3b9f 100644
 +    const int k = SDL_GameControllerAddMappingsFromFile("gamecontrollerdb.txt");
 +    if (k > 0) fprintf(stderr, "[cellPad] %d controller mappings from gamecontrollerdb.txt%c", k, 10);
 +    (void)n;
-+}
-+
+ }
+ 
  static void pad_init_backend(void)
  {
 +    /* Face buttons by position on every controller: the bottom one is Cross,
@@ -3813,7 +3813,7 @@ index 5f8a2fa2..e6cc3b9f 100644
  }
  
  static void pad_shutdown_backend(void)
-@@ -776,6 +1806,62 @@ static unsigned long long pad_now_ms(void)
+@@ -776,6 +1806,95 @@ static unsigned long long pad_now_ms(void)
  #endif
  }
  
@@ -3833,21 +3833,48 @@ index 5f8a2fa2..e6cc3b9f 100644
 +            abs((int)hs->analog_lx - 128) > 40 || abs((int)hs->analog_ly - 128) > 40 ||
 +            abs((int)hs->analog_rx - 128) > 40 || abs((int)hs->analog_ry - 128) > 40) {
 +            const unsigned long long now = pad_now_ms();
-+            if (!s_human_ms || now - s_human_ms > PAD_HUMAN_HOLD_MS) {
++            const unsigned long long h = __atomic_load_n(&s_human_ms, __ATOMIC_ACQUIRE);   /* Settings writes it too */
++            if (!h || now - h > PAD_HUMAN_HOLD_MS) {
 +                printf("[cellPad] controller in use -- scripted input paused (buttons %04X, L2 %d R2 %d, sticks %d,%d %d,%d)\n",
 +                       (unsigned)hs->buttons, hs->trigger_l2, hs->trigger_r2, hs->analog_lx, hs->analog_ly,
 +                       hs->analog_rx, hs->analog_ry);
 +                fflush(stdout);
 +            }
-+            s_human_ms = now;
++            __atomic_store_n(&s_human_ms, now, __ATOMIC_RELEASE);   /* read by racit_pad_player_active on other threads */
 +            return;
 +        }
 +    }
 +}
++/* A press the host asks for (Continue at start, game/stubs.cpp): `mask` held on
++ * port 0 for `reports` positive reports, over whatever the player presses.
++ * racit_pad_host_busy says whether it is still being held, and
++ * racit_pad_player_active whether a person has touched any control in the
++ * last 20 s (the host then stands down). */
++static unsigned s_hostpress_mask;
++static int s_hostpress_n;
++void racit_pad_host_press(unsigned mask, int reports)
++{
++    __atomic_store_n(&s_hostpress_mask, mask, __ATOMIC_RELAXED);
++    __atomic_store_n(&s_hostpress_n, reports, __ATOMIC_RELEASE);
++}
++/* Settings opened: a person is at the controls from now on, as after any
++ * control (racit_pad_player_active), and a held host press stops. */
++void racit_pad_host_cancel(void)
++{
++    __atomic_store_n(&s_human_ms, pad_now_ms(), __ATOMIC_RELEASE);
++    __atomic_store_n(&s_hostpress_n, 0, __ATOMIC_RELEASE);
++}
++/* The host gave up on its press (no Load list came): drop what is left. */
++void racit_pad_host_clear(void) { __atomic_store_n(&s_hostpress_n, 0, __ATOMIC_RELEASE); }
++int racit_pad_host_busy(void) { return __atomic_load_n(&s_hostpress_n, __ATOMIC_ACQUIRE) > 0; }
++int racit_pad_player_active(void);
 +static int pad_scripted_ok(void)
 +{
-+    return !s_human_ms || pad_now_ms() - s_human_ms > PAD_HUMAN_HOLD_MS;
++    const unsigned long long h = __atomic_load_n(&s_human_ms, __ATOMIC_ACQUIRE);
++    return !h || pad_now_ms() - h > PAD_HUMAN_HOLD_MS;
 +}
++/* Settings open counts at once, not only from the next full pad poll. */
++int racit_pad_player_active(void) { return !pad_scripted_ok() || rsx_host_ui_capturing(); }
 +
 +/* While the host settings menu is open (libs/video/rsx_host_ui.h) the game
 + * sees an idle pad, and keeps seeing one after the menu closes until every
@@ -3857,7 +3884,13 @@ index 5f8a2fa2..e6cc3b9f 100644
 +{
 +    static int hold = 0;
 +    const int cap = rsx_host_ui_capturing();
-+    if (cap) hold = 1;
++    if (cap) {
++        hold = 1;
++        /* Opening Settings (F1) is a person at the controls: a host press waiting
++         * to be delivered (Continue at start) stops, as for any control. */
++        __atomic_store_n(&s_human_ms, pad_now_ms(), __ATOMIC_RELEASE);
++        __atomic_store_n(&s_hostpress_n, 0, __ATOMIC_RELEASE);
++    }
 +    if (!hold) return;
 +    int any = 0;
 +    for (int i = 0; i < PAD_MAX_HOST_PORTS; i++) {
@@ -3876,7 +3909,7 @@ index 5f8a2fa2..e6cc3b9f 100644
  static void pad_poll_backend(void)
  {
      static unsigned long long s_last_ms = 0;
-@@ -793,7 +1879,33 @@ static void pad_poll_backend(void)
+@@ -793,7 +1912,33 @@ static void pad_poll_backend(void)
  #elif PAD_BACKEND_SDL2
      pad_poll_sdl2();
  #endif
@@ -3910,7 +3943,7 @@ index 5f8a2fa2..e6cc3b9f 100644
      pad_track_assign();
      pad_unlock();
  }
-@@ -867,6 +1979,103 @@ void cellPad_poll(void)
+@@ -867,6 +2012,103 @@ void cellPad_poll(void)
   * were fixed.) These used to be redeclared here with a 64-bit address
   * parameter, which conflicts with the header now that it is included. */
  
@@ -4014,7 +4047,7 @@ index 5f8a2fa2..e6cc3b9f 100644
  s32 cellPadGetData(u32 port_no, CellPadData* data_guest)
  {
      { static int _once = 0;
-@@ -883,6 +2092,7 @@ s32 cellPadGetData(u32 port_no, CellPadData* data_guest)
+@@ -883,6 +2125,7 @@ s32 cellPadGetData(u32 port_no, CellPadData* data_guest)
  
      /* Poll fresh state */
      pad_poll_backend();
@@ -4022,7 +4055,7 @@ index 5f8a2fa2..e6cc3b9f 100644
  
      /* YDKJ_INJECT_PAD: the game's wait loop polls the pad (cellPadSetActDirect /
       * GetData) -- if it's parked on a "press button" prompt after loading, no
-@@ -977,7 +2187,7 @@ skip_inject: ;
+@@ -977,7 +2220,7 @@ skip_inject: ;
       * human at the pad. Env-gated test scaffolding, off by default. */
      { static int s_ap = -1; static unsigned s_apn = 0;
        if (s_ap < 0) s_ap = getenv("PAD_AUTOPRESS") ? 1 : 0;
@@ -4031,7 +4064,7 @@ index 5f8a2fa2..e6cc3b9f 100644
            unsigned ph = s_apn++ % 240;
            if (ph < 12)
                data->button[CELL_PAD_BTN_OFFSET_DIGITAL2] |= 0x40;   /* CROSS */
-@@ -1013,7 +2223,7 @@ skip_inject: ;
+@@ -1013,7 +2256,7 @@ skip_inject: ;
                       *p ? " -- TRUNCATED at 256, the rest are ignored" : "");
            }
        }
@@ -4040,7 +4073,7 @@ index 5f8a2fa2..e6cc3b9f 100644
            double now = pad_clock(t0);
            /* Latch, do not window. A fixed time window is missed whenever the
             * title stops polling the pad for longer than the window (it does
-@@ -1050,21 +2260,57 @@ skip_inject: ;
+@@ -1050,21 +2293,57 @@ skip_inject: ;
       */
      { static int s_pf = -1; static char pf_path[512];
        static unsigned held_mask = 0; static int held_n = 0;
@@ -4108,7 +4141,7 @@ index 5f8a2fa2..e6cc3b9f 100644
                    fclose(f);
                    if (held_n > 0) { FILE* w = fopen(pf_path, "wb"); if (w) fclose(w); }
                }
-@@ -1072,9 +2318,30 @@ skip_inject: ;
+@@ -1072,9 +2351,47 @@ skip_inject: ;
            if (held_n > 0) {
                if (data->len > 0) held_n--;
                data->button[CELL_PAD_BTN_OFFSET_DIGITAL1] |= (u16)(held_mask & 0xFF);
@@ -4121,6 +4154,23 @@ index 5f8a2fa2..e6cc3b9f 100644
 +              } }
        } }
  
++    if (port_no == 0) {
++        /* Claim this report in one step that also checks for a person at the
++         * controls (or Settings open): then the press is dropped, not added. A
++         * cancel in between makes the exchange fail and the loop look again. */
++        int n = __atomic_load_n(&s_hostpress_n, __ATOMIC_ACQUIRE), give = 0;
++        while (n > 0) {
++            give = !racit_pad_player_active();
++            const int next = !give ? 0 : data->len > 0 ? n - 1 : n;
++            if (__atomic_compare_exchange_n(&s_hostpress_n, &n, next, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) break;
++        }
++        if (n > 0 && give) {
++            const unsigned m = __atomic_load_n(&s_hostpress_mask, __ATOMIC_RELAXED);
++            data->button[CELL_PAD_BTN_OFFSET_DIGITAL1] |= (u16)(m & 0xFF);
++            data->button[CELL_PAD_BTN_OFFSET_DIGITAL2] |= (u16)((m >> 8) & 0xFF);
++        }
++    }
++
 +#ifdef __ANDROID__
 +    /* The dual-screen companion's taps (game/android_companion.cpp): a short
 +     * queue of holds -- buttons plus optional sticks for N polls each -- on
@@ -4140,7 +4190,7 @@ index 5f8a2fa2..e6cc3b9f 100644
      /* Analog sticks */
      /* PAD_STICK="lx,ly,rx,ry" (0-255, 128 = centred): hold the analog sticks at
       * fixed positions. Rubber Ducky drives its camera from the sticks and never
-@@ -1093,7 +2360,7 @@ skip_inject: ;
+@@ -1093,7 +2410,7 @@ skip_inject: ;
                   sscanf(e, "%d,%d,%d,%d,%lf,%lf", &a,&b,&c,&d,&s_from,&s_until);
                   s_v[0]=(unsigned char)a; s_v[1]=(unsigned char)b;
                   s_v[2]=(unsigned char)c; s_v[3]=(unsigned char)d; } }
@@ -4149,7 +4199,7 @@ index 5f8a2fa2..e6cc3b9f 100644
                    hs->analog_rx = s_v[2]; hs->analog_ry = s_v[3];
                    hs->connected = 1; }
        /* PAD_SWEEP=<seconds per step>: walk the sticks through a fixed set of
-@@ -1104,7 +2371,7 @@ skip_inject: ;
+@@ -1104,7 +2421,7 @@ skip_inject: ;
        { static int sw = -1; static clock_t t0 = 0;
          if (sw < 0) { const char* e = getenv("PAD_SWEEP");
                        sw = e ? atoi(e) : 0; if (sw < 0) sw = 0; }
@@ -4158,7 +4208,7 @@ index 5f8a2fa2..e6cc3b9f 100644
              static const unsigned char steps[9][4] = {
                  {128,128,128,128},
                  {128,  0,128,128}, {128,255,128,128},
-@@ -1172,10 +2439,40 @@ skip_inject: ;
+@@ -1172,10 +2489,40 @@ skip_inject: ;
          data->button[CELL_PAD_BTN_OFFSET_SENSOR_Y] = 399; /* gravity */
          data->button[CELL_PAD_BTN_OFFSET_SENSOR_Z] = 512;
          data->button[CELL_PAD_BTN_OFFSET_SENSOR_G] = 512;
@@ -4199,7 +4249,7 @@ index 5f8a2fa2..e6cc3b9f 100644
      /* A non-zero len means "here is a CHANGE packet" -- the constant is literally
       * named CELL_PAD_LEN_CHANGE_DEFAULT. Hardware reports len = 0 once the port
       * has nothing new, and titles DRAIN on that: The Simpsons Arcade Game's
-@@ -1496,9 +2793,64 @@ s32 cellPadSetActDirect(u32 port_no, CellPadActParam* param)
+@@ -1496,9 +2843,64 @@ s32 cellPadSetActDirect(u32 port_no, CellPadActParam* param)
  #endif
  
  #if PAD_BACKEND_SDL2
@@ -6671,7 +6721,7 @@ index 2d4a54d4..49dff976 100644
  static int  s_boot_checked = 0;
  static u32  s_game_type = CELL_GAME_GAMETYPE_DISC;
 diff --git a/libs/system/cellSaveData.c b/libs/system/cellSaveData.c
-index 1fb1b120..c6f8bf90 100644
+index 1fb1b120..c59355bf 100644
 --- a/libs/system/cellSaveData.c
 +++ b/libs/system/cellSaveData.c
 @@ -30,6 +30,17 @@
@@ -6692,7 +6742,7 @@ index 1fb1b120..c6f8bf90 100644
  
  #ifdef _WIN32
  #  include <windows.h>
-@@ -66,6 +77,27 @@ static void adopt_gamedata_root(void)
+@@ -66,6 +77,42 @@ static void adopt_gamedata_root(void)
          snprintf(s_save_root, sizeof(s_save_root), "%s/dev_hdd0/home/00000001/savedata", env);
  }
  
@@ -6717,10 +6767,25 @@ index 1fb1b120..c6f8bf90 100644
 +    return s_save_root;
 +}
 +
++/* Continue at start (RACACIT_AUTO_CONTINUE, game/stubs.cpp): the next load list
++ * the game asks for picks the latest save without showing the list, once. The
++ * game arms it as it presses Cross on LOAD; savedata_ui_pick takes it. */
++static int s_autopick;
++int racit_pad_player_active(void);   /* libs/input/cellPad.c */
++void racit_pad_host_clear(void);      /* libs/input/cellPad.c */
++void racit_save_autopick_once(void) { __atomic_store_n(&s_autopick, 1, __ATOMIC_RELEASE); }
++void racit_save_autopick_cancel(void) { __atomic_store_n(&s_autopick, 0, __ATOMIC_RELEASE); }
++/* 1 while the armed pick has not been taken yet. */
++int racit_save_autopick_pending(void) { return __atomic_load_n(&s_autopick, __ATOMIC_ACQUIRE); }
++/* How many armed picks the Load list has taken (a save picked or the list
++ * left up): the worker never arms a retry once this has moved. */
++static int s_autopick_taken;
++int racit_save_autopick_taken(void) { return __atomic_load_n(&s_autopick_taken, __ATOMIC_ACQUIRE); }
++
  /* Ensure directory (and parents) exist */
  static void ensure_dirs(const char* path)
  {
-@@ -86,8 +118,7 @@ static void ensure_dirs(const char* path)
+@@ -86,8 +133,7 @@ static void ensure_dirs(const char* path)
  
  static void build_save_path(char* buf, size_t buf_size, const char* dirName)
  {
@@ -6730,7 +6795,7 @@ index 1fb1b120..c6f8bf90 100644
  #ifdef _WIN32
      for (char* p = buf; *p; p++) {
          if (*p == '/') *p = '\\';
-@@ -394,6 +425,158 @@ static s32 dispatch_func_stat_full(uint32_t func_opd, int is_new, const char* di
+@@ -394,6 +440,194 @@ static s32 dispatch_func_stat_full(uint32_t func_opd, int is_new, const char* di
   * `selected` receives the chosen directory ("" when none): the first listed
   * entry, else the new-save name, else the focus name. For a save with nothing
   * listed the new-save name wins -- headless, there is no user to pick. */
@@ -6798,6 +6863,20 @@ index 1fb1b120..c6f8bf90 100644
 +}
 +
 +/* One row of the save screen from the save on disk; 0 when there is none. */
++/* Whether a save directory holds a game file to load (a non-empty GAME.SAV):
++ * Continue at start only ever picks one of these. */
++static int savedata_loadable(const char* nm)
++{
++    char path[1024], fp[1100]; struct stat st;
++    build_save_path(path, sizeof path, nm);
++    snprintf(fp, sizeof fp, "%s/GAME.SAV", path);
++#ifdef _WIN32
++    return stat(fp, &st) == 0 && (st.st_mode & _S_IFMT) == _S_IFREG && st.st_size > 0;
++#else
++    return stat(fp, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0;
++#endif
++}
++
 +static int savedata_fill_entry(rsx_save_entry* s, const char* nm)
 +{
 +    char path[1024];
@@ -6860,6 +6939,28 @@ index 1fb1b120..c6f8bf90 100644
 +    }
 +    savedata_sort_entries(e, n);
 +
++    /* Continue at start: a load takes the newest save (the list is newest
++     * first) without asking, once. */
++    /* A player who took over since the press keeps the list. */
++    if (!is_save && __atomic_load_n(&s_autopick, __ATOMIC_ACQUIRE) && racit_pad_player_active())
++        __atomic_store_n(&s_autopick, 0, __ATOMIC_RELEASE);
++    int pick = -1;   /* the newest save with a game file; none leaves the list up */
++    for (int i = 0; i < n && pick < 0; i++) if (savedata_loadable(e[i].dir)) pick = i;
++    if (!is_save && pick < 0 && __atomic_exchange_n(&s_autopick, 0, __ATOMIC_ACQ_REL)) {
++        racit_pad_host_clear();   /* no Cross left over for the list */
++        __atomic_add_fetch(&s_autopick_taken, 1, __ATOMIC_ACQ_REL);
++        printf("[cellSaveData] continue at start: no save here has a game file, showing the list%c", 10);
++    }
++    /* Checked again after the scan: Settings may have opened meanwhile. */
++    if (!is_save && pick >= 0 && !racit_pad_player_active() && __atomic_exchange_n(&s_autopick, 0, __ATOMIC_ACQ_REL)) {
++        racit_pad_host_clear();   /* the rest of the Cross reports would reach the next screen */
++        __atomic_add_fetch(&s_autopick_taken, 1, __ATOMIC_ACQ_REL);
++        snprintf(selected, 64, "%s", e[pick].dir);
++        printf("[cellSaveData] continue at start: loading the latest save %s%c", selected, 10);
++        savedata_free_entries(e, n);
++        return 1;
++    }
++
 +    char focus_name[33] = "";
 +    if (focus) { for (int i = 0; i < 32; i++) focus_name[i] = (char)vm_read8(focus + (uint32_t)i); focus_name[32] = 0; }
 +    const int allow_new = is_save && new_name;
@@ -6889,7 +6990,7 @@ index 1fb1b120..c6f8bf90 100644
  static s32 dispatch_func_select(uint32_t func_opd, const CellSaveDataDirList* dirList,
                                  uint32_t dirCount, uint32_t setBuf_ea, int is_save,
                                  uint32_t userdata_ea, const char* who, char selected[64])
-@@ -429,9 +612,60 @@ static s32 dispatch_func_select(uint32_t func_opd, const CellSaveDataDirList* di
+@@ -429,9 +663,60 @@ static s32 dispatch_func_select(uint32_t func_opd, const CellSaveDataDirList* di
      const uint32_t fixed_n = vm_read32(set_ea + 8), fixed = vm_read32(set_ea + 12);
      const uint32_t newd = vm_read32(set_ea + 16), focus = vm_read32(set_ea + 4);
      const uint32_t new_name = newd ? vm_read32(newd + 4) : 0;
@@ -6952,7 +7053,26 @@ index 1fb1b120..c6f8bf90 100644
      else if (new_name)                       pick = new_name;
      else if (focus)                          pick = focus;
      if (pick) {
-@@ -451,13 +685,12 @@ static u32 enumerate_save_dirs(const char* prefix, CellSaveDataDirList* dirList,
+@@ -447,17 +732,31 @@ static s32 dispatch_func_select(uint32_t func_opd, const CellSaveDataDirList* di
+ }
+ 
+ /* Enumerate save directories matching a prefix. Returns count, fills dirList up to max. */
++static u32 enumerate_save_dirs(const char* prefix, CellSaveDataDirList* dirList, u32 max);
++/* Whether this title has a save the Load list can open (a directory starting
++ * with `prefix`, e.g. "BCUS98124", holding GAME.SAV): Continue at start only
++ * presses LOAD when there is one. */
++int racit_save_any(const char* prefix)
++{
++    CellSaveDataDirList* dirs = (CellSaveDataDirList*)calloc(64, sizeof *dirs);
++    if (!dirs) return 0;
++    u32 count = enumerate_save_dirs(prefix, dirs, 64);
++    if (count > 64) count = 64;
++    int found = 0;
++    for (u32 i = 0; i < count && !found; i++) found = savedata_loadable(dirs[i].dirName);
++    free(dirs);
++    return found;
++}
+ static u32 enumerate_save_dirs(const char* prefix, CellSaveDataDirList* dirList, u32 max)
  {
      u32 count = 0;
  
@@ -6968,7 +7088,7 @@ index 1fb1b120..c6f8bf90 100644
          for (char* p = search; *p; p++) {
              if (*p == '/') *p = '\\';
          }
-@@ -486,7 +719,7 @@ static u32 enumerate_save_dirs(const char* prefix, CellSaveDataDirList* dirList,
+@@ -486,7 +785,7 @@ static u32 enumerate_save_dirs(const char* prefix, CellSaveDataDirList* dirList,
      }
  #else
      {
@@ -6977,7 +7097,7 @@ index 1fb1b120..c6f8bf90 100644
          if (!dp)
              return 0;
  
-@@ -496,7 +729,7 @@ static u32 enumerate_save_dirs(const char* prefix, CellSaveDataDirList* dirList,
+@@ -496,7 +795,7 @@ static u32 enumerate_save_dirs(const char* prefix, CellSaveDataDirList* dirList,
                  continue;
              /* Check it's a directory */
              char full[1024];
@@ -6986,7 +7106,7 @@ index 1fb1b120..c6f8bf90 100644
              if (!dir_exists(full))
                  continue;
              if (prefix && prefix[0] && strncmp(de->d_name, prefix, strlen(prefix)) != 0)
-@@ -660,6 +893,92 @@ static u32 enumerate_save_files(const char* save_path,
+@@ -660,6 +959,92 @@ static u32 enumerate_save_files(const char* save_path,
      return count;
  }
  
@@ -7079,7 +7199,7 @@ index 1fb1b120..c6f8bf90 100644
  /* Execute file callback: read/write/delete files in the save directory */
  static s32 process_file_op(const char* save_path, CellSaveDataFileSet* set)
  {
-@@ -711,6 +1030,7 @@ static s32 process_file_op(const char* save_path, CellSaveDataFileSet* set)
+@@ -711,6 +1096,7 @@ static s32 process_file_op(const char* save_path, CellSaveDataFileSet* set)
      case CELL_SAVEDATA_FILEOP_WRITE:
      case CELL_SAVEDATA_FILEOP_WRITE_NOTRUNC: {
          ensure_dirs(save_path);
@@ -7087,7 +7207,7 @@ index 1fb1b120..c6f8bf90 100644
          const char* mode;
          if (set->fileOperation == CELL_SAVEDATA_FILEOP_WRITE && set->fileOffset == 0) {
              mode = "wb";
-@@ -985,6 +1305,9 @@ static s32 savedata_execute_run(const char* dirName, int is_save,
+@@ -985,6 +1371,9 @@ static s32 savedata_execute_run(const char* dirName, int is_save,
                     fileSet.fileOperation, fileSet.fileType,
                     fileSet.fileName ? fileSet.fileName : "", fileSet.fileOffset,
                     fileSet.fileSize, fileSet.fileBufSize, exc);
@@ -7097,7 +7217,7 @@ index 1fb1b120..c6f8bf90 100644
              if (exc < 0) { free(fileList); return exc; }
              exc_size = (u32)exc;
          }
-@@ -1007,6 +1330,24 @@ static s32 savedata_execute_run(const char* dirName, int is_save,
+@@ -1007,6 +1396,24 @@ static s32 savedata_execute_run(const char* dirName, int is_save,
   * API implementations
   * -----------------------------------------------------------------------*/
  
@@ -7122,7 +7242,7 @@ index 1fb1b120..c6f8bf90 100644
  s32 cellSaveDataListSave2(u32 version, CellSaveDataSetList* setList,
                             CellSaveDataSetBuf* setBuf,
                             CellSaveDataListCallback funcList,
-@@ -1053,6 +1394,7 @@ s32 cellSaveDataListSave2(u32 version, CellSaveDataSetList* setList,
+@@ -1053,6 +1460,7 @@ s32 cellSaveDataListSave2(u32 version, CellSaveDataSetList* setList,
                                            (uint32_t)(uintptr_t)userdata, "funcList", selectedDir);
      (void)listSet;
  
@@ -7130,7 +7250,7 @@ index 1fb1b120..c6f8bf90 100644
      if (cbResult.result < 0) {
          free(dirList);
          return CELL_SAVEDATA_ERROR_CBRESULT;
-@@ -1066,6 +1408,7 @@ s32 cellSaveDataListSave2(u32 version, CellSaveDataSetList* setList,
+@@ -1066,6 +1474,7 @@ s32 cellSaveDataListSave2(u32 version, CellSaveDataSetList* setList,
  
      s32 result = savedata_execute(selectedDir, 1, setBuf, funcStat, funcFile, userdata);
      free(dirList);
@@ -7138,7 +7258,7 @@ index 1fb1b120..c6f8bf90 100644
      return result;
  }
  
-@@ -1113,6 +1456,7 @@ s32 cellSaveDataListLoad2(u32 version, CellSaveDataSetList* setList,
+@@ -1113,6 +1522,7 @@ s32 cellSaveDataListLoad2(u32 version, CellSaveDataSetList* setList,
                                            (uint32_t)(uintptr_t)userdata, "funcList", selectedDir);
      (void)listSet;
  
@@ -7146,7 +7266,7 @@ index 1fb1b120..c6f8bf90 100644
      if (cbResult.result < 0) {
          free(dirList);
          return CELL_SAVEDATA_ERROR_CBRESULT;
-@@ -1193,7 +1537,7 @@ static s32 savedata_fixed(int is_save, CellSaveDataSetList* setList,
+@@ -1193,7 +1603,7 @@ static s32 savedata_fixed(int is_save, CellSaveDataSetList* setList,
          }
          printf("[cellSaveData] savedata_fixed: cbresult=%d listed=%u/%u prefix='%s' root='%s'\n",
                 result, listed, count,
@@ -7155,7 +7275,7 @@ index 1fb1b120..c6f8bf90 100644
          SAVEDATA_REJECT(CELL_SAVEDATA_ERROR_CBRESULT, w);
      }
      if (!funcStat)
-@@ -1252,6 +1596,25 @@ s32 cellSaveDataListAutoLoad(u32 version, u32 errDialog,
+@@ -1252,6 +1662,25 @@ s32 cellSaveDataListAutoLoad(u32 version, u32 errDialog,
      return savedata_fixed(0, setList, setBuf, funcFixed, funcStat, funcFile, userdata);
  }
  
@@ -7181,7 +7301,7 @@ index 1fb1b120..c6f8bf90 100644
  s32 cellSaveDataAutoSave2(u32 version, const char* dirName,
                             u32 errDialog,
                             CellSaveDataSetBuf* setBuf,
-@@ -1326,8 +1689,21 @@ s32 cellSaveDataDelete2(u32 container)
+@@ -1326,8 +1755,21 @@ s32 cellSaveDataDelete2(u32 container)
  {
      printf("[cellSaveData] Delete2(container=%u)\n", container);
  
@@ -7205,7 +7325,7 @@ index 1fb1b120..c6f8bf90 100644
      return CELL_OK;
  }
  
-@@ -1587,6 +1963,19 @@ void ps3_savedata_list_auto_load(ppu_context* ctx)
+@@ -1587,6 +2029,19 @@ void ps3_savedata_list_auto_load(ppu_context* ctx)
          (u32)ctx->gpr[10], (void*)(uintptr_t)savedata_arg9(ctx));
  }
  
@@ -17802,10 +17922,10 @@ index b6bf0704..7dc3db15 100644
   * PSO identity should use rsx_fp_structural_hash in buffered mode. */
 diff --git a/libs/video/rsx_host_ui.c b/libs/video/rsx_host_ui.c
 new file mode 100644
-index 00000000..7f6a5f80
+index 00000000..847a1f2a
 --- /dev/null
 +++ b/libs/video/rsx_host_ui.c
-@@ -0,0 +1,2799 @@
+@@ -0,0 +1,2813 @@
 +/*
 + * ps3recomp - host settings menu and on-screen display. See rsx_host_ui.h.
 + */
@@ -17960,6 +18080,7 @@ index 00000000..7f6a5f80
 +    o.skip_clank = env_int("RACACIT_SKIP_CLANK", 0) ? 1 : 0;
 +    o.skip_intro = env_int("RACACIT_SKIP_INTRO", 0) ? 1 : 0;
 +    o.skip_press_start = env_int("RACACIT_SKIP_PRESS_START", 0) ? 1 : 0;
++    o.auto_continue    = env_int("RACACIT_AUTO_CONTINUE", 0) ? 1 : 0;
 +    o.armor_look = clampi(env_int("RACACIT_ARMOR_LOOK", 0), 0, 4);
 +    { const char* v = getenv("RACACIT_DS_SPEAKER"); o.ds_speaker = !(v && *v == '0'); }
 +    o.ds_volume = clampi(env_int("RACACIT_DS_SPK_VOL", 49), 0, 100);
@@ -18067,6 +18188,7 @@ index 00000000..7f6a5f80
 +    snprintf(kv[k++], 96, "RACACIT_SKIP_CLANK=%d", o->skip_clank);
 +    snprintf(kv[k++], 96, "RACACIT_SKIP_INTRO=%d", o->skip_intro);
 +    snprintf(kv[k++], 96, "RACACIT_SKIP_PRESS_START=%d", o->skip_press_start);
++    snprintf(kv[k++], 96, "RACACIT_AUTO_CONTINUE=%d", o->auto_continue);
 +    snprintf(kv[k++], 96, "RACACIT_ARMOR_LOOK=%d", o->armor_look);
 +    snprintf(kv[k++], 96, "RACACIT_DS_SPEAKER=%d", o->ds_speaker);
 +    snprintf(kv[k++], 96, "RACACIT_DS_SPK_VOL=%d", o->ds_volume);
@@ -18294,7 +18416,7 @@ index 00000000..7f6a5f80
 +       R_RES, R_ANISO, R_TRI, R_DSSPK, R_DSVOL, R_DSHAP, R_DSHVOL, R_DSRUMBLE, R_DSTRIG, R_DSSWAP,
 +       R_DSLIGHT, R_DSMOTION, R_FPS, R_DISCORD, R_SKIPCLANK, R_RESUME, R_QUIT,
 +       R_PRESET, R_TEXQ, R_BLOOM, R_PACE, R_CPU, R_KBM, R_MSENS, R_MINV, R_DSTRIGSTR, R_TROPHIES,
-+       R_FOV, R_CAMDIST, R_SKIPINTRO, R_SKIPSTART, R_SHOULDER,
++       R_FOV, R_CAMDIST, R_SKIPINTRO, R_SKIPSTART, R_AUTOCONT, R_SHOULDER,
 +       R_CH_BOLTAMT, R_CH_ADDBOLTS, R_CH_WPN, R_CH_WPNUP, R_CH_WPNMAX, R_CH_WPNRESET, R_CH_GOD,
 +       R_CH_DEST, R_CH_GO,
 +       R_LANG, R_FPSCAP, R_STARTSKIP, R_ALLCUTS, R_FREELAND, R_TODDISC, R_POWERPACK, R_CHEATS, R_SAVEUI };
@@ -18316,6 +18438,7 @@ index 00000000..7f6a5f80
 +    { K_OPT, R_DISCORD, "Discord status" },
 +    { K_OPT, R_SKIPINTRO, "Logos and notices at boot" },
 +    { K_OPT, R_SKIPSTART, "PRESS START screen" },
++    { K_OPT, R_AUTOCONT, "Continue at start" },
 +    { K_OPT, R_SKIPCLANK, "Clank levels (testing)" },
 +    { K_GAP, 0, "" },
 +    { K_ACT, R_RESUME,  "Resume" },
@@ -18620,6 +18743,7 @@ index 00000000..7f6a5f80
 +    case R_SKIPCLANK: snprintf(b, n, "%s", o->skip_clank ? "Skip" : "Play"); break;
 +    case R_SKIPINTRO: snprintf(b, n, "%s", o->skip_intro ? "Skip" : "Show"); break;
 +    case R_SKIPSTART: snprintf(b, n, "%s", !o->skip_press_start ? "Show" : o->skip_intro ? "Skip" : "Skip (with logos skipped)"); break;
++    case R_AUTOCONT: snprintf(b, n, "%s", o->auto_continue ? "Latest save" : "Off (main menu)"); break;
 +    case R_LANG:    snprintf(b, n, "%s", k_lang_names[o->language]); break;
 +    case R_FPSCAP:  if (o->fps_cap > 60) snprintf(b, n, "%d fps (set in settings.txt)", o->fps_cap);
 +                    else snprintf(b, n, "%s", o->fps_cap > 0 && o->fps_cap < 60 ? "Steady 30 fps (for slower PCs)" : "60 fps"); break;
@@ -18714,6 +18838,7 @@ index 00000000..7f6a5f80
 +    case R_SKIPCLANK: o->skip_clank = !o->skip_clank; break;
 +    case R_SKIPINTRO: o->skip_intro = !o->skip_intro; break;
 +    case R_SKIPSTART: o->skip_press_start = !o->skip_press_start; break;
++    case R_AUTOCONT: o->auto_continue = !o->auto_continue; break;
 +    case R_LANG:    o->language = cycle(o->language, (int)N_OF(k_lang_codes), dir); break;
 +    case R_FPSCAP:  o->fps_cap = o->fps_cap == 0 ? 30 : 0; break;   /* 60 <-> steady 30 (a cap set by hand goes to 60) */
 +    case R_STARTSKIP: o->start_skips_movies = !o->start_skips_movies; break;
@@ -18744,10 +18869,15 @@ index 00000000..7f6a5f80
 +static void mouse_capture(int on);
 +static int s_mcap, s_mcap_resume;   /* see "Keyboard and mouse for the game" */
 +static const char* s_menu_src = "?";   /* what opened or closed it, for the log */
++void racit_pad_host_cancel(void);        /* libs/input/cellPad.c */
++void racit_save_autopick_cancel(void);   /* libs/system/cellSaveData.c */
 +static void open_menu(int open)
 +{
 +    if (open == s_open) return;
-+    s_open = open;
++    __atomic_store_n(&s_open, open, __ATOMIC_RELEASE);   /* read by rsx_host_ui_capturing on game threads */
++    /* A person opened Settings: anything Continue at start still had pending
++     * (a Cross to deliver, a save to pick) is dropped now. */
++    if (open) { racit_pad_host_cancel(); racit_save_autopick_cancel(); }
 +    s_quit_armed = 0;
 +    fprintf(stderr, "[settings] menu %s (%s)%c", open ? "opened" : "closed", s_menu_src, 10);
 +    s_menu_src = "?";
@@ -18812,15 +18942,19 @@ index 00000000..7f6a5f80
 +    settings_save();
 +}
 +
-+static volatile int s_sv_active;      /* the save screen is up */
++static int s_sv_active;      /* the save screen is up: written by the guest's save call, read with sv_up() */
++static int sv_up(void) { return __atomic_load_n(&s_sv_active, __ATOMIC_ACQUIRE); }
 +static int sv_event(const SDL_Event* e);
 +
-+int rsx_host_ui_capturing(void) { return s_open || s_sv_active; }
-+int rsx_host_ui_modal(void) { return s_sv_active; }
++int rsx_host_ui_capturing(void)
++{
++    return __atomic_load_n(&s_open, __ATOMIC_ACQUIRE) || __atomic_load_n(&s_sv_active, __ATOMIC_ACQUIRE);
++}
++int rsx_host_ui_modal(void) { return sv_up(); }
 +
 +int rsx_host_ui_visible(void)
 +{
-+    if (s_open || s_sv_active || s_tr.pop_n || s_note.on) return 1;
++    if (s_open || sv_up() || s_tr.pop_n || s_note.on) return 1;
 +    LOCK(); const int f = s_opt.fps; UNLOCK();
 +    return f;
 +}
@@ -18943,10 +19077,10 @@ index 00000000..7f6a5f80
 +
 +int rsx_host_ui_event(const SDL_Event* e)
 +{
-+    if (s_mcap && (s_sv_active || s_open)) mouse_capture(0);
++    if (s_mcap && (sv_up() || s_open)) mouse_capture(0);
 +    if (e->type == SDL_CONTROLLERBUTTONDOWN && pad_repeat_press(e)) return 0;
 +    /* The save screen owns the input while it is up (F11 still works). */
-+    if (s_sv_active) {
++    if (sv_up()) {
 +        if (e->type == SDL_KEYDOWN && !e->key.repeat &&
 +            (e->key.keysym.sym == SDLK_F11 || (e->key.keysym.sym == SDLK_RETURN && (e->key.keysym.mod & KMOD_ALT)))) {
 +            toggle_fullscreen(); return 0;
@@ -20050,14 +20184,14 @@ index 00000000..7f6a5f80
 +    sv_keep_visible(nrows);
 +    SDL_MemoryBarrierRelease();
 +    s_sheet_gen++;
-+    s_sv_active = 1;
++    __atomic_store_n(&s_sv_active, 1, __ATOMIC_RELEASE);
 +    UNLOCK();
 +    fprintf(stderr, "[save ui] %s screen: %d saves%s%c", is_save == RSX_SAVE_MODE_DELETE ? "delete" : is_save ? "save" : "load",
 +            n, allow_new ? " + new" : "", 10);
 +    while (!s_sv.done) SDL_Delay(10);
 +    SDL_MemoryBarrierAcquire();
 +    const int r = s_sv.result;
-+    LOCK(); s_sv_active = 0; UNLOCK();
++    LOCK(); __atomic_store_n(&s_sv_active, 0, __ATOMIC_RELEASE); UNLOCK();
 +    fprintf(stderr, "[save ui] chose %d%c", r, 10);
 +    return r;
 +}
@@ -20331,7 +20465,7 @@ index 00000000..7f6a5f80
 +    rsx_host_options opt; rsx_host_ui_options(&opt);
 +    const float px = (float)f->px, lh = (float)f->line_h;
 +
-+    if (s_sv_active) { sv_build(&o, sw, sh); return o.n; }
++    if (sv_up()) { sv_build(&o, sw, sh); return o.n; }
 +    if (opt.fps && !s_open) racit_perf_overlay(&o, f);
 +    if (!s_open) { tr_popup(&o, sw, sh); note_popup(&o, sw, sh); return o.n; }
 +
@@ -20607,10 +20741,10 @@ index 00000000..7f6a5f80
 +#endif
 diff --git a/libs/video/rsx_host_ui.h b/libs/video/rsx_host_ui.h
 new file mode 100644
-index 00000000..d7a0f39e
+index 00000000..ae467b6f
 --- /dev/null
 +++ b/libs/video/rsx_host_ui.h
-@@ -0,0 +1,272 @@
+@@ -0,0 +1,273 @@
 +/*
 + * ps3recomp - host settings menu and on-screen display (RaCACiT)
 + *
@@ -20666,6 +20800,7 @@ index 00000000..d7a0f39e
 +    int   skip_clank;     /* 1: a load into a Great Clock (Clank) level goes on to the next level (testing) */
 +    int   skip_intro;     /* 1: boot without the logos and notices (game/stubs.cpp; from the next start) */
 +    int   skip_press_start; /* 1: boot past PRESS START to the main menu (game/stubs.cpp; from the next start) */
++    int   auto_continue;    /* 1: load the latest save at boot, past the logos and menus (game/stubs.cpp; from the next start) */
 +    int   armor_look;     /* 0: the armor worn; 1-4: Holoflux..Hyperflux's look, the worn armor's protection -- picked in the game's Skins menu (game/stubs.cpp) */
 +    int   ds_speaker;     /* 1: the DualSense speaker plays (cellAudio.c, ds_player.c) */
 +    int   ds_volume;      /* its volume, 0..100 percent                       */
