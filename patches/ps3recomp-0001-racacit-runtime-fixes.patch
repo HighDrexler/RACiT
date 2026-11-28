@@ -4269,10 +4269,10 @@ index 5f8a2fa2..e6cc3b9f 100644
      return CELL_OK;
 diff --git a/libs/input/touch_controls.c b/libs/input/touch_controls.c
 new file mode 100644
-index 00000000..f0b1f79a
+index 00000000..47a2077d
 --- /dev/null
 +++ b/libs/input/touch_controls.c
-@@ -0,0 +1,289 @@
+@@ -0,0 +1,314 @@
 +/* ps3recomp - on-screen touch controls. See touch_controls.h. */
 +#include "touch_controls.h"
 +#include "cellPad.h"
@@ -4423,7 +4423,9 @@ index 00000000..f0b1f79a
 + * triangle opened the quick select ring), and a press that slides off its
 + * button never turns into a stick. A button finger can still slide onto the
 + * buttons next to it. */
-+enum { TC_ROLE_NONE, TC_ROLE_BUTTON, TC_ROLE_LSTICK, TC_ROLE_LOOK };
++/* TC_ROLE_IDLE: landed where nothing takes it (the stick zone while the
++ * stick has a finger): it does nothing until it lifts. */
++enum { TC_ROLE_NONE, TC_ROLE_BUTTON, TC_ROLE_LSTICK, TC_ROLE_LOOK, TC_ROLE_IDLE };
 +#define TC_FINGERS 10
 +typedef struct { int64_t id; int role, seen; float lx, ly; } tc_finger;
 +static tc_finger s_f[TC_FINGERS];
@@ -4503,6 +4505,8 @@ index 00000000..f0b1f79a
 +                f->role = TC_ROLE_LSTICK; s_ax = x; s_ay = y;
 +            } else if (x >= 0.40f) {
 +                f->role = TC_ROLE_LOOK;
++            } else {
++                f->role = TC_ROLE_IDLE;
 +            }
 +            f->lx = x; f->ly = y;
 +        }
@@ -4522,6 +4526,28 @@ index 00000000..f0b1f79a
 +    return pressed;
 +}
 +
++#if TC_HAVE_SDL
++/* Fingers down, in screen coordinates, kept from SDL's touch events on the
++ * window thread (under s_lk); the pad poll thread copies them. */
++static tc_touch s_ct[TC_FINGERS];
++static int s_nct;
++void touch_controls_event(const union SDL_Event* e)
++{
++    if (e->type != SDL_FINGERDOWN && e->type != SDL_FINGERMOTION && e->type != SDL_FINGERUP) return;
++    const int64_t id = (int64_t)e->tfinger.fingerId;
++    tc_lock();
++    int i = 0;
++    while (i < s_nct && s_ct[i].id != id) i++;
++    if (e->type == SDL_FINGERUP) {
++        if (i < s_nct) s_ct[i] = s_ct[--s_nct];
++    } else if (i < s_nct || s_nct < TC_FINGERS) {
++        if (i == s_nct) s_nct++;
++        s_ct[i].id = id; s_ct[i].x = e->tfinger.x; s_ct[i].y = e->tfinger.y;
++    }
++    tc_unlock();
++}
++#endif
++
 +int touch_controls_poll(float aspect, uint16_t* buttons,
 +                        uint8_t* lx, uint8_t* ly, uint8_t* rx, uint8_t* ry)
 +{
@@ -4534,16 +4560,15 @@ index 00000000..f0b1f79a
 +    const float fx0 = fr.x0, fy0 = fr.y0, fw = fr.x1 - fr.x0, fh = fr.y1 - fr.y0;
 +    tc_touch t[TC_FINGERS];
 +    int n = 0;
-+    for (int d = 0; d < SDL_GetNumTouchDevices(); d++) {
-+        SDL_TouchID tid = SDL_GetTouchDevice(d);
-+        for (int k = 0; k < SDL_GetNumTouchFingers(tid) && n < TC_FINGERS; k++) {
-+            SDL_Finger* fg = SDL_GetTouchFinger(tid, k);
-+            if (!fg) continue;
-+            t[n].id = (int64_t)fg->id;   /* in the frame from here on */
-+            t[n].x = (fg->x - fx0) / fw; t[n].y = (fg->y - fy0) / fh;
-+            n++;
-+        }
++    {   /* The window thread's copy (touch_controls_event): SDL's own finger
++         * records belong to the thread that delivers touches (Android's UI
++         * thread), so the pad thread never reads them. */
++        tc_lock();
++        n = s_nct;
++        for (int j = 0; j < n; j++) t[j] = s_ct[j];
++        tc_unlock();
 +    }
++    for (int j = 0; j < n; j++) { t[j].x = (t[j].x - fx0) / fw; t[j].y = (t[j].y - fy0) / fh; }   /* in the frame */
 +    const uint32_t pressed = touch_controls_apply(t, n, aspect, buttons, lx, ly);
 +    /* The menu button: a new press opens the settings menu, as F1 does on a
 +     * keyboard (pushed as a key event for the window thread to handle). */
@@ -4564,10 +4589,10 @@ index 00000000..f0b1f79a
 +}
 diff --git a/libs/input/touch_controls.h b/libs/input/touch_controls.h
 new file mode 100644
-index 00000000..c38e81c0
+index 00000000..5c4f3ca0
 --- /dev/null
 +++ b/libs/input/touch_controls.h
-@@ -0,0 +1,90 @@
+@@ -0,0 +1,94 @@
 +/*
 + * ps3recomp - on-screen touch controls (phones without a gamepad)
 + *
@@ -4653,6 +4678,10 @@ index 00000000..c38e81c0
 + * thread): while the controls are hidden, so a finger held across Settings
 + * or a controller connecting starts over instead of jumping. */
 +void touch_controls_reset(void);
++/* SDL touch events from the window thread's event loop (finger down, motion,
++ * up); the controls read their fingers from these. Ignores other events. */
++union SDL_Event;
++void touch_controls_event(const union SDL_Event* e);
 +
 +#ifdef __cplusplus
 +}
@@ -22218,7 +22247,7 @@ index ba6c18eb..ce97e038 100644
          "    Out.t0=o[7];  Out.t1=o[8];  Out.t2=o[9];  Out.t3=o[10];\n"
          "    Out.t4=o[11]; Out.t5=o[12]; Out.t6=o[13]; Out.t7=o[14];\n"
 diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
-index f78c66f2..62892b99 100644
+index f78c66f2..9c1490f9 100644
 --- a/libs/video/rsx_vulkan_backend.c
 +++ b/libs/video/rsx_vulkan_backend.c
 @@ -38,10 +38,13 @@
@@ -30558,7 +30587,7 @@ index f78c66f2..62892b99 100644
          vk_guest_shutdown();
          for (int i = 0; i < VK_PIPELINE_SLOTS; i++)
              if (s_vk.pipelines[i]) pvkDestroyPipeline(s_vk.device, s_vk.pipelines[i], NULL);
-@@ -4139,72 +8235,38 @@ void rsx_vulkan_backend_shutdown(void)
+@@ -4139,72 +8235,39 @@ void rsx_vulkan_backend_shutdown(void)
          vk_destroy_image(&s_vk.color);
          vk_destroy_buffer(&s_vk.vertices);
          vk_destroy_buffer(&s_vk.readback);
@@ -30589,6 +30618,7 @@ index f78c66f2..62892b99 100644
      SDL_Event e;
 +    rsx_host_ui_poll_script();
      while (SDL_PollEvent(&e)) {
++        touch_controls_event(&e);   /* the touch controls' own copy of the fingers */
          if (e.type == SDL_QUIT) quit = 1;
 -        else if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE) quit = 1;
 -        else if (e.type == SDL_KEYDOWN && !e.key.repeat && s_vk.window &&
@@ -30638,7 +30668,7 @@ index f78c66f2..62892b99 100644
  }
  
  u32 rsx_vulkan_backend_debug_color(void) { return s_vk.clear_argb; }
-@@ -4220,9 +8282,14 @@ u32 rsx_vulkan_backend_guest_draws(void)
+@@ -4220,9 +8283,14 @@ u32 rsx_vulkan_backend_guest_draws(void)
      return s_vk.eng_active ? rsx_draw_engine_guest_draws() : s_g.last_draws;
  }
  
@@ -40502,10 +40532,10 @@ index 7cf5b08f..99e9214b 100644
  #define CHECK_RC(call, want) do { int32_t _rc = (int32_t)(call); \
 diff --git a/tests/test_touch_controls.c b/tests/test_touch_controls.c
 new file mode 100644
-index 00000000..301e5654
+index 00000000..df93aae3
 --- /dev/null
 +++ b/tests/test_touch_controls.c
-@@ -0,0 +1,115 @@
+@@ -0,0 +1,124 @@
 +/* touch_controls_apply without SDL or a GPU: each finger keeps the part it
 + * landed on. A camera or stick drag that crosses a button must not press it
 + * (dragging the camera over triangle kept opening the quick select ring). */
@@ -40599,6 +40629,15 @@ index 00000000..301e5654
 +    next.x = 0.30f;
 +    step(&next, 1);
 +    check(lx > 200, "a finger landing as the stick's lifts takes the stick from where it landed");
++
++    /* A second finger landing in the stick zone while the stick is held does
++     * nothing, even when it slides onto the d-pad. */
++    step(NULL, 0);
++    tc_touch duo[2] = { { 10, 0.15f, 0.70f }, { 11, 0.10f, 0.60f } };
++    step(duo, 2);
++    duo[1].x = 0.375f; duo[1].y = 0.82f;
++    step(duo, 2);
++    check(!(b & CELL_PAD_CTRL_RIGHT), "a spare finger slid onto the d-pad presses nothing");
 +
 +    /* After a reset (Settings open), a held camera finger starts over. */
 +    step(NULL, 0);
