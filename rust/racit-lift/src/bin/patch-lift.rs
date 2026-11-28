@@ -1135,8 +1135,9 @@ fn patch_chunk(c: &mut Chunk) -> Result<()> {
 
     // 30. Loading screens skip most of the frame limiter's wait (game/stubs.cpp
     //     racacit_loading_frame): in the level loader's screen frame func_0032DCC0, just
-    //     before its one call of the frame end func_0052BFE0 (which runs the limiter), so an
-    //     early return never leaves the mark for a later frame. USA disc only.
+    //     around its one call of the frame end func_0052BFE0 (which runs the limiter): marked
+    //     just before it and cleared just after, so neither an early return nor a frame end
+    //     that skips the limiter leaves the mark for a later frame. USA disc only.
     let sp = if c.uses_usa() {
         c.span("func_0032DCC0")?
     } else {
@@ -1162,15 +1163,20 @@ fn patch_chunk(c: &mut Chunk) -> Result<()> {
                 .iter()
                 .rposition(|&b| b == b'\n')
                 .map_or(0, |i| i + 1);
+        let Some(end) = find_from(&c.src, b"\n", sp.1 + call[0]).map(|i| i + 1) else {
+            return Err("patch_lift #30: func_0032DCC0 ends inside its frame end call".into());
+        };
+        // After first, so the earlier offset stays valid.
+        c.src = splice(&c.src, end, end, b"        racacit_loading_frame(0);\n");
         c.src = splice(
             &c.src,
             line,
             line,
-            b"        racacit_loading_frame();   /* racacit: fast loading screens */\n",
+            b"        racacit_loading_frame(1);   /* racacit: fast loading screens */\n",
         );
         c.declare(
             "void racacit_loading_frame",
-            "extern \"C\" void racacit_loading_frame(void);\n",
+            "extern \"C\" void racacit_loading_frame(int in_frame_end);\n",
         )?;
         c.changed = true;
     }
