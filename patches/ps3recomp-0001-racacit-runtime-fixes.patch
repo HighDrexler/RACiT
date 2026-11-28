@@ -4269,10 +4269,10 @@ index 5f8a2fa2..e6cc3b9f 100644
      return CELL_OK;
 diff --git a/libs/input/touch_controls.c b/libs/input/touch_controls.c
 new file mode 100644
-index 00000000..26a49bac
+index 00000000..cbaf159e
 --- /dev/null
 +++ b/libs/input/touch_controls.c
-@@ -0,0 +1,339 @@
+@@ -0,0 +1,350 @@
 +/* ps3recomp - on-screen touch controls. See touch_controls.h. */
 +#include "touch_controls.h"
 +#include "cellPad.h"
@@ -4452,9 +4452,11 @@ index 00000000..26a49bac
 +    return 0;
 +}
 +
++static void tc_contacts_hold_over(void);
 +void touch_controls_reset(void)
 +{
 +    s_nf = 0; s_look_x = s_look_y = 0.0f;
++    tc_contacts_hold_over();
 +    const tc_shown none = { 0, 0, 0.0f, 0.0f, 0.0f, 0.0f };
 +    tc_lock(); s_shown = none; tc_unlock();
 +}
@@ -4541,24 +4543,27 @@ index 00000000..26a49bac
 + * window thread (under s_lk); the pad poll thread copies them. Each touch
 + * gets its own id (s_serial), so a finger id SDL reuses after a lift starts a
 + * new touch, and keeps where it landed. */
-+typedef struct { int64_t sdl; tc_touch t; } tc_contact;
++/* held_over: down while the controls were hidden (Settings open, a reset);
++ * it is left out until it lifts, so it doesn't replay a drag or resume a stick. */
++typedef struct { int64_t dev, sdl; int held_over; tc_touch t; } tc_contact;
 +static tc_contact s_ct[TC_FINGERS];
 +static int s_nct;
 +static int64_t s_serial;
 +void touch_controls_event(const union SDL_Event* e)
 +{
 +    if (e->type != SDL_FINGERDOWN && e->type != SDL_FINGERMOTION && e->type != SDL_FINGERUP) return;
-+    const int64_t sdl = (int64_t)e->tfinger.fingerId;
++    /* A finger id is only unique on its own touch device. */
++    const int64_t dev = (int64_t)e->tfinger.touchId, sdl = (int64_t)e->tfinger.fingerId;
 +    tc_lock();
 +    int i = 0;
-+    while (i < s_nct && s_ct[i].sdl != sdl) i++;
++    while (i < s_nct && (s_ct[i].sdl != sdl || s_ct[i].dev != dev)) i++;
 +    if (e->type == SDL_FINGERUP) {
 +        if (i < s_nct) s_ct[i] = s_ct[--s_nct];
 +    } else if (e->type == SDL_FINGERDOWN || i == s_nct) {   /* a new touch (or motion we missed the down of) */
 +        if (i < s_nct || s_nct < TC_FINGERS) {
 +            if (i == s_nct) s_nct++;
 +            tc_contact* c = &s_ct[i];
-+            c->sdl = sdl; c->t.id = ++s_serial; c->t.landed = 1;
++            c->dev = dev; c->sdl = sdl; c->held_over = 0; c->t.id = ++s_serial; c->t.landed = 1;
 +            c->t.x = c->t.x0 = e->tfinger.x; c->t.y = c->t.y0 = e->tfinger.y;
 +        }
 +    } else {
@@ -4566,8 +4571,15 @@ index 00000000..26a49bac
 +    }
 +    tc_unlock();
 +}
++static void tc_contacts_hold_over(void)
++{
++    tc_lock();
++    for (int i = 0; i < s_nct; i++) s_ct[i].held_over = 1;
++    tc_unlock();
++}
 +#else
 +void touch_controls_event(const union SDL_Event* e) { (void)e; }   /* no SDL touch here */
++static void tc_contacts_hold_over(void) {}
 +#endif
 +
 +int touch_controls_poll(float aspect, uint16_t* buttons,
@@ -4586,8 +4598,7 @@ index 00000000..26a49bac
 +         * records belong to the thread that delivers touches (Android's UI
 +         * thread), so the pad thread never reads them. */
 +        tc_lock();
-+        n = s_nct;
-+        for (int j = 0; j < n; j++) t[j] = s_ct[j].t;
++        for (int j = 0; j < s_nct; j++) if (!s_ct[j].held_over) t[n++] = s_ct[j].t;
 +        tc_unlock();
 +    }
 +    for (int j = 0; j < n; j++) {   /* in the frame */
