@@ -31799,6 +31799,45 @@ index 11a74804..2251ce0b 100644
      cpu_set_t set; CPU_ZERO(&set);
      for (unsigned i = 0; i < 8 * sizeof mask && i < CPU_SETSIZE; i++)
          if (mask & ((DWORD_PTR)1 << i)) CPU_SET(i, &set);
+diff --git a/runtime/platform/win32_compat.h b/runtime/platform/win32_compat.h
+index 30538f14..7cf95490 100644
+--- a/runtime/platform/win32_compat.h
++++ b/runtime/platform/win32_compat.h
+@@ -467,6 +467,13 @@ static inline void InitializeSRWLock(SRWLOCK* l)          { *l = NULL; }
+ static inline void AcquireSRWLockExclusive(SRWLOCK* l)    { pthread_rwlock_wrlock(ps3_srw(l)); }
+ static inline void ReleaseSRWLockExclusive(SRWLOCK* l)    { pthread_rwlock_unlock(ps3_srw(l)); }
+ static inline BOOL TryAcquireSRWLockExclusive(SRWLOCK* l) { return pthread_rwlock_trywrlock(ps3_srw(l)) == 0; }
++/* racacit: a try-lock that never creates the lock. A lock nobody has taken
++ * yet has no holder to serialize with: FALSE, and no allocation. */
++static inline BOOL ps3_try_acquire_srw_existing(SRWLOCK* l)
++{
++    pthread_rwlock_t* r = (pthread_rwlock_t*)__atomic_load_n((void**)l, __ATOMIC_ACQUIRE);
++    return r && pthread_rwlock_trywrlock(r) == 0;
++}
+ static inline void AcquireSRWLockShared(SRWLOCK* l)       { pthread_rwlock_rdlock(ps3_srw(l)); }
+ static inline void ReleaseSRWLockShared(SRWLOCK* l)       { pthread_rwlock_unlock(ps3_srw(l)); }
+ static inline BOOL TryAcquireSRWLockShared(SRWLOCK* l)    { return pthread_rwlock_tryrdlock(ps3_srw(l)) == 0; }
+@@ -544,6 +551,20 @@ static inline void WakeConditionVariable(CONDITION_VARIABLE* c)
+     pthread_cond_signal(&cv->c);
+     pthread_mutex_unlock(&cv->m);
+ }
++/* racacit: WakeAllConditionVariable for a waker that must never block. It
++ * returns 0 without waking when a thread is entering or leaving a wait on the
++ * variable right now (it holds the inner mutex), and allocates nothing: a
++ * variable nobody has waited on has no waiter to wake. */
++static inline BOOL ps3_try_wake_all_cv(CONDITION_VARIABLE* c)
++{
++    ps3_condvar* cv = (ps3_condvar*)__atomic_load_n((void**)c, __ATOMIC_ACQUIRE);
++    if (!cv) return TRUE;
++    if (pthread_mutex_trylock(&cv->m)) return FALSE;
++    cv->gen++;
++    pthread_cond_broadcast(&cv->c);
++    pthread_mutex_unlock(&cv->m);
++    return TRUE;
++}
+ static inline void WakeAllConditionVariable(CONDITION_VARIABLE* c)
+ {
+     ps3_condvar* cv = ps3_cv(c);
 diff --git a/runtime/ppu/ppu_context.h b/runtime/ppu/ppu_context.h
 index 4199c58b..b9676016 100644
 --- a/runtime/ppu/ppu_context.h
@@ -34381,7 +34420,7 @@ index 00000000..61e1a1c3
 +#endif
 +}
 diff --git a/runtime/spu/spu_channels.c b/runtime/spu/spu_channels.c
-index 84b7ac96..91aa65e5 100644
+index 84b7ac96..6a986dfa 100644
 --- a/runtime/spu/spu_channels.c
 +++ b/runtime/spu/spu_channels.c
 @@ -23,7 +23,7 @@
@@ -34450,12 +34489,11 @@ index 84b7ac96..91aa65e5 100644
  {
 -#if defined(__aarch64__) && defined(__ARM_NEON) && !defined(SPU_SCALAR_HELPERS)
 +#if SPU_XR_RZ
-     static int s_on = -1;
-     int on = __atomic_load_n(&s_on, __ATOMIC_RELAXED);
-     if (on < 0) {
++    static int s_on = -1;
++    int on = __atomic_load_n(&s_on, __ATOMIC_RELAXED);
++    if (on < 0) {
 +        /* on by default, as on arm64 (SPU_FLOAT_RZ=0 turns it off) */
-         const char* e = getenv("SPU_FLOAT_RZ");
--        on = e && e[0] == '1' && !e[1];
++        const char* e = getenv("SPU_FLOAT_RZ");
 +        on = !(e && e[0] == '0' && !e[1]);
 +        __atomic_store_n(&s_on, on, __ATOMIC_RELAXED);
 +    }
@@ -34468,12 +34506,13 @@ index 84b7ac96..91aa65e5 100644
 +    spu_xr_rz_g = 1;   /* the helpers' copy of the mode (spu__xr_on) */
 +    return v;
 +#elif defined(__aarch64__) && defined(__ARM_NEON) && !defined(SPU_SCALAR_HELPERS)
-+    static int s_on = -1;
-+    int on = __atomic_load_n(&s_on, __ATOMIC_RELAXED);
-+    if (on < 0) {
+     static int s_on = -1;
+     int on = __atomic_load_n(&s_on, __ATOMIC_RELAXED);
+     if (on < 0) {
 +        /* racacit: on by default (SPU_FLOAT_RZ=0 turns it off). The port always ran
 +         * SPU code with FZ + round toward zero; this keeps that, the fast native form. */
-+        const char* e = getenv("SPU_FLOAT_RZ");
+         const char* e = getenv("SPU_FLOAT_RZ");
+-        on = e && e[0] == '1' && !e[1];
 +        on = !(e && e[0] == '0' && !e[1]);
          __atomic_store_n(&s_on, on, __ATOMIC_RELAXED);
      }
@@ -34857,11 +34896,12 @@ index 84b7ac96..91aa65e5 100644
          spu_lockline_unlock();
          spu_taskset_line_committed(ea & ~127u);
          if (g_spu_line_commit_hook) g_spu_line_commit_hook(ea & ~127u);
-@@ -1148,7 +1462,19 @@ static void spu_resv_lost_poll(spu_context* ctx)
+@@ -1148,8 +1462,21 @@ static void spu_resv_lost_poll(spu_context* ctx)
  {
      if (!(ctx->event_mask & 0x400u) || !ctx->resv_valid) return;
      if (!vm_base || ctx->resv_ea == 0) return;
 -    if (memcmp(vm_base + ctx->resv_ea, ctx->resv_line, 128) != 0) {
+-        ctx->resv_valid = 0;
 +    const uint8_t* line = vm_base + ctx->resv_ea;
 +#if defined(__APPLE__) && defined(__aarch64__) && defined(__ARM_NEON) && !defined(SPU_SCALAR_HELPERS)
 +    /* Most polls see an unchanged line. Reduce once after comparing all bytes. */
@@ -34875,10 +34915,12 @@ index 84b7ac96..91aa65e5 100644
 +    const int changed = spu_mem_ne(line, ctx->resv_line, MFC_ATOMIC_LINE);
 +#endif
 +    if (changed) {
-         ctx->resv_valid = 0;
++        /* Atomic: spu_lr_kick reads it from the PPU thread while this lane parks. */
++        __atomic_store_n(&ctx->resv_valid, 0, __ATOMIC_RELEASE);
          SPU_EVENT_SET(ctx, 0x400u);
      }
-@@ -1168,9 +1494,34 @@ static int spu_ch_ready(spu_context* ctx, uint32_t channel)
+ }
+@@ -1168,9 +1495,34 @@ static int spu_ch_ready(spu_context* ctx, uint32_t channel)
  
  /* Signal the per-SPU wait CV so a blocked spu_rdch re-checks its predicate.
   * MUST be called by every producer AFTER it makes a read predicate true. */
@@ -34913,7 +34955,7 @@ index 84b7ac96..91aa65e5 100644
      /* Pass through the waiter's lock first. spu_ch_wait tests its predicate and
       * goes to sleep under ch_wait_lock, but a producer makes the predicate true
       * outside it. A wake issued between the waiter's test and its sleep found
-@@ -1226,11 +1577,13 @@ static void spu_ch_wait(spu_context* ctx, uint32_t channel, const char* op)
+@@ -1226,11 +1578,13 @@ static void spu_ch_wait(spu_context* ctx, uint32_t channel, const char* op)
                  yz_lockstep_block_end(ctx);
                  spu_honour_stop_request(ctx);
              }
@@ -34927,7 +34969,7 @@ index 84b7ac96..91aa65e5 100644
              unsigned long long waited = GetTickCount64() - start;
              if (waited >= next_hb) {
                  fprintf(stderr, "[ch-wait] spu=%X pc=0x%05X ch=%u waited=%llums evstat=0x%X evmask=0x%X resv[valid=%d ea=0x%08X]\n",
-@@ -1247,6 +1600,144 @@ static void spu_ch_wait(spu_context* ctx, uint32_t channel, const char* op)
+@@ -1247,6 +1601,240 @@ static void spu_ch_wait(spu_context* ctx, uint32_t channel, const char* op)
      ctx->status = SPU_STATUS_RUNNING;
  }
  
@@ -34997,6 +35039,97 @@ index 84b7ac96..91aa65e5 100644
 +/* The lanes' spin before sleeping (us), live from Settings > Graphics > CPU
 + * usage (rsx_host_ui.c): 30 efficient, 200 maximum. */
 +volatile int g_racacit_spu_spin_us = 30;
++/* racacit: lanes asleep in spu_lr_wait, so a waiting PPU can wake them.
++ * A Crack in Time posts job-chain work with plain stores that never reach
++ * spu_coh_notify_write (lifted stores go straight to guest memory), so a lane
++ * that had gone to sleep on the job line only saw the work when its 1 ms
++ * sleep ran out, while the main thread spun on the job's completion. That
++ * spin reads the timebase (ppu_timebase_now), which calls spu_lr_kick: one
++ * relaxed load when no lane is asleep, otherwise a 128-byte compare per
++ * sleeping lane and a broadcast to any whose line has changed. A lane
++ * registers before its last look at the line, and the sleep is still
++ * bounded, so a kick that comes too early costs at most what it did before.
++ * SPU_LR_KICK=0: no kicks. */
++#define SPU_LR_PARK_MAX 16
++/* A slot holds a parked context's address, with bit 0 set while a kick is
++ * using it. Contexts can live on a job's stack, so the lane does not leave
++ * spu_lr_wait (and the context cannot go away) until it has cleared its own
++ * slot, which it can only do while no kick holds it. */
++static _Atomic(uintptr_t) s_lr_park[SPU_LR_PARK_MAX];
++extern atomic_int g_spu_lr_parked;              /* sys_timer.c, read by ppu_timebase_now */
++extern _Atomic(void (*)(void)) g_spu_lr_kick;   /* sys_timer.c */
++void spu_lr_kick(void);
++static int spu_lr_kick_on(void)
++{
++    static atomic_int on = -1;
++    int v = atomic_load_explicit(&on, memory_order_relaxed);
++    if (v < 0) {
++        const char* e = getenv("SPU_LR_KICK");
++        v = (e && *e == '0') ? 0 : 1;
++        if (v) atomic_store_explicit(&g_spu_lr_kick, spu_lr_kick, memory_order_release);   /* before any lane counts itself parked */
++        atomic_store_explicit(&on, v, memory_order_release);
++    }
++    return v;
++}
++static int spu_lr_park(spu_context* ctx)
++{
++    if (!spu_lr_kick_on()) return -1;
++    for (int i = 0; i < SPU_LR_PARK_MAX; i++) {
++        uintptr_t none = 0;
++        if (atomic_compare_exchange_strong(&s_lr_park[i], &none, (uintptr_t)ctx)) {
++            atomic_fetch_add(&g_spu_lr_parked, 1);
++            return i;
++        }
++    }
++    return -1;
++}
++static void spu_lr_unpark(spu_context* ctx, int slot)
++{
++    if (slot < 0) return;
++    for (;;) {
++        uintptr_t mine = (uintptr_t)ctx;
++        if (atomic_compare_exchange_weak(&s_lr_park[slot], &mine, 0)) break;
++        YieldProcessor();   /* a kick is reading this context: a few hundred ns */
++    }
++    atomic_fetch_sub(&g_spu_lr_parked, 1);
++}
++void spu_lr_kick(void)
++{
++    if (!vm_base) return;
++    for (int i = 0; i < SPU_LR_PARK_MAX; i++) {
++        uintptr_t p = atomic_load_explicit(&s_lr_park[i], memory_order_relaxed);
++        if (!p || (p & 1u)) continue;
++        if (!atomic_compare_exchange_strong(&s_lr_park[i], &p, p | 1u)) continue;
++        spu_context* c = (spu_context*)p;
++        /* A cheap look first, then try the lock only: a lane holding it is
++         * about to look at the line itself, and the PPU's clock read must
++         * never wait on a lane. The look is repeated under the lock, so the
++         * decision serializes with the lane's own poll. A lock nobody has
++         * taken yet (POSIX creates it lazily) is skipped, never created here. */
++        if (__atomic_load_n(&c->resv_valid, __ATOMIC_ACQUIRE) && c->resv_ea &&
++            spu_mem_ne(vm_base + c->resv_ea, c->resv_line, MFC_ATOMIC_LINE) &&
++#ifdef _WIN32
++            TryAcquireSRWLockExclusive((SRWLOCK*)&c->ch_wait_lock)) {
++#else
++            ps3_try_acquire_srw_existing((SRWLOCK*)&c->ch_wait_lock)) {
++#endif
++          if (__atomic_load_n(&c->resv_valid, __ATOMIC_ACQUIRE) && c->resv_ea &&
++              spu_mem_ne(vm_base + c->resv_ea, c->resv_line, MFC_ATOMIC_LINE)) {
++#ifdef _WIN32
++            WakeAllConditionVariable((CONDITION_VARIABLE*)&c->ch_wait_cv);
++#else
++            /* The shim's wake takes the variable's inner mutex, which a lane
++             * preempted on its way into the wait can hold: skip that lane
++             * instead (it wakes at its timeout, as without the kick). */
++            ps3_try_wake_all_cv((CONDITION_VARIABLE*)&c->ch_wait_cv);
++#endif
++          }
++            ReleaseSRWLockExclusive((SRWLOCK*)&c->ch_wait_lock);
++        }
++        atomic_store_explicit(&s_lr_park[i], p, memory_order_release);
++    }
++}
++
 +static void spu_lr_wait(spu_context* ctx)
 +{
 +    static long s_us = -1;
@@ -35058,11 +35191,16 @@ index 84b7ac96..91aa65e5 100644
 +        if (t.QuadPart - t0.QuadPart < spin) { YieldProcessor(); continue; }
 +        yz_lockstep_block_begin(ctx);
 +        spu_ch_sleep_enter(ctx);
++        const int park = spu_lr_park(ctx);
 +        AcquireSRWLockExclusive((SRWLOCK*)&ctx->ch_wait_lock);
++        /* Look at the line once more after registering: a store that landed
++         * before the registration was seen by no kick. */
++        if (park >= 0) spu_resv_lost_poll(ctx);
 +        if (!(ctx->event_status & ctx->event_mask) && ctx->resv_valid)
 +            SleepConditionVariableSRW((CONDITION_VARIABLE*)&ctx->ch_wait_cv,
 +                                      (SRWLOCK*)&ctx->ch_wait_lock, 1, 0);
 +        ReleaseSRWLockExclusive((SRWLOCK*)&ctx->ch_wait_lock);
++        spu_lr_unpark(ctx, park);
 +        spu_ch_sleep_leave(ctx);
 +        yz_lockstep_block_end(ctx);
 +        slept = 1;
@@ -35072,7 +35210,7 @@ index 84b7ac96..91aa65e5 100644
  /* ===========================================================================
   * Channel read (returns value in the preferred word slot)
   * ===========================================================================*/
-@@ -1266,8 +1757,10 @@ u128 spu_rdch(spu_context* ctx, uint32_t channel)
+@@ -1266,8 +1854,10 @@ u128 spu_rdch(spu_context* ctx, uint32_t channel)
       * park forever. RdInMbox/RdSigNotify park on their PPU producers. */
      if (channel == SPU_RdInMbox || channel == SPU_RdSigNotify1 || channel == SPU_RdSigNotify2)
          spu_ch_wait(ctx, channel, "rdch");
@@ -35085,7 +35223,7 @@ index 84b7ac96..91aa65e5 100644
  
      uint32_t v = 0;
  
-@@ -1380,7 +1873,7 @@ uint32_t spu_rchcnt(spu_context* ctx, uint32_t channel)
+@@ -1380,7 +1970,7 @@ uint32_t spu_rchcnt(spu_context* ctx, uint32_t channel)
            lastlsa[sp] = ctx->mfc_lsa & SPU_LS_MASK;
            lastr90[sp] = ctx->gpr[90]._u32[0];
            lastrd[sp] = (ctx->resv_valid && vm_base && ctx->resv_ea)
@@ -35094,7 +35232,7 @@ index 84b7ac96..91aa65e5 100644
                       : -1;
            { static int s_ld2 = -2; static uint32_t s_lo2;
              if (s_ld2 == -2) { const char* e5 = getenv("SPU_LSDUMP");
-@@ -1536,7 +2029,13 @@ uint32_t spu_rchcnt(spu_context* ctx, uint32_t channel)
+@@ -1536,7 +2126,13 @@ uint32_t spu_rchcnt(spu_context* ctx, uint32_t channel)
       * handler gates on this (rchcnt $ch25; brz IhcExit) -- returning the old
       * default of 1 made it enter on spurious interrupts with an empty stat,
       * running IhcLoop on a zero mask (clz(0) -> bogus tagId/ack). */
@@ -35109,7 +35247,7 @@ index 84b7ac96..91aa65e5 100644
      default:                 return 1;  /* default: channel ready */
      }
  }
-@@ -1550,8 +2049,28 @@ typedef struct {
+@@ -1550,8 +2146,28 @@ typedef struct {
      uint32_t addr;
      spu_fn   fn;
      int      image_id;   /* which recompiled image this function belongs to */
@@ -35138,7 +35276,7 @@ index 84b7ac96..91aa65e5 100644
  /* One entry per lifted SPU function across EVERY registered image, and a game
   * that lifts its whole SPU workload set has a lot of them: Yakuza: Dead Souls
   * registers ~170k (cri_audio alone is ~35k, gs_task ~9k, the job binaries ~11k).
-@@ -1563,6 +2082,19 @@ typedef struct {
+@@ -1563,6 +2179,19 @@ typedef struct {
  #define SPU_FN_REGISTRY_MAX 262144
  static spu_reg_entry s_registry[SPU_FN_REGISTRY_MAX];
  static uint32_t s_registry_count = 0;
@@ -35158,7 +35296,7 @@ index 84b7ac96..91aa65e5 100644
  
  /* Accessor for the sampling profiler in ppu_loader.cpp. Its address->function
   * map is built from the PPU table alone, which leaves the SPU-lifted bodies as
-@@ -1573,6 +2105,14 @@ static uint32_t s_registry_count = 0;
+@@ -1573,6 +2202,14 @@ static uint32_t s_registry_count = 0;
   * real entries and the extents mean something. */
  uint32_t spu_registry_size(void) { return s_registry_count; }
  
@@ -35173,7 +35311,7 @@ index 84b7ac96..91aa65e5 100644
  int spu_registry_entry(uint32_t i, void** host, uint32_t* ls_addr)
  {
      if (i >= s_registry_count) return 0;
-@@ -1687,6 +2227,7 @@ spu_fn spu_lookup(uint32_t addr, int image_id)   /* exported: clang-built fast-p
+@@ -1687,6 +2324,7 @@ spu_fn spu_lookup(uint32_t addr, int image_id)   /* exported: clang-built fast-p
       * any, for back-compat with single-image contexts. */
      for (uint32_t n = s_hash_head[spu_fn_hash(addr)]; n; n = s_hash_next[n - 1]) {
          const spu_reg_entry* e = &s_registry[n - 1];
@@ -35181,7 +35319,7 @@ index 84b7ac96..91aa65e5 100644
          if (e->addr == addr &&
              (image_id == 0 || e->image_id == 0 || e->image_id == image_id)) {
              /* One compare on the return path; the report itself is rare. */
-@@ -1713,7 +2254,7 @@ static spu_fn spu_lookup_memoized(uint32_t addr, int image_id)
+@@ -1713,7 +2351,7 @@ static spu_fn spu_lookup_memoized(uint32_t addr, int image_id)
  {
      spu_lookup_memo* m = &t_lookup_memo[((addr >> 2) ^ ((uint32_t)image_id * 0x9E3779B1u)) &
                                          (SPU_LOOKUP_MEMO_SIZE - 1)];
@@ -35190,7 +35328,7 @@ index 84b7ac96..91aa65e5 100644
      if (m->gen != gen || m->addr != addr || m->image != image_id) {
          m->fn = spu_lookup(addr, image_id);
          m->addr = addr; m->image = image_id; m->gen = gen;
-@@ -1721,6 +2262,341 @@ static spu_fn spu_lookup_memoized(uint32_t addr, int image_id)
+@@ -1721,6 +2359,341 @@ static spu_fn spu_lookup_memoized(uint32_t addr, int image_id)
      return m->fn;
  }
  
@@ -35532,7 +35670,7 @@ index 84b7ac96..91aa65e5 100644
  /* Which image registered a function at this LS address, or -1 if none did.
   *
   * Deliberately NOT spu_lookup(addr, 0): that call means "dispatch here in a
-@@ -1765,8 +2641,19 @@ static spu_lifted_fn spu_lifted_lookup_full(const spu_context* ctx, uint32_t lsa
+@@ -1765,8 +2738,19 @@ static spu_lifted_fn spu_lifted_lookup_full(const spu_context* ctx, uint32_t lsa
              if (ctx->resident_code[slot].verify_state &&
                  !spu_overlay_resident_verified((spu_context*)ctx, slot)) return NULL;
              const uint32_t canon = ctx->resident_code[slot].canon;
@@ -35554,7 +35692,7 @@ index 84b7ac96..91aa65e5 100644
              /* Relocatable code (spu_overlay_register_region_reloc): its lift sits at
               * canon + offset. The caller runs the function next, so set its delta now. */
              spu_fn f = spu_lookup_memoized(lsa - ctx->resident_code[slot].lsa + canon,
-@@ -1780,7 +2667,13 @@ static spu_lifted_fn spu_lifted_lookup_full(const spu_context* ctx, uint32_t lsa
+@@ -1780,7 +2764,13 @@ static spu_lifted_fn spu_lifted_lookup_full(const spu_context* ctx, uint32_t lsa
      spu_fn fn = NULL;
      if (ctx->resident_task) fn = spu_lookup_memoized(lsa, ctx->resident_task);
      if (!fn && ctx->resident_ovl) fn = spu_lookup_memoized(lsa, ctx->resident_ovl);
@@ -35569,7 +35707,7 @@ index 84b7ac96..91aa65e5 100644
      return (spu_lifted_fn)fn;
  }
  
-@@ -1850,7 +2743,7 @@ spu_lifted_fn spu_lifted_lookup(const spu_context* ctx, uint32_t lsa)
+@@ -1850,7 +2840,7 @@ spu_lifted_fn spu_lifted_lookup(const spu_context* ctx, uint32_t lsa)
      }
      /* Read before the resolver walks the registry: an entry is never keyed by
       * a count newer than the registry it saw. */
@@ -35578,7 +35716,7 @@ index 84b7ac96..91aa65e5 100644
      spu_dcache_ent* e = &t_dcache[((lsa >> 2) ^ (id * 0x9E3779B1u)) & (SPU_DCACHE_ENTRIES - 1)];
      if (e->fn && e->id == id && e->lsa == lsa && e->rgen == rgen &&
          e->residency == c->dcache_residency && e->image == c->image_id &&
-@@ -1877,7 +2770,7 @@ spu_lifted_fn spu_lifted_lookup(const spu_context* ctx, uint32_t lsa)
+@@ -1877,7 +2867,7 @@ spu_lifted_fn spu_lifted_lookup(const spu_context* ctx, uint32_t lsa)
      }
      int reloc = 0;
      const spu_lifted_fn fn = spu_lifted_lookup_full(ctx, lsa, &reloc);
@@ -35587,7 +35725,7 @@ index 84b7ac96..91aa65e5 100644
          /* The resolver may have verified a pending slot; the entry records the
           * residency it resolved against, read after it. */
          e->fn = fn; e->id = id; e->lsa = lsa; e->rgen = rgen;
-@@ -2208,6 +3101,15 @@ void spu_overlay_note_get(spu_context* ctx, uint32_t ea, const uint8_t* ls, uint
+@@ -2208,6 +3198,15 @@ void spu_overlay_note_get(spu_context* ctx, uint32_t ea, const uint8_t* ls, uint
  {
      uint32_t lsa = (uint32_t)(ls - ctx->ls);
      spu_ovl_dump(ctx, ea, lsa, ls, size);
@@ -35603,7 +35741,7 @@ index 84b7ac96..91aa65e5 100644
      for (unsigned slot = 0; slot < 4; ++slot) {
          if (!ctx->resident_code[slot].image_id) continue;
          uint32_t base = ctx->resident_code[slot].lsa;
-@@ -2640,6 +3542,19 @@ static int spu_smc_microstep(spu_context* ctx)
+@@ -2640,6 +3639,19 @@ static int spu_smc_microstep(spu_context* ctx)
           * corroboration gets for a decode bug. */
          if (op11 == 0x1AC || op7 == 0x08 || op7 == 0x09) { pc += 4; continue; } /* hbr/hbra/hbrr */
  
@@ -35623,7 +35761,7 @@ index 84b7ac96..91aa65e5 100644
          /* Hand off to the real interpreter rather than giving up.
           *
           * This microstepper knows a dozen opcodes -- enough for the
-@@ -2684,14 +3599,74 @@ static int spu_smc_microstep(spu_context* ctx)
+@@ -2684,14 +3696,74 @@ static int spu_smc_microstep(spu_context* ctx)
      return 0;
  }
  
@@ -35698,7 +35836,7 @@ index 84b7ac96..91aa65e5 100644
      /* Interrupt-return register restore (see spu_drain.c spu_irq_regs_save):
       * the WWS handler's save/restore shim lives at unlifted top-of-LS, so we
       * enforce the preserve-all-registers hardware contract here -- the first
-@@ -2903,11 +3878,13 @@ void spu_indirect_branch(spu_context* ctx)
+@@ -2903,11 +3975,13 @@ void spu_indirect_branch(spu_context* ctx)
              uint32_t w = ((uint32_t)ctx->ls[p0] << 24) | ((uint32_t)ctx->ls[p0+1] << 16) |
                           ((uint32_t)ctx->ls[p0+2] << 8) | ctx->ls[p0+3];
              if ((w >> 21) == 0u) {                 /* stop / stopd */
@@ -35712,7 +35850,7 @@ index 84b7ac96..91aa65e5 100644
                  spu_halt(ctx);
                  return;
              }
-@@ -3240,13 +4217,14 @@ void spu_indirect_branch(spu_context* ctx)
+@@ -3240,13 +4314,14 @@ void spu_indirect_branch(spu_context* ctx)
       * image (the FMOD mixer's overlay calls) exhaust it and silently hide
       * every other image's misses -- LBP's loading jobs skipped their command
       * handlers for a whole session without a single log line. */
@@ -35728,7 +35866,7 @@ index 84b7ac96..91aa65e5 100644
      /* One-shot: the FMOD null-handler DSP node carries a PPU descriptor EA at
       * node+0x14 (observed 0x93C3C0). Dump it to identify which plugin/unit
       * type never got its SPU code streamed (env SPU_DSPDESC=<hex ea>). */
-@@ -3406,4 +4384,44 @@ void spu_trace_rt(spu_context* ctx, uint32_t rt)
+@@ -3406,4 +4481,44 @@ void spu_trace_rt(spu_context* ctx, uint32_t rt)
  
  #ifdef __cplusplus
  }
@@ -38615,10 +38753,14 @@ index b997931b..3d048c2f 100644
           * it is gone (ESRCH). */
          table_unlock();
 diff --git a/runtime/syscalls/sys_timer.c b/runtime/syscalls/sys_timer.c
-index 3a022815..20a759a6 100644
+index 3a022815..c22ab9c3 100644
 --- a/runtime/syscalls/sys_timer.c
 +++ b/runtime/syscalls/sys_timer.c
-@@ -11,6 +11,11 @@
+@@ -8,9 +8,15 @@
+ #include "sys_timer.h"
+ #include "sys_ppu_thread.h"   /* ppu_thread_note_block */
+ #include <time.h>
++#include <stdatomic.h>
  #include "sys_event.h"
  #include "../memory/vm.h"
  #include <stdlib.h>   /* getenv -- an implicit decl returns int, truncating the pointer */
@@ -38630,7 +38772,7 @@ index 3a022815..20a759a6 100644
  #include <string.h>
  #include <stdlib.h>
  #include "ps3emu/log_first.h"
-@@ -53,6 +58,56 @@ int lv2_deadline_passed(int64_t deadline)
+@@ -53,6 +59,56 @@ int lv2_deadline_passed(int64_t deadline)
  }
  #endif
  
@@ -38687,7 +38829,7 @@ index 3a022815..20a759a6 100644
  /* ---------------------------------------------------------------------------
   * PPU timebase (mftb/mftbu) -- THE guest clock.
   *
-@@ -64,19 +119,101 @@ int lv2_deadline_passed(int64_t deadline)
+@@ -64,19 +120,113 @@ int lv2_deadline_passed(int64_t deadline)
   * polled. Overflow-safe split multiply (rem < qpf, so
   * rem * 79.8e6 < ~8e14 << 2^63).
   * -----------------------------------------------------------------------*/
@@ -38761,8 +38903,20 @@ index 3a022815..20a759a6 100644
 +}
 +#endif
 +
++/* racacit: SPU lanes asleep on a lock line, and the call that wakes any whose
++ * line has changed (spu_channels.c, spu_lr_kick). A PPU waiting on SPU work
++ * reads the timebase in its loop, so this is where it can hand a job posted
++ * by a plain store to a lane that would otherwise sleep out its timeout.
++ * They live here so a build without the SPU runtime still links. */
++atomic_int g_spu_lr_parked;
++_Atomic(void (*)(void)) g_spu_lr_kick;
++
  uint64_t ppu_timebase_now(void)
  {
++    if (atomic_load_explicit(&g_spu_lr_parked, memory_order_relaxed) > 0) {
++        void (*kick)(void) = atomic_load_explicit(&g_spu_lr_kick, memory_order_acquire);
++        if (kick) kick();
++    }
  #ifdef _WIN32
 -    static LONGLONG t0 = 0;
 +    /* QPC from the one guest origin (ps3_guest_clock_epoch_qpc), NOT anchored
@@ -38795,7 +38949,7 @@ index 3a022815..20a759a6 100644
      return (ns / 1000000000ull) * PS3_TIMEBASE_FREQ +
             (ns % 1000000000ull) * PS3_TIMEBASE_FREQ / 1000000000ull;
  #endif
-@@ -86,14 +223,21 @@ uint64_t ppu_timebase_now(void)
+@@ -86,14 +236,21 @@ uint64_t ppu_timebase_now(void)
  uint64_t host_monotonic_ns(void)
  {
  #ifdef __APPLE__
@@ -38821,7 +38975,7 @@ index 3a022815..20a759a6 100644
      return (t / denom) * numer + (t % denom) * numer / denom;
  #else
      struct timespec ts;
-@@ -101,6 +245,14 @@ uint64_t host_monotonic_ns(void)
+@@ -101,6 +258,14 @@ uint64_t host_monotonic_ns(void)
      return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
  #endif
  }
@@ -38836,7 +38990,7 @@ index 3a022815..20a759a6 100644
  #endif
  
  static void write_be32(uint32_t addr, uint32_t val)
-@@ -129,6 +281,470 @@ static void write_be64(uint32_t addr, uint64_t val)
+@@ -129,6 +294,470 @@ static void write_be64(uint32_t addr, uint64_t val)
      *p = val;
  }
  
@@ -39307,7 +39461,7 @@ index 3a022815..20a759a6 100644
  /* ---------------------------------------------------------------------------
   * sys_timer_usleep
   *
-@@ -138,10 +754,43 @@ int64_t sys_timer_usleep(ppu_context* ctx)
+@@ -138,10 +767,43 @@ int64_t sys_timer_usleep(ppu_context* ctx)
  {
      uint64_t usec = LV2_ARG_U64(ctx, 0);
      ppu_thread_note_block(ctx->thread_id);   /* PS3_PRIO_START */
@@ -39351,7 +39505,7 @@ index 3a022815..20a759a6 100644
      /* PS3_POLLTOP=<seconds>: name the usleep poll sites.
       *
       * A title that is "hung" is usually not blocked on anything -- every thread
-@@ -243,6 +892,17 @@ int64_t sys_timer_usleep(ppu_context* ctx)
+@@ -243,6 +905,17 @@ int64_t sys_timer_usleep(ppu_context* ctx)
          extern void ppu_log_host_chain(const char*);
          ppu_log_host_chain("usleep1ms"); } }
  
@@ -39369,7 +39523,7 @@ index 3a022815..20a759a6 100644
  #ifdef _WIN32
      /* Use high-resolution sleep via waitable timer for better precision */
      if (usec >= 1000) {
-@@ -264,10 +924,19 @@ int64_t sys_timer_usleep(ppu_context* ctx)
+@@ -264,10 +937,19 @@ int64_t sys_timer_usleep(ppu_context* ctx)
           * and busy-spins at full speed (so the wait is effectively a no-op).
           * Busy-wait to a precise QPC deadline, yielding inside the spin
           * (SwitchToThread) so a sibling host thread the guest may be waiting on
@@ -39390,7 +39544,7 @@ index 3a022815..20a759a6 100644
          const int64_t qpc_deadline = qpc_start.QuadPart +
              (int64_t)((usec * (uint64_t)s_qpc_freq.QuadPart) / 1000000ULL);
          do {
-@@ -276,6 +945,28 @@ int64_t sys_timer_usleep(ppu_context* ctx)
+@@ -276,6 +958,28 @@ int64_t sys_timer_usleep(ppu_context* ctx)
          } while (qpc_now.QuadPart < qpc_deadline);
      }
  #else
