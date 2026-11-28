@@ -4269,10 +4269,10 @@ index 5f8a2fa2..e6cc3b9f 100644
      return CELL_OK;
 diff --git a/libs/input/touch_controls.c b/libs/input/touch_controls.c
 new file mode 100644
-index 00000000..47a2077d
+index 00000000..26a49bac
 --- /dev/null
 +++ b/libs/input/touch_controls.c
-@@ -0,0 +1,314 @@
+@@ -0,0 +1,339 @@
 +/* ps3recomp - on-screen touch controls. See touch_controls.h. */
 +#include "touch_controls.h"
 +#include "cellPad.h"
@@ -4468,6 +4468,20 @@ index 00000000..47a2077d
 +    return 1;
 +}
 +
++/* Which buttons a point is on (distance in height units, with a generous hit
++ * area): adds their masks and indexes, and returns whether it hit any. */
++static int tc_hit(const tc_button* lay, float x, float y, float aspect, uint16_t* b, uint32_t* pressed)
++{
++    int hit = 0;
++    for (int i = 0; i < TC_N; i++) {
++        const tc_button* k = &lay[i];
++        if (k->shape == TC_SHAPE_STICK) continue;
++        const float dx = (x - k->x) * aspect, dy = y - k->y, rr = k->r * 1.25f;
++        if (dx * dx + dy * dy <= rr * rr) { *b |= k->mask; *pressed |= 1u << i; hit = 1; }
++    }
++    return hit;
++}
++
 +uint32_t touch_controls_apply(const tc_touch* t, int n, float aspect, uint16_t* buttons,
 +                              uint8_t* lx, uint8_t* ly)
 +{
@@ -4489,27 +4503,23 @@ index 00000000..47a2077d
 +        if (!f) continue;
 +        const int fresh = f->role == TC_ROLE_NONE;
 +        f->seen = 1;
-+        if (fresh || f->role == TC_ROLE_BUTTON) {
-+            /* Distance in height units, with a generous hit area. */
-+            int hit = 0;
-+            for (int i = 0; i < TC_N; i++) {
-+                const tc_button* k = &lay[i];
-+                if (k->shape == TC_SHAPE_STICK) continue;
-+                const float dx = (x - k->x) * aspect, dy = y - k->y, rr = k->r * 1.25f;
-+                if (dx * dx + dy * dy <= rr * rr) { b |= k->mask; pressed |= 1u << i; hit = 1; }
-+            }
-+            if (fresh && hit) f->role = TC_ROLE_BUTTON;
-+        }
-+        if (fresh && f->role == TC_ROLE_NONE) {
-+            if (x < 0.40f && y > 0.33f && !tc_role_taken(TC_ROLE_LSTICK)) {
-+                f->role = TC_ROLE_LSTICK; s_ax = x; s_ay = y;
-+            } else if (x >= 0.40f) {
++        if (fresh) {
++            /* The part is the one under where the finger landed, even when
++             * it has moved since (down and motion in the same poll). */
++            const float px = t[j].landed ? t[j].x0 : x, py = t[j].landed ? t[j].y0 : y;
++            uint16_t nb = 0; uint32_t np = 0;
++            if (tc_hit(lay, px, py, aspect, &nb, &np)) {
++                f->role = TC_ROLE_BUTTON;
++            } else if (px < 0.40f && py > 0.33f && !tc_role_taken(TC_ROLE_LSTICK)) {
++                f->role = TC_ROLE_LSTICK; s_ax = px; s_ay = py;
++            } else if (px >= 0.40f) {
 +                f->role = TC_ROLE_LOOK;
 +            } else {
 +                f->role = TC_ROLE_IDLE;
 +            }
-+            f->lx = x; f->ly = y;
++            f->lx = px; f->ly = py;
 +        }
++        if (f->role == TC_ROLE_BUTTON) tc_hit(lay, x, y, aspect, &b, &pressed);
 +        if (f->role == TC_ROLE_LSTICK) {
 +            tx = x; ty = y; lseen = 1;
 +            *lx = tc_axis((x - s_ax) * aspect);
@@ -4528,24 +4538,36 @@ index 00000000..47a2077d
 +
 +#if TC_HAVE_SDL
 +/* Fingers down, in screen coordinates, kept from SDL's touch events on the
-+ * window thread (under s_lk); the pad poll thread copies them. */
-+static tc_touch s_ct[TC_FINGERS];
++ * window thread (under s_lk); the pad poll thread copies them. Each touch
++ * gets its own id (s_serial), so a finger id SDL reuses after a lift starts a
++ * new touch, and keeps where it landed. */
++typedef struct { int64_t sdl; tc_touch t; } tc_contact;
++static tc_contact s_ct[TC_FINGERS];
 +static int s_nct;
++static int64_t s_serial;
 +void touch_controls_event(const union SDL_Event* e)
 +{
 +    if (e->type != SDL_FINGERDOWN && e->type != SDL_FINGERMOTION && e->type != SDL_FINGERUP) return;
-+    const int64_t id = (int64_t)e->tfinger.fingerId;
++    const int64_t sdl = (int64_t)e->tfinger.fingerId;
 +    tc_lock();
 +    int i = 0;
-+    while (i < s_nct && s_ct[i].id != id) i++;
++    while (i < s_nct && s_ct[i].sdl != sdl) i++;
 +    if (e->type == SDL_FINGERUP) {
 +        if (i < s_nct) s_ct[i] = s_ct[--s_nct];
-+    } else if (i < s_nct || s_nct < TC_FINGERS) {
-+        if (i == s_nct) s_nct++;
-+        s_ct[i].id = id; s_ct[i].x = e->tfinger.x; s_ct[i].y = e->tfinger.y;
++    } else if (e->type == SDL_FINGERDOWN || i == s_nct) {   /* a new touch (or motion we missed the down of) */
++        if (i < s_nct || s_nct < TC_FINGERS) {
++            if (i == s_nct) s_nct++;
++            tc_contact* c = &s_ct[i];
++            c->sdl = sdl; c->t.id = ++s_serial; c->t.landed = 1;
++            c->t.x = c->t.x0 = e->tfinger.x; c->t.y = c->t.y0 = e->tfinger.y;
++        }
++    } else {
++        s_ct[i].t.x = e->tfinger.x; s_ct[i].t.y = e->tfinger.y;
 +    }
 +    tc_unlock();
 +}
++#else
++void touch_controls_event(const union SDL_Event* e) { (void)e; }   /* no SDL touch here */
 +#endif
 +
 +int touch_controls_poll(float aspect, uint16_t* buttons,
@@ -4565,10 +4587,13 @@ index 00000000..47a2077d
 +         * thread), so the pad thread never reads them. */
 +        tc_lock();
 +        n = s_nct;
-+        for (int j = 0; j < n; j++) t[j] = s_ct[j];
++        for (int j = 0; j < n; j++) t[j] = s_ct[j].t;
 +        tc_unlock();
 +    }
-+    for (int j = 0; j < n; j++) { t[j].x = (t[j].x - fx0) / fw; t[j].y = (t[j].y - fy0) / fh; }   /* in the frame */
++    for (int j = 0; j < n; j++) {   /* in the frame */
++        t[j].x = (t[j].x - fx0) / fw; t[j].y = (t[j].y - fy0) / fh;
++        t[j].x0 = (t[j].x0 - fx0) / fw; t[j].y0 = (t[j].y0 - fy0) / fh;
++    }
 +    const uint32_t pressed = touch_controls_apply(t, n, aspect, buttons, lx, ly);
 +    /* The menu button: a new press opens the settings menu, as F1 does on a
 +     * keyboard (pushed as a key event for the window thread to handle). */
@@ -4589,10 +4614,10 @@ index 00000000..47a2077d
 +}
 diff --git a/libs/input/touch_controls.h b/libs/input/touch_controls.h
 new file mode 100644
-index 00000000..5c4f3ca0
+index 00000000..8123b1ad
 --- /dev/null
 +++ b/libs/input/touch_controls.h
-@@ -0,0 +1,94 @@
+@@ -0,0 +1,96 @@
 +/*
 + * ps3recomp - on-screen touch controls (phones without a gamepad)
 + *
@@ -4649,7 +4674,9 @@ index 00000000..5c4f3ca0
 +int  touch_controls_poll(float aspect, uint16_t* buttons,
 +                         uint8_t* lx, uint8_t* ly, uint8_t* rx, uint8_t* ry);
 +/* One finger on the screen, in frame coordinates (0..1). */
-+typedef struct { int64_t id; float x, y; } tc_touch;
++/* landed: x0, y0 hold where it touched down (its part is chosen there);
++ * otherwise x, y are used for that too. id is unique for each touch. */
++typedef struct { int64_t id; float x, y; float x0, y0; int landed; } tc_touch;
 +/* The part of touch_controls_poll that is not SDL: the fingers down now, each
 + * keeping the part it landed on (a button, the left stick or the camera) until
 + * it is no longer in the list. Fills buttons and the left stick as poll does,
@@ -40532,10 +40559,10 @@ index 7cf5b08f..99e9214b 100644
  #define CHECK_RC(call, want) do { int32_t _rc = (int32_t)(call); \
 diff --git a/tests/test_touch_controls.c b/tests/test_touch_controls.c
 new file mode 100644
-index 00000000..df93aae3
+index 00000000..7efc3155
 --- /dev/null
 +++ b/tests/test_touch_controls.c
-@@ -0,0 +1,124 @@
+@@ -0,0 +1,131 @@
 +/* touch_controls_apply without SDL or a GPU: each finger keeps the part it
 + * landed on. A camera or stick drag that crosses a button must not press it
 + * (dragging the camera over triangle kept opening the quick select ring). */
@@ -40638,6 +40665,13 @@ index 00000000..df93aae3
 +    duo[1].x = 0.375f; duo[1].y = 0.82f;
 +    step(duo, 2);
 +    check(!(b & CELL_PAD_CTRL_RIGHT), "a spare finger slid onto the d-pad presses nothing");
++
++    /* A finger that landed on the stick and moved onto the d-pad before the
++     * first poll still steers the stick from where it landed. */
++    step(NULL, 0);
++    tc_touch moved = { 12, 0.375f, 0.82f, 0.15f, 0.70f, 1 };
++    step(&moved, 1);
++    check(!(b & CELL_PAD_CTRL_RIGHT) && lx > 200, "a stick swipe seen first mid-swipe is still the stick");
 +
 +    /* After a reset (Settings open), a held camera finger starts over. */
 +    step(NULL, 0);
