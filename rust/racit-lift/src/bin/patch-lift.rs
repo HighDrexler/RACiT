@@ -1134,8 +1134,9 @@ fn patch_chunk(c: &mut Chunk) -> Result<()> {
     }
 
     // 30. Loading screens skip most of the frame limiter's wait (game/stubs.cpp
-    //     racacit_loading_frame): at the head of the level loader's screen frame
-    //     func_0032DCC0, which ends by calling the frame end func_0052BFE0. USA disc only.
+    //     racacit_loading_frame): in the level loader's screen frame func_0032DCC0, just
+    //     before its one call of the frame end func_0052BFE0 (which runs the limiter), so an
+    //     early return never leaves the mark for a later frame. USA disc only.
     let sp = if c.uses_usa() {
         c.span("func_0032DCC0")?
     } else {
@@ -1145,7 +1146,8 @@ fn patch_chunk(c: &mut Chunk) -> Result<()> {
         && !c.fn_contains(sp, "racacit_loading_frame")
     {
         let fun = &c.src[sp.1..sp.2];
-        if !contains(fun, b"func_0052BFE0(ctx)")
+        let call = memchr::memmem::find_iter(fun, b"func_0052BFE0(ctx)").collect::<Vec<_>>();
+        if call.len() != 1
             || !contains(fun, b"ctx->gpr[29] + 0x29")
             || !contains(fun, b"ppu_timebase_now()")
         {
@@ -1155,10 +1157,15 @@ fn patch_chunk(c: &mut Chunk) -> Result<()> {
                     .into(),
             );
         }
+        let line = sp.1
+            + fun[..call[0]]
+                .iter()
+                .rposition(|&b| b == b'\n')
+                .map_or(0, |i| i + 1);
         c.src = splice(
             &c.src,
-            sp.1,
-            sp.1,
+            line,
+            line,
             b"        racacit_loading_frame();   /* racacit: fast loading screens */\n",
         );
         c.declare(
