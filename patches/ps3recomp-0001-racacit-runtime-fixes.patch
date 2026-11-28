@@ -36418,7 +36418,7 @@ index 400b2ba5..02f1648d 100644
  #  if __has_attribute(musttail)
  #    define SPU_DIRECT_TAILCALLS 1
 diff --git a/runtime/spu/spu_dma.h b/runtime/spu/spu_dma.h
-index 8c4ccaa8..57563881 100644
+index 8c4ccaa8..39bace69 100644
 --- a/runtime/spu/spu_dma.h
 +++ b/runtime/spu/spu_dma.h
 @@ -220,16 +220,60 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
@@ -36499,16 +36499,36 @@ index 8c4ccaa8..57563881 100644
                    fprintf(stderr, "[mfc] REJECTED malformed transfer: img=%d pc=0x%05X"
                                    " cmd=0x%X lsa=0x%05X ea=0x%08X size=%u\n",
                            spu->image_id, (uint32_t)spu->pc & SPU_LS_MASK, cmd,
-@@ -405,6 +451,8 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+@@ -405,6 +451,28 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
          return -1;
  
      /* Mask LSA to local store range */
-+    { extern void spu_dma_ring_note(uint32_t, uint32_t, uint32_t, uint32_t);
-+      spu_dma_ring_note(cmd, lsa, (uint32_t)ea, size); }
++    /* racacit: SPU_DMA_RING=1 keeps the last 128 transfers per thread for
++     * spu_dma_ring_dump. Off by default: nothing dumps it, and recording cost
++     * two thread-local accesses (calls on macOS) on every transfer. The
++     * decision is cached in an atomic: SPUs starting at once each compute the
++     * same value, and only exactly "1" turns it on. */
++    { static long s_ring = -1;
++#if defined(_MSC_VER)
++      long on = _InterlockedOr((volatile long*)&s_ring, 0);
++#else
++      long on = __atomic_load_n(&s_ring, __ATOMIC_RELAXED);
++#endif
++      if (on < 0) {
++          const char* e = getenv("SPU_DMA_RING");
++          on = e && e[0] == '1' && e[1] == 0;
++#if defined(_MSC_VER)
++          _InterlockedExchange((volatile long*)&s_ring, on);
++#else
++          __atomic_store_n(&s_ring, on, __ATOMIC_RELAXED);
++#endif
++      }
++      if (on) { extern void spu_dma_ring_note(uint32_t, uint32_t, uint32_t, uint32_t);
++                spu_dma_ring_note(cmd, lsa, (uint32_t)ea, size); } }
      lsa &= SPU_LS_MASK;
  
      /* Reject transfers that would overrun the 256 KB local store buffer (a real
-@@ -440,6 +488,15 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+@@ -440,6 +508,15 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
  
      uint8_t* ls_ptr = &spu->ls[lsa];
      uint8_t* ea_ptr = vm_base + (uint32_t)ea; /* PS3 uses 32-bit effective addresses for SPU DMA */
@@ -36524,7 +36544,7 @@ index 8c4ccaa8..57563881 100644
  
      /* SPU_STACKEA_WATCH=1: the LBP JobManagerWorker completion protocol hands the
       * SPU job a completion-word EA (param[4]) that lives on the PPU stack
-@@ -567,6 +624,25 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+@@ -567,6 +644,25 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
          }
      }
      if (mfc_is_get(cmd)) {
@@ -36550,7 +36570,7 @@ index 8c4ccaa8..57563881 100644
          /* LBP overlay-load diagnosis: a GET of the FMOD overlay descriptor
           * (32B from ~0x94Fxxx) then a large GET from a NULL source = the
           * overlay never loads. Dump the descriptor content to see where the
-@@ -595,8 +671,13 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+@@ -595,8 +691,13 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
                                lsa, (uint32_t)ea, size, (uint32_t)spu->pc, spu->image_id, "\n");
                }
            } }
@@ -36566,7 +36586,7 @@ index 8c4ccaa8..57563881 100644
          /* SPU_STACKEA_WATCH (b): scan the just-loaded payload for a 0xD00Cxxxx
           * dword = the completion-word EA arriving in a job buffer. */
          { static int s_se = -1; if (s_se < 0) s_se = getenv("SPU_STACKEA_WATCH") ? 1 : 0;
-@@ -690,7 +771,11 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+@@ -690,7 +791,11 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
              /* Lines the unlocked pass left for the locked one: a 16 KiB
               * transfer spans at most 129 lines. */
              uint64_t locked_lines[3] = {0, 0, 0};
@@ -36579,7 +36599,7 @@ index 8c4ccaa8..57563881 100644
                  const uint32_t ea32 = (uint32_t)ea;
                  uint32_t i = 0;
                  for (uint32_t a = a0; ; a += 128u, i++) {
-@@ -716,7 +801,10 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+@@ -716,7 +821,10 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
                  spu_lockline_unlock();
              } else if (span_reserved) {
                  spu_lockline_lock();
@@ -36591,7 +36611,7 @@ index 8c4ccaa8..57563881 100644
                  for (uint32_t a = a0; ; a += 128u) {
                      if (spu_coh_is_reserved(a)) spu_coh_notify_write_except(a, spu);
                      if (a == a1) break;
-@@ -733,6 +821,57 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+@@ -733,6 +841,57 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
                      if (a == a1) break;
                  }
              }
@@ -36649,7 +36669,7 @@ index 8c4ccaa8..57563881 100644
          }
          /* Tell whoever is listening where this PUT landed.
           *
-@@ -743,6 +882,12 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+@@ -743,6 +902,12 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
           * find the pushbuffer; NULL for every title that does not. */
          { extern void (*g_spu_put_hook)(uint32_t ea, uint32_t size);
            if (g_spu_put_hook) g_spu_put_hook((uint32_t)ea, size); }
@@ -36662,7 +36682,7 @@ index 8c4ccaa8..57563881 100644
          /* Bink sync-area watch (armed by the PPU barrier probe): log SPU PUTs
           * that touch the per-SPU lane counters. */
          { extern uint32_t g_barrier_sync_watch;
-@@ -769,13 +914,6 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
+@@ -769,13 +934,6 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
          { uint32_t e = (uint32_t)ea;
            int hitregion = (e < 0x40005000u && e + size > 0x40003000u);
            int haspoison = 0;
@@ -36676,7 +36696,7 @@ index 8c4ccaa8..57563881 100644
            for (uint32_t o = 0; o + 4 <= size; o += 4) {
                uint32_t w; memcpy(&w, (const char*)ls_ptr + o, 4);
                if (w == 0x08C708C7u) { haspoison = 1; break; } /* 0xC708C708 BE in LS bytes */
-@@ -935,27 +1073,6 @@ static inline int mfc_do_list_transfer(spu_context* spu, uint32_t list_lsa,
+@@ -935,27 +1093,6 @@ static inline int mfc_do_list_transfer(spu_context* spu, uint32_t list_lsa,
                          spu->mfc_tag);
  }
  
@@ -36704,7 +36724,7 @@ index 8c4ccaa8..57563881 100644
  /*
   * Submit and immediately execute an MFC command.
   * This is the main entry point called when the SPU writes to MFC_Cmd.
-@@ -1769,6 +1886,12 @@ static inline uint32_t mfc_channel_read(mfc_engine* mfc, spu_context* spu,
+@@ -1769,6 +1906,12 @@ static inline uint32_t mfc_channel_read(mfc_engine* mfc, spu_context* spu,
           * handler's IhcLoop then drains every set bit, acking each via ch26. */
          uint32_t m = spu->list_stall_stat;
          spu->list_stall_stat = 0;
