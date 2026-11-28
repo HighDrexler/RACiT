@@ -46,7 +46,7 @@ As of 11/18 Android and MacOS versions are available, along with a windows build
 
 ## Settings
 
-Every setting is in the launcher's Settings screen, and most of them are also in the in-game menu: press **F1** (or **Esc** when keyboard and mouse play is off), or **L3+R3** on a controller. On Android, hold Select. Changes made in either place are saved to the same `settings.txt`, so the other one sees them too. Each setting is a `NAME=value` line in that file if you'd rather edit it by hand. The names are in the tables below.
+The launcher's Settings screen and the in-game menu have the same settings, except Game build (the launcher picks the program before the game starts) the graphics preset (a shortcut in the menu for settings that are in both) and the two Into the Nexus settings. To open the in-game menu, press **F1** (or **Esc** when keyboard and mouse play is off), or **L3+R3** on a controller. On Android, hold Select. Changes made in either place are saved to the same `settings.txt`, so the other one sees them too. Each setting is a `NAME=value` line in that file if you'd rather edit it by hand. The names are in the tables below.
 
 ### Display
 
@@ -56,8 +56,8 @@ Every setting is in the launcher's Settings screen, and most of them are also in
 | Window size | `RACACIT_WINDOW_SIZE` | Default | Starting window size, from 1280x720 to 3840x2160. |
 | VSync | `RACACIT_PRESENT_MODE` | Off (no tearing) | Off without tearing (`mailbox`), on (`fifo`), or off with tearing allowed (`immediate`, lowest latency). |
 | Aspect ratio | `RACACIT_ASPECT` | 16:9 | Keep 16:9 with black bars, or stretch to fill the window. |
-| Field of view | `RACACIT_FOV` | 100% | 75% to 150% of the game's own field of view (in-game menu). |
-| Camera distance | `RACACIT_CAM_DIST` | 100% | 50% to 200% of the game's camera distance (in-game menu). |
+| Field of view | `RACACIT_FOV` | 100% | 75% to 150% of the game's own field of view. |
+| Camera distance | `RACACIT_CAM_DIST` | 100% | 50% to 200% of the game's camera distance. |
 
 ### Graphics
 
@@ -76,7 +76,7 @@ Every setting is in the launcher's Settings screen, and most of them are also in
 
 | Setting | Name in settings.txt | Default | What it does |
 | --- | --- | --- | --- |
-| Frame pacing | `RACACIT_PRESENT_PACE` | Off | Holds each finished frame for a moment so frames reach the screen evenly at 60 Hz, which helps when the frame rate is steady but motion looks jumpy. It can cost frame rate when the GPU side is busy (update 1.20 on some Macs drops from about 60 to about 34 with it on), so it's off by default. If motion stutters at a steady frame rate, try turning it on. A notice points at it once if the frame rate stays uneven with it off. `0` is off, `1` is on. |
+| Frame pacing | `RACACIT_PRESENT_PACE` | On on Windows, off elsewhere | Holds each finished frame for a moment so frames reach the screen evenly at 60 Hz, which helps when the frame rate is steady but motion looks jumpy. On Windows it's on by default: without it, frames at a steady 60 fps arrive unevenly and motion judders, and it costs no measurable frame rate there. On macOS, Linux and Android it's off by default, because it can cost frame rate when the GPU side is busy (update 1.20 on some Macs drops from about 60 to about 34 with it on); if motion stutters at a steady frame rate there, try turning it on. A notice points at it once if the frame rate stays uneven with it off. `0` is off, `1` is on. |
 | Frame rate | `RACACIT_FPS_CAP` | 60 fps | The game's frame limiter. 60 is the normal game. `30` is a steady 30 fps for PCs that can't hold 60 (USA disc and update 1.20), with game speed and sound unchanged. See Advanced below for going above 60. |
 | CPU usage | `RACACIT_CPU_MODE` | Efficient | Maximum keeps worker threads spinning on every core instead of sleeping. Can help on some CPUs, uses more power and heat. |
 | Game build | `RACACIT_GAME_BUILD` | Automatic | Windows only. Which program Play starts: the standard one (AVX2 processors) or the one for older processors. Automatic picks by your CPU. |
@@ -115,6 +115,8 @@ Buttons can be remapped in the launcher (`RACACIT_PAD_<BUTTON>` lines).
 
 ### Game
 
+These are on the in-game menu's Game page too. The game reads most of them when it starts, so a change made in the menu says "after restart" until the next start. The save list screen changes at once.
+
 | Setting | Name in settings.txt | Default | What it does |
 | --- | --- | --- | --- |
 | Language | `RACACIT_LANGUAGE` | English | The disc's own translations: `fr`, `es`, `de`, `it`, `nl`. |
@@ -128,7 +130,7 @@ Buttons can be remapped in the launcher (`RACACIT_PAD_<BUTTON>` lines).
 | Cheat menu | `RACACIT_CHEATS` | Off | A Cheats page in the in-game menu (bolts, weapon levels, god mode, travel) in place of Trophies. No skill points or trophies while it's on, and never again in a save a cheat was used in. |
 | Save list screen | `RACACIT_SAVE_UI` | On | The port's own list of saves when loading and saving. Off skips the list and the save is picked without asking. |
 | Save slot (Into the Nexus) | `NEXUS_SAVE_SLOT` | Slot 1 | Into the Nexus only. Slots 2 to 8 each keep a save of their own. An empty slot starts a New Game. |
-| FPS counter | `RACACIT_FPS` | Off | Frame rate and frame time at the top left. |
+| FPS counter | `RACACIT_FPS` | Off | Frame rate, frame time and the 1% and 0.1% lows over the last 10 seconds at the top left, with a graph of them over the last minute. |
 | Discord status | `RACACIT_DISCORD` | On | Shows what you're playing in Discord. |
 | Clank levels (testing) | `RACACIT_SKIP_CLANK` | Play | Skips the Clank levels. For testing. |
 
@@ -140,3 +142,4 @@ These aren't in the menus and are still experimental.
 | --- | --- |
 | `RACACIT_FPS_CAP` above 60 | Lets the game run past 60 fps with game speed kept at real time, for example `RACACIT_FPS_CAP=120`. Use it with `RACACIT_VBLANK_HZ` and frame pacing off. Some things may still be tied to 60. |
 | `RACACIT_VBLANK_HZ` | The console's refresh rate the game sees, 60 by default. Set it to match a frame cap above 60. |
+| `RACACIT_UI_FONT` | A font file (.ttf, .otf or .ttc) for the in-game menu and the FPS counter, for example `RACACIT_UI_FONT=/usr/share/fonts/TTF/Inter.ttf`. Without it the menu uses the system font: Segoe UI on Windows, the system font on macOS, your desktop's sans-serif on Linux, Roboto on Android. Not used on Windows or Android. |

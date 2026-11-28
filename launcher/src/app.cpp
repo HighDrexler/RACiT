@@ -27,6 +27,14 @@
 
 static const char* kLauncherVersion = "1.2";
 const char* g_launcher_version = kLauncherVersion;
+// Frame pacing's default, as the game's (rsx_be_proxy.c PX_PACE_DEFAULT): on for Windows,
+// where unpaced presents at a steady 60 spread 14-21 ms; off on macOS (update 1.20 on Macs
+// fell from 57 to 33 fps paced, #119).
+#ifdef __APPLE__
+static const char* const kPaceDefault = "0";
+#else
+static const char* const kPaceDefault = "1";
+#endif
 enum { WM_APP_TASK = WM_APP + 1, WM_APP_GAME_EXIT, WM_APP_UPDATE, TIMER_TICK = 1 };
 
 // ---- screen model ------------------------------------------------------------------------
@@ -233,6 +241,13 @@ static const std::vector<Opt>& opts()
         { "Display", "RACACIT_WINDOW_SIZE", "Window size", "", { { "", "Default" }, { "1280x720", "1280 x 720" }, { "1600x900", "1600 x 900" }, { "1920x1080", "1920 x 1080" }, { "2560x1440", "2560 x 1440" }, { "3840x2160", "3840 x 2160" } } },
         { "Display", "RACACIT_PRESENT_MODE", "VSync", "mailbox", { { "mailbox", "Off (no tearing)" }, { "fifo", "On" }, { "immediate", "Off (allow tearing)" } } },
         { "Display", "RACACIT_ASPECT", "Aspect ratio", "keep", { { "keep", "16:9" }, { "stretch", "Stretch to window" } } },
+        // Also in the in-game menu (rsx_host_ui.c R_FOV, R_CAMDIST): percent of the game's own.
+        { "Display", "RACACIT_FOV", "Field of view", "100", { { "75", "75%" }, { "80", "80%" }, { "85", "85%" }, { "90", "90%" }, { "95", "95%" }, { "100", "100% (as the game has it)" },
+                                                           { "105", "105%" }, { "110", "110%" }, { "115", "115%" }, { "120", "120%" }, { "125", "125%" }, { "130", "130%" },
+                                                           { "135", "135%" }, { "140", "140%" }, { "145", "145%" }, { "150", "150%" } } },
+        { "Display", "RACACIT_CAM_DIST", "Camera distance", "100", { { "50", "50%" }, { "60", "60%" }, { "70", "70%" }, { "80", "80%" }, { "90", "90%" }, { "100", "100% (as the game has it)" },
+                                                                   { "110", "110%" }, { "120", "120%" }, { "130", "130%" }, { "140", "140%" }, { "150", "150%" }, { "160", "160%" },
+                                                                   { "170", "170%" }, { "180", "180%" }, { "190", "190%" }, { "200", "200%" } } },
         { "Image", "RACACIT_RES_SCALE", "Internal resolution", "1", { { "0.5", "0.5x (480x352)" }, { "0.75", "0.75x (720x528)" }, { "1", "1x (960x704, PS3)" }, { "1.5", "1.5x (1440x1056)" }, { "2", "2x (1920x1408)" }, { "3", "3x (2880x2112)" }, { "4", "4x (3840x2816)" } } },
         { "Image", "RACACIT_UPSCALE", "Upscaling", "bilinear", { { "bilinear", "Bilinear" }, { "sharp", "Sharp (bicubic + sharpen)" }, { "nearest", "Nearest (pixelated)" } } },
         { "Image", "RACACIT_SHARPNESS", "Sharpness", "5", { { "0", "0%" }, { "1", "10%" }, { "2", "20%" }, { "3", "30%" }, { "4", "40%" }, { "5", "50%" }, { "6", "60%" }, { "7", "70%" }, { "8", "80%" }, { "9", "90%" }, { "10", "100%" } } },
@@ -240,7 +255,7 @@ static const std::vector<Opt>& opts()
         { "Image", "RACACIT_ANISO", "Anisotropic filtering", "0", { { "0", "Off" }, { "2", "2x" }, { "4", "4x" }, { "8", "8x" }, { "16", "16x" } } },
         { "Image", "RACACIT_TRILINEAR", "Trilinear filtering", "0", { { "0", "Off" }, { "1", "On" } } },
         { "Image", "RACACIT_TEX_QUALITY", "Texture quality", "high", { { "high", "High (original)" }, { "medium", "Medium" }, { "low", "Low" } } },
-        { "Performance", "RACACIT_PRESENT_PACE", "Frame pacing", "0", { { "0", "Off" }, { "1", "On (even 60 Hz, turn on if motion stutters)" } } },
+        { "Performance", "RACACIT_PRESENT_PACE", "Frame pacing", kPaceDefault, { { "0", "Off" }, { "1", "On (even 60 Hz, turn on if motion stutters)" } } },
         // Into the Nexus only (add_options): the game's own 30 fps mode, as on the PS3. The game
         // reads NEXUS_FPS=30 at start (rac-nexus patch_lift_nexus.py fps60); unset = 60 fps.
         { "Performance", "NEXUS_FPS", "Frame rate", "", { { "", "60 fps" }, { "30", "30 fps (as the PS3)" } } },
@@ -565,6 +580,7 @@ static void add_options(const std::vector<std::string>& sections)
         if (!strncmp(o.key, "NEXUS_", 6) && g_prof != &kNexusProfile) continue;   /* Into the Nexus's own */
         if (!strcmp(o.key, "RACACIT_GAME_UPDATE") && g_prof != &kRacitProfile) continue;   /* A Crack in Time's own */
         if (!strcmp(o.key, "RACACIT_FPS_CAP") && g_prof != &kRacitProfile) continue;
+        if ((!strcmp(o.key, "RACACIT_FOV") || !strcmp(o.key, "RACACIT_CAM_DIST")) && g_prof != &kRacitProfile) continue;   /* A Crack in Time's camera hooks */
         if (section != o.section) {
             section = o.section; scr.items.push_back(header(section));
             if (section == "Controller") scr.items.push_back(ds_plus_item());
@@ -1104,7 +1120,7 @@ static void updates_screen();
 /* The Into the Nexus build that ships with this launcher version. A 1.0.0 launcher updating to
  * 1.0.1 installs the launcher and A Crack in Time but not nexus\builds (its installer did not
  * know that part), so the same release is offered once more, and this launcher installs it. */
-static const int kNexusBuild = 97;
+static const int kNexusBuild = 107;
 static bool nexus_behind()
 {
     std::error_code ec;
