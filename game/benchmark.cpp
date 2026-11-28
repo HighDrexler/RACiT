@@ -193,7 +193,9 @@ extern "C" void racit_benchmark_setup(void)
     if (!*(volatile const char*)racit_feature_benchmark) return;
     const char* settings = std::getenv("RACACIT_SETTINGS_FILE");
     s_dir = settings && *settings ? fs::path(settings).parent_path() : fs::current_path();
-    s_result = s_dir / "benchmark.txt";   // the launcher clears it before a run and reads it after
+    // The launcher names a result file per run. Run by hand, it goes beside settings.txt.
+    const char* result = std::getenv("RACACIT_BENCHMARK_RESULT");
+    s_result = result && *result ? fs::path(result) : s_dir / "benchmark.txt";
     std::error_code ec;
 
     // Where the saves are, in the runtime's order (cellSaveData.c save_root):
@@ -219,8 +221,11 @@ extern "C" void racit_benchmark_setup(void)
         const fs::path p = d.path();
         if (!d.is_directory(ec) || p.filename().string().rfind("benchmark-run-", 0) != 0) continue;
         if (!fs::exists(p / ".racit-benchmark-run", ec)) continue;
-        if (fs::exists(p / ".racit-benchmark-done", ec) || fs::last_write_time(p / ".racit-benchmark-run", ec) < day_ago)
-            fs::remove_all(p, ec);
+        if (fs::exists(p / ".racit-benchmark-done", ec)) { fs::remove_all(p, ec); continue; }
+        ec.clear();
+        const auto made = fs::last_write_time(p / ".racit-benchmark-run", ec);
+        if (!ec && made < day_ago) fs::remove_all(p, ec);   // a time that cannot be read keeps the folder
+        ec.clear();
     }
     ec.clear();
     s_run = s_dir / ("benchmark-run-" + std::to_string((unsigned long long)

@@ -1554,6 +1554,9 @@ static void game_exited(DWORD code)
         g_benchmark_run = false;
         std::ifstream f(S->benchmark_result(), std::ios::binary);
         std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        f.close();
+        std::error_code rec;
+        fs::remove(S->benchmark_result(), rec);   // shown once, then gone
         while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) text.pop_back();
         message("Benchmark", text.empty() ? std::string("No result: the run did not finish. More > Logs has the game's log.") : text);
     }

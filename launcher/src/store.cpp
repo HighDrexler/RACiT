@@ -22,6 +22,7 @@ extern char** environ;
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -1951,7 +1952,14 @@ std::string Store::launch(void** process, bool prepare, bool benchmark)
         fs::remove(cache() / L"shaders.progress", ec);
     }
     set[L"RACACIT_LAUNCHER"] = L"1";
-    if (benchmark) set[L"RACACIT_BENCHMARK"] = L"1";
+    if (benchmark) {
+        // Each run its own result file, so a second game window never overwrites the
+        // one this launch shows.
+        bench_result_ = data() / (L"benchmark-" + std::to_wstring((unsigned long long)
+            std::chrono::system_clock::now().time_since_epoch().count()) + L".txt");
+        set[L"RACACIT_BENCHMARK"] = L"1";
+        set[L"RACACIT_BENCHMARK_RESULT"] = bench_result_.wstring();
+    }
     set[L"RACIT_GAME_VERSION"] = widen(g_launcher_version);   // code mods' racit_api.game_version
     std::wstring modlist;
     const auto all = mods();
