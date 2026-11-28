@@ -209,7 +209,8 @@ public:
     // beside their exe (v65 and older) get them too.
     // prepare: the shader prepare instead (RACACIT_PREPARE=1: no window, no game, every
     // pipeline in data\cache\pipelinelist.bin built on all cores, then it exits; Windows only).
-    std::string launch(void** process, bool prepare = false);   // Windows: a process HANDLE; macOS: a ChildProcess*
+    std::string launch(void** process, bool prepare = false, bool benchmark = false);
+    fs::path benchmark_result() const { return bench_result_; }   // this launch's result file (RACACIT_BENCHMARK_RESULT), empty before one
 
     // Shaders (data\cache): pipelinelist.bin (the pipelines recorded), shaders.state (the game
     // writes it each start: the cache ok / empty / refused, the graphics driver), shaders.stamp
@@ -232,11 +233,12 @@ public:
     void collect_log();
     fs::path launched_dir;
 private:
+    fs::path bench_result_;   // set by launch() for a benchmark run
     bool plays_update(const std::string& title_id) const;
     BuildInfo build_for(bool update120, const std::string& title_id) const;
     std::string prepare_update_hdd();   // update files and the disc's installed data into hdd_update()
 #ifdef __APPLE__
 private:
-    std::string launch_mac(const BuildInfo& b, const fs::path& eboot, std::map<std::wstring, std::wstring>& set, void** process);
+    std::string launch_mac(const BuildInfo& b, const fs::path& eboot, std::map<std::wstring, std::wstring>& set, void** process, bool benchmark);
 #endif
 };

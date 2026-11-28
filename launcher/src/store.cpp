@@ -22,6 +22,7 @@ extern char** environ;
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -189,6 +190,17 @@ static const char* kIniTemplate =
     "# With update 1.20 added: which version Play runs, 1.20 or 1.00\r\n"
     "play_version=1.20\r\n";
 
+// launcher\mods\dualsense_plus\mod.json, for a game folder that has no copy (Store::Store).
+static const char kDsPlusModJson[] =
+    "{\r\n"
+    "  \"id\": \"dualsense_plus\",\r\n"
+    "  \"name\": \"DualSense Plus\",\r\n"
+    "  \"version\": \"1.0\",\r\n"
+    "  \"author\": \"RACiT\",\r\n"
+    "  \"description\": \"PS5 DualSense extras: game sounds on the controller speaker, haptic feedback, adaptive triggers, the light bar, motion, and Fire on R2 (Rift Apart layout) with prompts to match. Off: every controller, a DualSense too, plays as a plain pad with the game's own layout and prompts. Your choices in Settings > Controls are kept while it is off.\",\r\n"
+    "  \"settings\": { \"RACACIT_DUALSENSE_PLUS\": \"1\" }\r\n"
+    "}\r\n";
+
 Store::Store(fs::path r, const GameProfile* p) : root(std::move(r)), prof(p)
 {
     std::error_code ec;
@@ -201,6 +213,19 @@ Store::Store(fs::path r, const GameProfile* p) : root(std::move(r)), prof(p)
         settings.load();
     }
     if (!ini.load()) { write_text_atomic(ini.path, kIniTemplate); ini.load(); }
+    // Into the Nexus's copy of the stock DualSense Plus mod (A Crack in Time's comes in the zip's
+    // mods\): the 1.2 zip had none in nexus\mods, and an update installs builds, not mods, so a
+    // player could not get it at all. Once per install (a marker in data\, not launcher.ini: the
+    // other game's Store saves its own copy of that later), so removing the mod keeps it removed.
+    if (prof->folder && *prof->folder && !fs::exists(data() / L"ds_plus_seeded.txt", ec)) {
+        const fs::path d = mods_dir() / L"dualsense_plus";
+        if (!fs::exists(d / L"mod.json", ec)) {
+            fs::create_directories(d, ec);
+            write_text_atomic(d / L"mod.json", kDsPlusModJson);
+        }
+        write_text_atomic(data() / L"ds_plus_seeded.txt",
+                          "The launcher added mods\\dualsense_plus here once (Store::Store).\r\n");
+    }
 }
 
 void Store::reload() { settings.load(); ini.load(); }
@@ -1876,9 +1901,23 @@ bool Store::shader_progress(int out[5]) const
 }
 
 // ---- launch -----------------------------------------------------------------------------
+// Whether a game program has a feature: game/benchmark.cpp keeps a marker text in it.
+static bool program_has(const fs::path& exe, const std::string& marker)
+{
+    std::ifstream f(exe, std::ios::binary);
+    if (!f) return false;
+    std::string buf(1 << 20, 0), carry;
+    while (f) {
+        f.read(&buf[0], (std::streamsize)buf.size());
+        const std::string chunk = carry + buf.substr(0, (size_t)f.gcount());
+        if (chunk.find(marker) != std::string::npos) return true;
+        carry = chunk.size() >= marker.size() ? chunk.substr(chunk.size() - marker.size() + 1) : chunk;
+    }
+    return false;
+}
 static std::wstring fwd(const fs::path& p) { std::wstring s = p.wstring(); for (auto& c : s) if (c == L'\\') c = L'/'; return s; }
 
-std::string Store::launch(void** process, bool prepare)
+std::string Store::launch(void** process, bool prepare, bool benchmark)
 {
     *process = nullptr;
     reload();
@@ -1892,7 +1931,8 @@ std::string Store::launch(void** process, bool prepare)
     if (u120) { const std::string r = prepare_update_hdd(); if (!r.empty()) return "Could not set up update 1.20: " + r; }
     const fs::path eboot = u120 ? update_elf() : g.root / L"PS3_GAME" / L"USRDIR" / L"EBOOT.elf";
     seed_caches(b);   // a prepare too: a new build's shipped pipelines are then built as well
-    if (!prepare && ini.get("backup_on_play", "1") != "0") {
+    // A benchmark plays from a copy of the saves (game/benchmark.cpp): nothing to back up.
+    if (!prepare && !benchmark && ini.get("backup_on_play", "1") != "0") {
         /* A backup that cannot be made must not keep the game from starting
          * (GitHub #5: "backup save failed, game won't open"); the reason goes
          * to logs\backup_failed.txt. */
@@ -1936,6 +1976,14 @@ std::string Store::launch(void** process, bool prepare)
         fs::remove(cache() / L"shaders.progress", ec);
     }
     set[L"RACACIT_LAUNCHER"] = L"1";
+    if (benchmark) {
+        // Each run its own result file, so a second game window never overwrites the
+        // one this launch shows.
+        bench_result_ = data() / (L"benchmark-" + std::to_wstring((unsigned long long)
+            std::chrono::system_clock::now().time_since_epoch().count()) + L".txt");
+        set[L"RACACIT_BENCHMARK"] = L"1";
+        set[L"RACACIT_BENCHMARK_RESULT"] = bench_result_.wstring();
+    }
     set[L"RACIT_GAME_VERSION"] = widen(g_launcher_version);   // code mods' racit_api.game_version
     std::wstring modlist;
     const auto all = mods();
@@ -1953,7 +2001,7 @@ std::string Store::launch(void** process, bool prepare)
 
 #ifdef __APPLE__
     if (prepare) return "Preparing shaders is not available on this system yet.";
-    return launch_mac(b, eboot, set, process);
+    return launch_mac(b, eboot, set, process, benchmark);
 #else
     std::wstring env;
     if (wchar_t* cur = GetEnvironmentStringsW()) {
@@ -1984,6 +2032,12 @@ std::string Store::launch(void** process, bool prepare)
               "Set Settings > Performance > Game build to Automatic or Standard."
             : "This PC's processor has no AVX2, and build v" + std::to_string(b.version) + " has no version for "
               "older processors (" + prog + "). Install a release that includes one.";
+    if (benchmark) {
+        if (!program_has(exe, "RACIT-FEATURE:benchmark-2"))
+            return "Build v" + std::to_string(b.version) + " has no benchmark mode, and would play from your own saves. "
+                   "Install the latest release to run the benchmark.";
+        fs::remove(benchmark_result(), ec);   // a result from an earlier run is never shown as this one
+    }
     std::wstring cl = L"\"" + exe.wstring() + L"\" \"" + eboot.wstring() + L"\"";
     // An older build writes log.txt beside itself: clear the last one so a stale
     // file is never taken for this session's.
@@ -2009,7 +2063,7 @@ std::string Store::launch(void** process, bool prepare)
 // same environment as on Windows, the game folder named outright (PS3_VFS_ROOT), the
 // Vulkan loader and MoltenVK beside the build (builds/vNN/lib, unless settings.txt names
 // others), and stdout + stderr into data/log.txt.
-std::string Store::launch_mac(const BuildInfo& b, const fs::path& eboot, std::map<std::wstring, std::wstring>& set, void** process)
+std::string Store::launch_mac(const BuildInfo& b, const fs::path& eboot, std::map<std::wstring, std::wstring>& set, void** process, bool benchmark)
 {
     std::error_code ec;
     auto ours = [&](const wchar_t* k) { for (auto& kv : set) if (_wcsicmp(kv.first.c_str(), k) == 0) return true; return false; };
@@ -2030,6 +2084,12 @@ std::string Store::launch_mac(const BuildInfo& b, const fs::path& eboot, std::ma
     for (auto& kv : set) env.push_back(narrow(kv.first) + "=" + narrow(kv.second));
 
     const fs::path exe = b.dir / RACIT_GAME_EXE;
+    if (benchmark) {   // as on Windows (launch)
+        if (!program_has(exe, "RACIT-FEATURE:benchmark-2"))
+            return "Build v" + std::to_string(b.version) + " has no benchmark mode, and would play from your own saves. "
+                   "Install the latest release to run the benchmark.";
+        fs::remove(benchmark_result(), ec);
+    }
     fs::remove(b.dir / L"log.txt", ec);
     launched_dir = b.dir;
     clear_quarantine(b.dir);

@@ -18,7 +18,9 @@
 #include <algorithm>
 #include <cmath>
 #include <ctime>
+#include <fstream>
 #include <functional>
+#include <iterator>
 #include <thread>
 #include <vector>
 
@@ -252,6 +254,7 @@ static const std::vector<Opt>& opts()
         { "Image", "RACACIT_UPSCALE", "Upscaling", "bilinear", { { "bilinear", "Bilinear" }, { "sharp", "Sharp (bicubic + sharpen)" }, { "nearest", "Nearest (pixelated)" } } },
         { "Image", "RACACIT_SHARPNESS", "Sharpness", "5", { { "0", "0%" }, { "1", "10%" }, { "2", "20%" }, { "3", "30%" }, { "4", "40%" }, { "5", "50%" }, { "6", "60%" }, { "7", "70%" }, { "8", "80%" }, { "9", "90%" }, { "10", "100%" } } },
         { "Image", "RACACIT_BRIGHTNESS", "Brightness", "0", { { "-5", "-5" }, { "-4", "-4" }, { "-3", "-3" }, { "-2", "-2" }, { "-1", "-1" }, { "0", "Default" }, { "1", "+1" }, { "2", "+2" }, { "3", "+3" }, { "4", "+4" }, { "5", "+5" } } },
+        { "Image", "RACACIT_BLOOM", "Bloom", "on", { { "on", "On" }, { "off", "Off" } } },
         { "Image", "RACACIT_ANISO", "Anisotropic filtering", "0", { { "0", "Off" }, { "2", "2x" }, { "4", "4x" }, { "8", "8x" }, { "16", "16x" } } },
         { "Image", "RACACIT_TRILINEAR", "Trilinear filtering", "0", { { "0", "Off" }, { "1", "On" } } },
         { "Image", "RACACIT_TEX_QUALITY", "Texture quality", "high", { { "high", "High (original)" }, { "medium", "Medium" }, { "low", "Low" } } },
@@ -287,6 +290,7 @@ static const std::vector<Opt>& opts()
         { "Game", "RACACIT_LANGUAGE", "Language", "", { { "", "English" }, { "fr", "Français (French)" }, { "es", "Español (Spanish)" }, { "de", "Deutsch (German)" }, { "it", "Italiano (Italian)" }, { "nl", "Nederlands (Dutch)" } } },
         { "Game", "RACACIT_SKIP_INTRO", "Logos and notices at boot", "0", { { "0", "Show (as the game)" }, { "1", "Skip" } } },
         { "Game", "RACACIT_SKIP_PRESS_START", "PRESS START screen", "0", { { "0", "Show (as the game)" }, { "1", "Skip (with logos skipped)" } } },
+        { "Game", "RACACIT_AUTO_CONTINUE", "Continue at start", "0", { { "0", "Off (main menu)" }, { "1", "Load the latest save" } } },
         { "Game", "RACACIT_START_SKIPS_MOVIES", "START skips movies", "1", { { "1", "Yes" }, { "0", "No" } } },
         { "Game", "RACACIT_ALL_CUTSCENES_SKIPPABLE", "Every cutscene skippable", "1", { { "1", "Yes" }, { "0", "No (as the game)" } } },
         { "Game", "RACACIT_SPACE_FREE_LANDING", "Land anywhere in space", "1", { { "1", "Yes" }, { "0", "No (as the game)" } } },
@@ -361,6 +365,7 @@ static int step_choice(const std::vector<std::pair<std::string, std::string>>& c
 // ---- screens ------------------------------------------------------------------------------
 static void home();
 static void play();
+static void benchmark();
 static void switch_game(int k);   // the game bar
 
 static Item button(const std::string& label, const std::string& sub, std::function<void()> act, bool enabled = true)
@@ -1492,6 +1497,8 @@ static void more_screen()
     scr.items.push_back(button("Your game", "Import it again, or use another copy", [] { set_screen(import_screen); }));
     scr.items.push_back(button("Mods", "", [] { set_screen(mods_screen); }));
     scr.items.push_back(button("Logs", "For bug reports", [] { set_screen(logs_screen); }));
+    scr.items.push_back(button("Benchmark", game_proc ? "Not while the game is running" : "Two minutes from your latest save, then the frame rate. Your saves don't change",
+                               [] { set_screen(home); benchmark(); }, b.version != 0 && S->game().ok && !game_proc));
     scr.items.push_back(button("Check for updates", g_update_ready ? "An update is available" : "", open_updates));
     scr.items.push_back(button("Help", "", [] { set_screen(help_screen); }));
     scr.items.push_back(button("Back", "", [] { set_screen(home); }));
@@ -1501,13 +1508,16 @@ static void more_screen()
 static void pad_close();
 static void pad_open();
 
-static void play()
+static bool g_benchmark_run;   // the running game is a benchmark: show its result when it ends
+
+static void start_game(bool benchmark)
 {
     if (game_proc) return;
     // The controller goes to the game: SDL's HID access here would compete with it.
     pad_close();
     void* h = nullptr;
-    const std::string r = S->launch(&h);
+    const std::string r = S->launch(&h, false, benchmark);
+    g_benchmark_run = benchmark && r.empty();
     if (!r.empty()) { pad_open(); message("Cannot start", r); return; }
     game_proc = (HANDLE)h;
     game_start = GetTickCount64();
@@ -1521,6 +1531,8 @@ static void play()
     else if (w != "stay") ShowWindow(g_hwnd, SW_MINIMIZE);
     refresh();
 }
+static void play() { start_game(false); }
+static void benchmark() { start_game(true); }
 
 static void game_exited(DWORD code)
 {
@@ -1540,6 +1552,16 @@ static void game_exited(DWORD code)
     g_sh_checked = false;   // the game may have found a new driver: offer the prepare (once)
     if (scr.title == S->prof->name) set_screen(home);   // back on Play
     else refresh();
+    if (g_benchmark_run) {
+        g_benchmark_run = false;
+        std::ifstream f(S->benchmark_result(), std::ios::binary);
+        std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        f.close();
+        std::error_code rec;
+        fs::remove(S->benchmark_result(), rec);   // shown once, then gone
+        while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) text.pop_back();
+        message("Benchmark", text.empty() ? std::string("No result: the run did not finish. More > Logs has the game's log.") : text);
+    }
 }
 
 // ---- gamepad (SDL) ------------------------------------------------------------------------------
