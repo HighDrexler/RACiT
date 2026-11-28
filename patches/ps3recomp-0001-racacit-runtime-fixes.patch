@@ -2438,7 +2438,7 @@ index 4d916ac7..1dfee100 100644
      if (flags & CELL_FS_O_CREAT) {
          ensure_parent_dirs(host_path);
 diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
-index 5f8a2fa2..1fb84208 100644
+index 5f8a2fa2..4c04678f 100644
 --- a/libs/input/cellPad.c
 +++ b/libs/input/cellPad.c
 @@ -13,11 +13,13 @@
@@ -2480,6 +2480,15 @@ index 5f8a2fa2..1fb84208 100644
  static int s_sdl_inited = 0;
  #endif
  
+@@ -133,7 +134,7 @@ static void pad_host_release(PadHostState* hs)
+   #define pad_yield() Sleep(0)
+ #else
+   #include <sched.h>
+-  #define pad_yield() sched_yield()
++  #define pad_yield() ps3_yield()
+ #endif
+ static volatile char s_poll_lock;
+ static int  pad_lock_try(void) { return !__atomic_test_and_set(&s_poll_lock, __ATOMIC_ACQUIRE); }
 @@ -487,6 +488,7 @@ static void pad_poll_xinput(void)
          s_host_state[i].press_l1       = (btns & CELL_PAD_CTRL_L1)       ? 255 : 0;
          s_host_state[i].press_r1       = (btns & CELL_PAD_CTRL_R1)       ? 255 : 0;
@@ -6385,6 +6394,20 @@ index adfbf89c..9dee085c 100644
  
  s32 cellSpursEventFlagSet(CellSpursEventFlag* eventFlag, u16 bits);
  s32 cellSpursEventFlagWait(CellSpursEventFlag* eventFlag, u16* bits,
+diff --git a/libs/sync/cellSync.c b/libs/sync/cellSync.c
+index 0a0c8540..61d31d56 100644
+--- a/libs/sync/cellSync.c
++++ b/libs/sync/cellSync.c
+@@ -23,7 +23,8 @@
+ #define SYNC_YIELD() SwitchToThread()
+ #else
+ #include <sched.h>
+-#define SYNC_YIELD() sched_yield()
++void ps3_yield(void);   /* runtime/platform/win32_compat.c */
++#define SYNC_YIELD() ps3_yield()
+ #endif
+ 
+ /* CellSyncMutex is 4 bytes and must be 4-byte aligned: every entry point
 diff --git a/libs/system/cellGame.c b/libs/system/cellGame.c
 index 2d4a54d4..49dff976 100644
 --- a/libs/system/cellGame.c
@@ -7021,7 +7044,7 @@ index 4aeaee66..d8be6fbe 100644
   * Internal: Heap table
   * -----------------------------------------------------------------------*/
 diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
-index f073f327..e08ef642 100644
+index f073f327..7924f48b 100644
 --- a/libs/video/cellGcmSys.c
 +++ b/libs/video/cellGcmSys.c
 @@ -34,6 +34,7 @@ static u32 s_gcm_context_ea = 0;
@@ -7626,7 +7649,7 @@ index f073f327..e08ef642 100644
 +#ifdef _WIN32
 +        SwitchToThread();
 +#else
-+        sched_yield();
++        ps3_yield();
 +#endif
 +    }
 +    { static int n = 0;
@@ -31795,7 +31818,7 @@ index 00000000..d3e4aa2d
 +typedef int ps3_setjmp_win64_unused;
 +#endif
 diff --git a/runtime/platform/win32_compat.c b/runtime/platform/win32_compat.c
-index 11a74804..2251ce0b 100644
+index 11a74804..007feae7 100644
 --- a/runtime/platform/win32_compat.c
 +++ b/runtime/platform/win32_compat.c
 @@ -453,7 +453,14 @@ static void apply_priority(pthread_t pt, DWORD tid, int level, int is_self)
@@ -31814,8 +31837,40 @@ index 11a74804..2251ce0b 100644
      cpu_set_t set; CPU_ZERO(&set);
      for (unsigned i = 0; i < 8 * sizeof mask && i < CPU_SETSIZE; i++)
          if (mask & ((DWORD_PTR)1 << i)) CPU_SET(i, &set);
+@@ -2012,3 +2019,31 @@ LPTOP_LEVEL_EXCEPTION_FILTER SetUnhandledExceptionFilter(LPTOP_LEVEL_EXCEPTION_F
+ /* Nothing to build: the header is a passthrough to <windows.h> there. */
+ typedef int ps3_win32_compat_not_needed_on_windows;
+ #endif
++
++#ifndef _WIN32
++/* The runtime's yield (Sleep(0), SwitchToThread, the SPU lock-line spins, the
++ * event queues, cellSync, cellPad's poll lock, cellGcm's FIFO sync). On macOS
++ * sched_yield is swtch_pri(0), which also depresses the caller's priority for a
++ * scheduler quantum: with more runnable threads than cores (main, RSX walker,
++ * SPU lanes) a lane that yielded while waiting for the lock-line lock sat out
++ * ~10 ms, and the main thread's collision request waited with it, once or more
++ * a second. thread_switch with no option hands the CPU over without the
++ * depression. PS3_YIELD=sched restores sched_yield. */
++#include <sched.h>
++#ifdef __APPLE__
++#include <mach/mach.h>
++#include <mach/thread_switch.h>
++#endif
++void ps3_yield(void)
++{
++#ifdef __APPLE__
++    /* Every thread reads it. A racing first call only sets the same value,
++     * so relaxed loads and stores are enough. */
++    static int plain = -1;
++    int p = __atomic_load_n(&plain, __ATOMIC_RELAXED);
++    if (p < 0) { const char* e = getenv("PS3_YIELD"); p = e && !strcmp(e, "sched"); __atomic_store_n(&plain, p, __ATOMIC_RELAXED); }
++    if (!p) { thread_switch(MACH_PORT_NULL, SWITCH_OPTION_NONE, 0); return; }
++#endif
++    sched_yield();
++}
++#endif
 diff --git a/runtime/platform/win32_compat.h b/runtime/platform/win32_compat.h
-index 30538f14..7cf95490 100644
+index 30538f14..996552df 100644
 --- a/runtime/platform/win32_compat.h
 +++ b/runtime/platform/win32_compat.h
 @@ -467,6 +467,13 @@ static inline void InitializeSRWLock(SRWLOCK* l)          { *l = NULL; }
@@ -31853,6 +31908,27 @@ index 30538f14..7cf95490 100644
  static inline void WakeAllConditionVariable(CONDITION_VARIABLE* c)
  {
      ps3_condvar* cv = ps3_cv(c);
+@@ -709,14 +730,18 @@ static inline void GetSystemTimeAsFileTime(FILETIME* ft)
+ }
+ static inline void GetSystemTimePreciseAsFileTime(FILETIME* ft) { GetSystemTimeAsFileTime(ft); }
+ 
++/* ps3_yield (win32_compat.c): the yield Sleep(0), SwitchToThread and the
++ * runtime's spin loops use. On macOS sched_yield also depresses the caller's
++ * priority for a scheduler quantum (~10 ms) when the machine is busy. */
++void ps3_yield(void);
+ static inline void Sleep(DWORD ms)
+ {
+-    if (ms == 0) { sched_yield(); return; }      /* Sleep(0) yields, as on Windows */
++    if (ms == 0) { ps3_yield(); return; }        /* Sleep(0) yields, as on Windows */
+     struct timespec d = { (time_t)(ms / 1000u), (long)(ms % 1000u) * 1000000L };
+     nanosleep(&d, NULL);
+ }
+ static inline DWORD SleepEx(DWORD ms, BOOL alertable) { (void)alertable; Sleep(ms); return 0; }
+-static inline BOOL  SwitchToThread(void)              { sched_yield(); return TRUE; }
++static inline BOOL  SwitchToThread(void)              { ps3_yield(); return TRUE; }
+ static inline UINT  timeBeginPeriod(UINT period)      { (void)period; return TIMERR_NOERROR; }
+ static inline UINT  timeEndPeriod(UINT period)        { (void)period; return TIMERR_NOERROR; }
+ 
 diff --git a/runtime/ppu/ppu_context.h b/runtime/ppu/ppu_context.h
 index 4199c58b..b9676016 100644
 --- a/runtime/ppu/ppu_context.h
@@ -34446,7 +34522,7 @@ index 00000000..61e1a1c3
 +#endif
 +}
 diff --git a/runtime/spu/spu_channels.c b/runtime/spu/spu_channels.c
-index 84b7ac96..2d49f118 100644
+index 84b7ac96..3521087b 100644
 --- a/runtime/spu/spu_channels.c
 +++ b/runtime/spu/spu_channels.c
 @@ -23,7 +23,7 @@
@@ -34726,7 +34802,7 @@ index 84b7ac96..2d49f118 100644
 +#ifdef _WIN32
 +        SwitchToThread();
 +#else
-+        sched_yield();
++        ps3_yield();
 +#endif
 +        return;
 +    }
@@ -38921,6 +38997,56 @@ index 9041b409..f2628c56 100644
  #endif
      if (timeout > ((1ull << 48) - 1)) timeout = (1ull << 48) - 1;
  #ifdef _WIN32
+diff --git a/runtime/syscalls/sys_event.c b/runtime/syscalls/sys_event.c
+index 6f72c1e8..609280c8 100644
+--- a/runtime/syscalls/sys_event.c
++++ b/runtime/syscalls/sys_event.c
+@@ -11,6 +11,9 @@
+ #include <string.h>
+ #include <stdlib.h>               /* getenv */
+ #include "ps3emu/log_first.h"
++#ifndef _WIN32
++void ps3_yield(void);   /* runtime/platform/win32_compat.c */
++#endif
+ 
+ /* Recorded by sys_spu_thread_initialize (lv2_register.c): the SPURS kernel
+  * context EA the title's SPU task runtime is dispatched against. */
+@@ -281,7 +284,7 @@ int64_t sys_event_queue_destroy(ppu_context* ctx)
+     pthread_cond_broadcast(&q->not_empty);
+     while (q->waiters > 0) {
+         pthread_mutex_unlock(&q->lock);
+-        sched_yield();
++        ps3_yield();
+         pthread_mutex_lock(&q->lock);
+     }
+     pthread_mutex_unlock(&q->lock);
+@@ -388,7 +391,7 @@ int64_t sys_event_queue_receive(ppu_context* ctx)
+ #ifdef _WIN32
+         SwitchToThread();
+ #else
+-        sched_yield();
++        ps3_yield();
+ #endif
+     /* WAITBT_EVERY=<n>: the same dump, but every nth wait per (tid,queue)
+      * instead of once. The one-shot above names where a thread FIRST parks,
+@@ -418,7 +421,7 @@ int64_t sys_event_queue_receive(ppu_context* ctx)
+ #ifdef _WIN32
+         SwitchToThread();
+ #else
+-        sched_yield();
++        ps3_yield();
+ #endif
+         return (int64_t)(int32_t)CELL_ESRCH;
+     }
+@@ -1338,7 +1341,7 @@ int64_t sys_event_flag_wait(ppu_context* ctx)
+ #ifdef _WIN32
+         SwitchToThread();
+ #else
+-        sched_yield();
++        ps3_yield();
+ #endif
+         return (int64_t)(int32_t)CELL_ESRCH;
+     }
 diff --git a/runtime/syscalls/sys_fs.c b/runtime/syscalls/sys_fs.c
 index e435555a..62c5e04e 100644
 --- a/runtime/syscalls/sys_fs.c
@@ -39073,7 +39199,7 @@ index f394a033..b3dd696f 100644
  int64_t sys_mmapper_search_map_address(uint32_t start, uint32_t size, uint32_t* out);
  int64_t sys_mmapper_free_address(ppu_context* ctx);
 diff --git a/runtime/syscalls/sys_ppu_thread.c b/runtime/syscalls/sys_ppu_thread.c
-index b997931b..3d048c2f 100644
+index b997931b..24f37f74 100644
 --- a/runtime/syscalls/sys_ppu_thread.c
 +++ b/runtime/syscalls/sys_ppu_thread.c
 @@ -2,7 +2,7 @@
@@ -39285,6 +39411,15 @@ index b997931b..3d048c2f 100644
          SetThreadPriority(t->host_thread, THREAD_PRIORITY_ABOVE_NORMAL);
  #else
      /* Same reservation, for the same reason. This is the HOST stack the
+@@ -1253,7 +1370,7 @@ int64_t sys_ppu_thread_yield(ppu_context* ctx)
+ #ifdef _WIN32
+     SwitchToThread();
+ #else
+-    sched_yield();
++    ps3_yield();
+ #endif
+     return CELL_OK;
+ }
 @@ -1271,7 +1388,10 @@ int64_t sys_ppu_thread_get_priority(ppu_context* ctx)
  
      table_lock();
@@ -40142,6 +40277,18 @@ index f3d4163a..3ef96645 100644
  #ifdef _WIN32
  /* Sub-millisecond timed-wait support for the lv2 sync primitives.
   * SleepConditionVariableCS / WaitForSingleObject floor a timed wait to 1 ms,
+diff --git a/tests/sync_stress/test_cellsync_mutex.c b/tests/sync_stress/test_cellsync_mutex.c
+index 7cf5b08f..99e9214b 100644
+--- a/tests/sync_stress/test_cellsync_mutex.c
++++ b/tests/sync_stress/test_cellsync_mutex.c
+@@ -19,6 +19,7 @@ void spu_lockline_lock(void) {}
+ void spu_lockline_unlock(void) {}
+ int  spu_coh_is_reserved(uint32_t ea) { (void)ea; return 0; }
+ void spu_coh_notify_write(uint32_t ea) { (void)ea; }
++void ps3_yield(void) {}                       /* runtime/platform/win32_compat.c; one thread here */
+ 
+ static int failures;
+ #define CHECK_RC(call, want) do { int32_t _rc = (int32_t)(call); \
 diff --git a/tools/extract_spu_images.py b/tools/extract_spu_images.py
 index 0c15cb73..11dd4030 100644
 --- a/tools/extract_spu_images.py
