@@ -219,13 +219,17 @@ extern "C" void racit_benchmark_setup(void)
     const std::string stem = (fs::weakly_canonical(fs::absolute(s_dir, ec), ec) / "benchmark-home").string();
     if (real.string().rfind(stem, 0) == 0)
         fail_setup("the saves are in " + real.string() + ", a benchmark copy; set the real save folder");
+    // Copies this mode made carry a marker file, and only those are removed: a folder
+    // that only shares the name (a player's own backup, say) is left alone.
     for (const auto& d : fs::directory_iterator(s_dir, ec))
-        if (d.is_directory(ec) && d.path().filename().string().rfind("benchmark-home", 0) == 0)
-            fs::remove_all(d.path(), ec);   // earlier runs' copies (never the save home, checked above)
+        if (d.is_directory(ec) && d.path().filename().string().rfind("benchmark-home-", 0) == 0 &&
+            fs::exists(d.path() / ".racit-benchmark-copy", ec))
+            fs::remove_all(d.path(), ec);   // an earlier run's copy (never the save home, checked above)
     ec.clear();
     const fs::path copy = s_dir / ("benchmark-home-" + std::to_string((unsigned long long)
         std::chrono::system_clock::now().time_since_epoch().count()));
-    fs::create_directories(copy, ec);
+    fs::create_directory(copy, ec);   // new: fails rather than reuse a folder that exists
+    if (!ec) std::ofstream(copy / ".racit-benchmark-copy", std::ios::binary) << "made by RACACIT_BENCHMARK\n";
     if (!ec && fs::is_directory(from, ec))
         fs::copy(from, copy, fs::copy_options::recursive, ec);
     // Without a full copy, or if the game would not read it, the run could reach the real
